@@ -1,0 +1,98 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "User Profile",
+      "description": "Enterprise user account and subscription state.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "displayName": { "type": "string" },
+        "role": { "type": "string", "enum": ["admin", "user"] },
+        "plan": { "type": "string", "enum": ["free", "pro", "team", "enterprise"] },
+        "minutes_remaining": { "type": "number" },
+        "billing_cycle": { "type": "string", "enum": ["monthly", "yearly"] },
+        "minutesUsed": { "type": "number" },
+        "minutesLimit": { "type": "number" },
+        "thinkingUsageCount": { "type": "number" },
+        "teamId": { "type": "string" },
+        "razorpayCustomerId": { "type": "string" },
+        "totalMinutesProcessed": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "plan"]
+    },
+    "AudioToTextRecord": {
+      "title": "Audio to Text Record",
+      "description": "Transcription record with metadata and segments.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "date": { "type": "string", "format": "date-time" },
+        "fileName": { "type": "string" },
+        "sourceType": { "type": "string", "enum": ["live", "recorded"] },
+        "originalAudioUrl": { "type": "string" },
+        "transcript": { "type": "array", "items": { "type": "object" } },
+        "summary": { "type": "object" },
+        "status": { "type": "string", "enum": ["pending", "processing", "completed", "error", "draft"] },
+        "ownerEmail": { "type": "string" },
+        "ownerUid": { "type": "string" },
+        "speakerMap": { "type": "object" },
+        "group": { "type": "string" },
+        "deletedAt": { "type": "string" }
+      },
+      "required": ["id", "date", "fileName", "status", "ownerUid"]
+    },
+    "TextToAudioRecord": {
+      "title": "Text to Audio Record",
+      "description": "Speech synthesis record.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "date": { "type": "string", "format": "date-time" },
+        "textPreview": { "type": "string" },
+        "fullText": { "type": "string" },
+        "audioUrl": { "type": "string" },
+        "gender": { "type": "string", "enum": ["male", "female"] },
+        "group": { "type": "string" },
+        "ownerUid": { "type": "string" },
+        "deletedAt": { "type": "string" }
+      },
+      "required": ["id", "date", "audioUrl", "ownerUid"]
+    },
+    "Project": {
+      "title": "Project",
+      "description": "Collaboration container for recordings.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "ownerId": { "type": "string" },
+        "isDefault": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "name", "ownerId"]
+    },
+    "DecisionHistory": {
+      "title": "Decision History",
+      "description": "Stored outputs from Decision Intelligence analysis.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "title": { "type": "string" },
+        "inputType": { "type": "string", "enum": ["transcript", "summary"] },
+        "inputText": { "type": "string" },
+        "output": { "type": "object" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "title", "inputType", "inputText", "output", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": { "schema": "UserProfile", "description": "User profiles" },
+    "/audioRecords/{recordId}": { "schema": "AudioToTextRecord", "description": "Transcription records" },
+    "/textRecords/{recordId}": { "schema": "TextToAudioRecord", "description": "Speech synthesis records" },
+    "/projects/{projectId}": { "schema": "Project", "description": "Collaboration groups" },
+    "/decisionHistory/{historyId}": { "schema": "DecisionHistory", "description": "Decision intelligence history" }
+  }
+}
