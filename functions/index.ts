@@ -18,14 +18,31 @@ import axios from 'axios';
 admin.initializeApp();
 const db = admin.firestore();
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || '' });
-const razorpay = new Razorpay({
-  key_id: process.env.RAZORPAY_KEY_ID || '',
-  key_secret: process.env.RAZORPAY_KEY_SECRET || '',
-});
 
-if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET) {
-  console.warn("Razorpay keys are missing in environment variables!");
+function getRazorpay() {
+  // Force fresh read of environment variables from process.env
+  const key_id = process.env.RAZORPAY_KEY_ID?.trim();
+  const key_secret = process.env.RAZORPAY_KEY_SECRET?.trim();
+
+  console.log("🔥 RAZORPAY KEY IN USE (Functions):", key_id);
+
+  if (!key_id || !key_secret) {
+    throw new Error("CRITICAL: Razorpay API keys are missing in functions environment.");
+  }
+
+  // Strict validation for TEST mode
+  if (!key_id.startsWith("rzp_test_")) {
+    console.error("❌ ERROR: Razorpay must use TEST keys (rzp_test_*). Found:", key_id.substring(0, 12) + "...");
+    throw new Error("❌ Razorpay must use TEST keys (rzp_test_*). Please update your keys in the Settings menu.");
+  }
+
+  // Always return a fresh instance to ensure latest env values are used
+  return new Razorpay({
+    key_id,
+    key_secret,
+  });
 }
+
 const resend = new Resend(process.env.RESEND_API_KEY);
 
 const PLAN_LIMITS = {
@@ -79,10 +96,13 @@ export const onAudioUpload = onObjectFinalized(async (event) => {
 
     const aiOutput = JSON.parse(result.text);
 
-    // 4. Store Transcript
-    const transcriptRef = db.collection('transcripts').doc();
-    await transcriptRef.set({
+    // 4. Store Transcription
+    const transcriptionId = db.collection('transcriptions').doc().id;
+    const transcriptionRef = db.collection('transcriptions').doc(transcriptionId);
+    await transcriptionRef.set({
+      transcriptionId,
       recordingId,
+      userId: uid,
       summary: aiOutput.summary,
       actionItems: aiOutput.actionItems,
       segments: aiOutput.segments,
@@ -130,6 +150,7 @@ export const createSubscription = onCall(async (request) => {
   }
 
   try {
+    const razorpay = getRazorpay();
     console.log("Creating Razorpay subscription for plan:", plan, "with planId:", planId);
     const subscription = await razorpay.subscriptions.create({
       plan_id: planId,
@@ -192,10 +213,11 @@ export const razorpayWebhook = onRequest(async (req, res) => {
   const secret = process.env.RAZORPAY_WEBHOOK_SECRET || '';
   const signature = req.headers['x-razorpay-signature'] as string;
 
-  const body = JSON.stringify(req.body);
+  // Use rawBody for signature verification
+  const rawBody = (req as any).rawBody;
   const expectedSignature = crypto
     .createHmac('sha256', secret)
-    .update(body)
+    .update(rawBody)
     .digest('hex');
 
   if (expectedSignature !== signature) {
@@ -321,9 +343,9 @@ export const createProject = onCall(async (request) => {
   const projectRef = db.collection('projects').doc();
   
   await projectRef.set({
-    id: projectRef.id,
+    projectId: projectRef.id,
     name,
-    ownerId: request.auth.uid,
+    userId: request.auth.uid,
     createdAt: admin.firestore.FieldValue.serverTimestamp()
   });
 

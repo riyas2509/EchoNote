@@ -1,8 +1,9 @@
 
 import React, { createContext, useContext, useEffect, useState } from 'react';
-import { auth, onAuthStateChanged, User, db, doc, getDoc, setDoc, onSnapshot } from '../firebase';
+import { auth, onAuthStateChanged, User, db, doc, getDoc, getDocFromServer, setDoc, onSnapshot, updateDoc } from '../firebase';
 import { UserProfile } from '../types';
 import { PLAN_FEATURES } from '../config/planConfig';
+import { shouldReset, getResetMilestone } from '../lib/usageUtils';
 
 interface FirebaseContextType {
   user: User | null;
@@ -29,40 +30,9 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       return;
     }
 
-    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+    const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
       setUser(firebaseUser);
-      
-      if (firebaseUser) {
-        // Fetch or create profile
-        const userDocRef = doc(db, 'users', firebaseUser.uid);
-        
-        // Initial check and creation if needed
-        const userDoc = await getDoc(userDocRef);
-        if (!userDoc.exists()) {
-          const newProfile: UserProfile = {
-            uid: firebaseUser.uid,
-            email: firebaseUser.email || '',
-            name: firebaseUser.displayName || '',
-            role: 'user',
-            plan: 'free',
-            minutesUsed: 0,
-            minutesLimit: PLAN_FEATURES.free.totalMinutesLimit,
-            thinkingUsageCount: 0,
-            createdAt: new Date().toISOString()
-          };
-          await setDoc(userDocRef, newProfile);
-        }
-
-        // Real-time listener
-        const unsubscribeProfile = onSnapshot(userDocRef, (doc) => {
-          if (doc.exists()) {
-            setProfile(doc.data() as UserProfile);
-          }
-        });
-
-        setIsAuthReady(true);
-        return () => unsubscribeProfile();
-      } else {
+      if (!firebaseUser) {
         setProfile(null);
         setIsAuthReady(true);
       }
@@ -70,6 +40,127 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
     return () => unsubscribe();
   }, []);
+
+  useEffect(() => {
+    if (!user) return;
+
+    let unsubscribeProfile: (() => void) | null = null;
+
+    const setupProfile = async () => {
+      try {
+        console.log('Setting up profile for user:', user.uid);
+        
+        const userDocRef = doc(db, 'users', user.uid);
+        
+        // Initial check and creation if needed
+        const userDoc = await getDocFromServer(userDocRef);
+        if (!userDoc.exists()) {
+          const now = new Date();
+          const renewalDate = new Date(now);
+          renewalDate.setDate(renewalDate.getDate() + 30);
+
+          const displayName = user.displayName || user.email?.split('@')[0] || 'User';
+
+          const newProfile: UserProfile = {
+            uid: user.uid,
+            email: user.email || '',
+            name: displayName,
+            displayName: displayName,
+            photoURL: user.photoURL || '',
+            avatarUrl: user.photoURL || '',
+            role: 'user',
+            plan: 'free',
+            minutesUsed: 0,
+            thinkingUsed: 0,
+            extraMinutes: 0,
+            billingStartDate: now.toISOString(),
+            lastResetDate: now.toISOString(),
+            planExpiresAt: renewalDate.toISOString(),
+            createdAt: now.toISOString()
+          };
+          await setDoc(userDocRef, newProfile);
+        } else {
+          // SYNC CHECK: If Firestore profile is missing displayName but Firebase Auth has it
+          const currentData = userDoc.data() as UserProfile;
+          
+          // Check for usage reset
+          if (shouldReset(currentData.billingStartDate, currentData.lastResetDate)) {
+            console.log("♻️ Billing cycle reset triggered...");
+            const milestone = getResetMilestone(currentData.billingStartDate);
+            await updateDoc(userDocRef, {
+              minutesUsed: 0,
+              thinkingUsed: 0,
+              lastResetDate: milestone.toISOString()
+            });
+          }
+
+          if (!currentData.billingStartDate) {
+            console.log("🔄 Initializing billingStartDate for legacy user...");
+            await updateDoc(userDocRef, {
+              billingStartDate: currentData.createdAt || new Date().toISOString()
+            });
+          }
+
+          const syncUpdates: any = {};
+          if (!currentData.displayName && user.displayName) {
+            syncUpdates.displayName = user.displayName;
+            syncUpdates.name = user.displayName;
+          }
+          if (user.photoURL && (!currentData.photoURL || !currentData.avatarUrl)) {
+            syncUpdates.photoURL = user.photoURL;
+            syncUpdates.avatarUrl = user.photoURL;
+          }
+
+          if (Object.keys(syncUpdates).length > 0) {
+            console.log("🔄 Syncing auth profile fields to Firestore...", syncUpdates);
+            await updateDoc(userDocRef, syncUpdates);
+          }
+        }
+
+        // Real-time listener
+        console.log("📡 Firestore listener started: userProfile");
+        unsubscribeProfile = onSnapshot(userDocRef, async (docSnap) => {
+          if (docSnap.exists()) {
+            const data = docSnap.data() as UserProfile;
+            console.log("🔥 Firestore user data sync:", data);
+            
+            // CHECK FOR EXPIRY
+            if (data.plan !== 'free' && data.plan !== 'guest' && data.planExpiresAt) {
+              const expiry = new Date(data.planExpiresAt);
+              if (expiry < new Date()) {
+                console.log("⚠️ Plan expired, downgrading to free...");
+                await updateDoc(userDocRef, {
+                  plan: 'free',
+                  // Optionally keep minutesUsed or reset as per biz logic
+                });
+                return; // Let the next snapshot trigger update state
+              }
+            }
+
+            setProfile(data);
+          }
+          setIsAuthReady(true);
+        }, (error) => {
+          // Ignore permission errors if user is logging out
+          if (auth.currentUser) {
+            console.error('Profile listener error:', error);
+          }
+        });
+      } catch (error) {
+        console.error('Error in profile setup:', error);
+        setIsAuthReady(true);
+      }
+    };
+
+    setupProfile();
+
+    return () => {
+      if (unsubscribeProfile) {
+        console.log("🛑 Firestore listener stopped: userProfile");
+        unsubscribeProfile();
+      }
+    };
+  }, [user]);
 
   return (
     <FirebaseContext.Provider value={{ user, profile, isAuthReady }}>

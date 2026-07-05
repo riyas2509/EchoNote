@@ -7,10 +7,12 @@ import { AuthStatus } from '../types';
 
 interface LandingNavbarProps {
   onLogin: () => void;
+  onStartFree?: () => void;
+  onGoToDashboard?: () => void;
   authStatus?: AuthStatus;
 }
 
-const LandingNavbar: React.FC<LandingNavbarProps> = ({ onLogin, authStatus }) => {
+const LandingNavbar: React.FC<LandingNavbarProps> = ({ onLogin, onStartFree, onGoToDashboard, authStatus }) => {
   const [isScrolled, setIsScrolled] = useState(false);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
@@ -81,12 +83,21 @@ const LandingNavbar: React.FC<LandingNavbarProps> = ({ onLogin, authStatus }) =>
           >
             Log in
           </Link>
-          <Link 
-            to="/app"
-            className="bg-brand-primary text-white text-[13px] font-bold uppercase tracking-widest px-6 py-3 rounded-lg shadow-xl hover:shadow-2xl hover:-translate-y-0.5 transition-all"
-          >
-            {isLoggedIn ? 'Dashboard' : 'Start Free'}
-          </Link>
+          {isLoggedIn ? (
+            <button 
+              onClick={onGoToDashboard}
+              className="bg-brand-primary text-white text-[13px] font-bold uppercase tracking-widest px-6 py-3 rounded-lg shadow-xl hover:shadow-2xl hover:-translate-y-0.5 transition-all"
+            >
+              Dashboard
+            </button>
+          ) : (
+            <button 
+              onClick={onStartFree}
+              className="bg-brand-primary text-white text-[13px] font-bold uppercase tracking-widest px-6 py-3 rounded-lg shadow-xl hover:shadow-2xl hover:-translate-y-0.5 transition-all"
+            >
+              Start Free
+            </button>
+          )}
         </div>
 
         {/* Mobile Menu Toggle */}
@@ -130,13 +141,27 @@ const LandingNavbar: React.FC<LandingNavbarProps> = ({ onLogin, authStatus }) =>
               >
                 Log in
               </Link>
-              <Link 
-                to="/app"
-                onClick={() => setIsMobileMenuOpen(false)}
-                className="bg-brand-primary text-white text-center py-4 rounded-lg font-bold uppercase tracking-widest text-[13px]"
-              >
-                {isLoggedIn ? 'Dashboard' : 'Start Free'}
-              </Link>
+              {isLoggedIn ? (
+                <button 
+                  onClick={() => {
+                    setIsMobileMenuOpen(false);
+                    onGoToDashboard?.();
+                  }}
+                  className="bg-brand-primary text-white text-center py-4 rounded-lg font-bold uppercase tracking-widest text-[13px]"
+                >
+                  Dashboard
+                </button>
+              ) : (
+                <button 
+                  onClick={() => {
+                    setIsMobileMenuOpen(false);
+                    onStartFree?.();
+                  }}
+                  className="bg-brand-primary text-white text-center py-4 rounded-lg font-bold uppercase tracking-widest text-[13px]"
+                >
+                  Start Free
+                </button>
+              )}
             </div>
           </motion.div>
         )}

@@ -40,19 +40,28 @@ const CTASection: React.FC<CTASectionProps> = ({ onLogin, onStartFree, onNavigat
             Join the leading enterprise teams transforming their audio data into structured intelligence today.
           </p>
           <div className="flex flex-col sm:flex-row items-center justify-center gap-6 pt-4">
-            <Link 
-              to={isLoggedIn ? "/app" : "/auth"}
-              className="w-full sm:w-auto bg-brand-accent text-brand-primary px-12 py-6 rounded-2xl font-bold uppercase tracking-widest text-[14px] shadow-2xl hover:shadow-brand-accent/20 hover:-translate-y-1 transition-all text-center"
-            >
-              {isLoggedIn ? 'Dashboard' : 'Start Free'}
-            </Link>
-            {!isLoggedIn && (
+            {isLoggedIn ? (
               <Link 
                 to="/app"
+                className="w-full sm:w-auto bg-brand-accent text-brand-primary px-12 py-6 rounded-2xl font-bold uppercase tracking-widest text-[14px] shadow-2xl hover:shadow-brand-accent/20 hover:-translate-y-1 transition-all text-center"
+              >
+                Dashboard
+              </Link>
+            ) : (
+              <button 
+                onClick={onStartFree}
+                className="w-full sm:w-auto bg-brand-accent text-brand-primary px-12 py-6 rounded-2xl font-bold uppercase tracking-widest text-[14px] shadow-2xl hover:shadow-brand-accent/20 hover:-translate-y-1 transition-all text-center"
+              >
+                Start Free
+              </button>
+            )}
+            {!isLoggedIn && (
+              <button 
+                onClick={onStartFree}
                 className="w-full sm:w-auto bg-white/10 text-white border border-white/20 px-12 py-6 rounded-2xl font-bold uppercase tracking-widest text-[14px] hover:bg-white/20 transition-all text-center"
               >
                 Upload Your First Call
-              </Link>
+              </button>
             )}
           </div>
           <p className="text-white/40 text-[13px] font-medium">No credit card required • Built for compliance-heavy teams</p>

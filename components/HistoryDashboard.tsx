@@ -1,10 +1,14 @@
 
 import React, { useState, useMemo, useEffect, useRef } from 'react';
-import { AudioToTextRecord, TextToAudioRecord, TranscriptSegment, ReadStatus, CollaborationRole, PlaybackMetadata, PlaybackStatus, Bookmark, AuthStatus, UserProfile, Project, UsageStats, StrategicAnalysis } from '../types';
+import { AudioToTextRecord, TextToAudioRecord, TranscriptSegment, ReadStatus, CollaborationRole, PlaybackMetadata, PlaybackStatus, Bookmark, AuthStatus, UserProfile, Project, UsageStats, StrategicAnalysis, UnifiedMeetingIntelligence, ExecutionTracker, OrgRole } from '../types';
 import { executeDownload, generateTranscriptBlob } from '../services/downloadService';
-import { analyzeStrategically } from '../services/geminiService';
+import { analyzeStrategically, processUnifiedMeetingIntelligence } from '../services/geminiService';
 import { PLAN_FEATURES } from '../config/planConfig';
-import UpgradeModal from './UpgradeModal';
+import { db, collection, query, where, getDocs, onSnapshot } from '../firebase';
+import MeetingIntelligenceView from './MeetingIntelligenceView';
+import ExecutionTrackerView from './ExecutionTrackerView';
+import SmartReminderView from './SmartReminderView';
+import UnresolvedTopicsDetector from './UnresolvedTopicsDetector';
 
 interface HistoryDashboardProps {
   audioHistory: AudioToTextRecord[];
@@ -42,6 +46,10 @@ interface HistoryDashboardProps {
   usageStats: UsageStats;
   searchQuery?: string;
   addNotification: (notif: any) => void;
+  isLoading?: boolean;
+  checkThinkingLimit: () => boolean;
+  incrementThinkingUsage: () => Promise<void>;
+  userOrgRole?: OrgRole;
 }
 
 type ArchiveTab = 'live' | 'recorded' | 'synthesis' | 'bookmarks' | 'trash';
@@ -64,7 +72,8 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
   onRenameGroup, onDeleteGroup, onAddGroup, onInviteToProject,
   activePlaybackId, activePlaybackSegIdx, playbackStatus, onPlay, onPause, onStop,
   onSetFilterGroup, selectedRecordId, onClearSelectedRecord, onRecordExpand,
-  usageStats, searchQuery, addNotification
+  usageStats, searchQuery, addNotification, isLoading = false,
+  checkThinkingLimit, incrementThinkingUsage, userOrgRole
 }) => {
   const [activeTab, setActiveTab] = useState<ArchiveTab>('recorded');
   
@@ -79,13 +88,42 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
     if (onRecordExpand) onRecordExpand(expandedRecordId);
   }, [expandedRecordId, onRecordExpand]);
   const [expandedStrategicAnalysisIds, setExpandedStrategicAnalysisIds] = useState<Set<string>>(new Set());
+  const [expandedIntelligenceIds, setExpandedIntelligenceIds] = useState<Set<string>>(new Set());
+  const [expandedExecutionIds, setExpandedExecutionIds] = useState<Set<string>>(new Set());
+  const [expandedReminderIds, setExpandedReminderIds] = useState<Set<string>>(new Set());
+  const [expandedUnresolvedIds, setExpandedUnresolvedIds] = useState<Set<string>>(new Set());
+  const [expandedFollowUpIds, setExpandedFollowUpIds] = useState<Set<string>>(new Set());
   const [isAnalyzing, setIsAnalyzing] = useState<string | null>(null);
   const [expandedTextIds, setExpandedTextIds] = useState<Set<string>>(new Set());
+  const isGuest = usageStats.mode === 'guest';
 
   // Sync projectFilter with filterGroup prop
   useEffect(() => {
     setProjectFilter(filterGroup || 'all');
   }, [filterGroup]);
+
+  const isThinkingLimitReached = useMemo(() => {
+    if (isGuest) return true;
+    const limit = PLAN_FEATURES[usageStats.plan].thinkingLimit;
+    const currentUsage = userProfile?.thinkingUsageCount || 0;
+    return limit !== 'unlimited' && currentUsage >= (limit as number);
+  }, [usageStats, userProfile, isGuest]);
+
+  const renderThinkingLimitMessage = () => (
+    <div className="p-6 bg-purple-50 border border-purple-100 rounded-xl flex flex-col items-center text-center space-y-3">
+      <div className="w-12 h-12 bg-purple-100 text-purple-600 rounded-full flex items-center justify-center">
+        <i className="fa-solid fa-lock"></i>
+      </div>
+      <div className="space-y-1">
+        <h4 className="text-sm font-bold text-purple-900">
+          {isGuest ? "Not Available in Guest Mode" : "Thinking Engine Limit Reached"}
+        </h4>
+        <p className="text-xs text-purple-700">
+          {isGuest ? "Please log in to access the Thinking Engine." : "You have reached your thinking engine limit for this month."}
+        </p>
+      </div>
+    </div>
+  );
 
   // Multi-select and Delete states
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -105,8 +143,6 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
   // Filtering Logic
   const [editingFileName, setEditingFileName] = useState<{ id: string, name: string } | null>(null);
   const [isConversationMode, setIsConversationMode] = useState(false);
-  const [showUpgradeModal, setShowUpgradeModal] = useState(false);
-  const [upgradeReason, setUpgradeReason] = useState('');
   const transcriptContainerRef = useRef<HTMLDivElement>(null);
 
   // Auto-scroll to active segment
@@ -298,6 +334,9 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
   };
 
   const checkPermission = (record: AudioToTextRecord | TextToAudioRecord, action: 'edit' | 'delete'): boolean => {
+    if (userOrgRole === 'super_admin' || userOrgRole === 'org_admin') return true;
+    if (userOrgRole === 'viewer') return false;
+
     if (record.group === 'General') return true;
     if (authStatus === AuthStatus.GUEST) return false;
     if (!userProfile) return false;
@@ -310,6 +349,11 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
 
     const members = project.members || [];
     const member = members.find(m => m.email === userProfile.email);
+    
+    if (userOrgRole === 'team_manager') {
+      return true;
+    }
+
     if (!member) return false;
 
     if (action === 'delete') {
@@ -323,8 +367,11 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
 
   const handleInviteClick = () => {
     if (!PLAN_FEATURES[usageStats.plan].team) {
-      setUpgradeReason('Collaboration and team projects are available on Pro, Team, and Enterprise plans.');
-      setShowUpgradeModal(true);
+      addNotification({
+        title: 'Feature Restricted',
+        message: 'Collaboration and team projects are not available on your current plan.',
+        type: 'error'
+      });
       return;
     }
     const project = (projects as Project[]).find(p => p.name === projectFilter);
@@ -334,15 +381,45 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
   };
 
   const [projectToManage, setProjectToManage] = useState<Project | null>(null);
+  const [projectMembers, setProjectMembers] = useState<any[]>([]);
+  const [loadingMembers, setLoadingMembers] = useState(false);
+  const [isInviting, setIsInviting] = useState(false);
   const [inviteEmail, setInviteEmail] = useState('');
   const [inviteRole, setInviteRole] = useState<CollaborationRole>('viewer');
+
+  useEffect(() => {
+    if (!projectToManage) {
+      setProjectMembers([]);
+      return;
+    }
+
+    setLoadingMembers(true);
+    const q = query(
+      collection(db, 'projectMembers'),
+      where('projectId', '==', projectToManage.id)
+    );
+
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const members = snapshot.docs.map(doc => doc.data());
+      setProjectMembers(members);
+      setLoadingMembers(false);
+    }, (err) => {
+      console.error("Error fetching members:", err);
+      setLoadingMembers(false);
+    });
+
+    return () => unsubscribe();
+  }, [projectToManage]);
 
   const handleDownloadClick = (asset: { id: string; name: string; url: string; type: 'audio' | 'transcript' }) => {
     if (authStatus === AuthStatus.GUEST) {
       setShowGuestDownloadPrompt(true);
     } else if (!PLAN_FEATURES[usageStats.plan].export) {
-      setUpgradeReason('Exporting transcripts and audio files is a Pro feature.');
-      setShowUpgradeModal(true);
+      addNotification({
+        title: 'Feature Restricted',
+        message: 'Exporting transcripts and audio files is not available on your current plan.',
+        type: 'error'
+      });
     } else {
       setDownloadingAsset(asset);
     }
@@ -472,7 +549,7 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
         speaker: record.speakerMap[seg.speaker] || seg.speaker,
         text: seg.text,
         timestamp: Date.now(),
-        userName: userProfile?.name || 'Guest'
+        userName: userProfile?.displayName || userProfile?.name || 'Guest'
       };
       newBookmarks.push(newBookmark);
     }
@@ -488,9 +565,9 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
 
   const getReadStatusStyle = (status: ReadStatus) => {
     switch (status) {
-      case 'read': return 'bg-green-100 text-green-700 border-green-200';
-      case 'in-progress': return 'bg-amber-100 text-amber-700 border-amber-200';
-      default: return 'bg-gray-100 text-gray-500 border-gray-200';
+      case 'read': return 'bg-[#E7F7EF] text-[#229A62] border-transparent';
+      case 'in-progress': return 'bg-[#FFF8E7] text-[#B48400] border-transparent';
+      default: return 'bg-[#F1F3F9] text-[#7E89A3] border-transparent';
     }
   };
 
@@ -527,31 +604,78 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
     });
   };
 
+  const toggleIntelligence = (id: string) => {
+    setExpandedIntelligenceIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleExecution = (id: string) => {
+    setExpandedExecutionIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleReminders = (id: string) => {
+    setExpandedReminderIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleUnresolved = (id: string) => {
+    setExpandedUnresolvedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleFollowUp = (id: string) => {
+    setExpandedFollowUpIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
   const runStrategicAnalysis = async (record: AudioToTextRecord) => {
     if (isAnalyzing) return;
 
-    // Check thinking limit
-    const plan = userProfile?.plan || 'guest';
-    const limit = PLAN_FEATURES[plan].thinkingLimit;
-    
-    if (limit !== 'unlimited' && (userProfile?.thinkingUsageCount || 0) >= (limit as number)) {
-      setUpgradeReason('You have reached your Thinking Engine limit for this month.');
-      setShowUpgradeModal(true);
+    if (!checkThinkingLimit()) {
+      addNotification({
+        title: 'Thinking Limit Reached',
+        message: 'You have reached your Thinking Engine limit for this month.',
+        type: 'error'
+      });
       return;
     }
     
     setIsAnalyzing(record.id);
     try {
-      const content = record.summary 
-        ? `Summary: ${record.summary.mainTopic}\nKey Points: ${record.summary.keyPoints.join(', ')}`
-        : record.transcript.map(t => `${record.speakerMap[t.speaker] || t.speaker}: ${t.text}`).join('\n');
+      const plan = userProfile?.plan || 'guest';
+      const fullTranscript = record.transcript.map(t => `${record.speakerMap[t.speaker] || t.speaker}: ${t.text}`).join('\n');
+      const intelligence = await processUnifiedMeetingIntelligence(fullTranscript, plan);
       
-      const analysis = await analyzeStrategically(content, record.summary ? 'summary' : 'transcript');
-      
-      if (analysis) {
+      if (intelligence) {
+        await incrementThinkingUsage();
         onUpdateAudio({
           ...record,
-          strategicAnalysis: analysis
+          strategicAnalysis: intelligence.strategicAnalysis,
+          meetingIntelligence: intelligence.meetingIntelligence,
+          executionTracker: intelligence.executionTracker,
+          calendarReminders: intelligence.calendarReminders,
+          unifiedIntelligence: intelligence
         });
         
         // Auto expand after generation
@@ -579,15 +703,55 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
     }
   };
 
+  const runMeetingIntelligence = async (record: AudioToTextRecord) => {
+    if (isAnalyzing === record.id) return;
+
+    if (!checkThinkingLimit()) {
+      addNotification({
+        title: 'Thinking Limit Reached',
+        message: 'You have reached your Thinking Engine limit for this month.',
+        type: 'error'
+      });
+      return;
+    }
+
+    setIsAnalyzing(record.id);
+    try {
+      const fullTranscript = record.transcript.map(s => `${record.speakerMap[s.speaker] || s.speaker}: ${s.text}`).join('\n');
+      const intelligence = await processUnifiedMeetingIntelligence(fullTranscript, userProfile?.plan || 'guest');
+      
+      await incrementThinkingUsage();
+      const updatedRecord = {
+        ...record,
+        strategicAnalysis: intelligence.strategicAnalysis,
+        meetingIntelligence: intelligence.meetingIntelligence,
+        executionTracker: intelligence.executionTracker,
+        calendarReminders: intelligence.calendarReminders,
+        unifiedIntelligence: intelligence
+      };
+      
+      onUpdateAudio(updatedRecord);
+      addNotification({
+        title: 'Intelligence Generated',
+        message: 'Meeting intelligence, execution tracker, and reminders have been generated.',
+        type: 'success'
+      });
+    } catch (error) {
+      console.error('Error generating intelligence:', error);
+      addNotification({
+        title: 'Analysis Failed',
+        message: 'Failed to generate meeting intelligence. Please try again.',
+        type: 'error'
+      });
+    } finally {
+      setIsAnalyzing(null);
+    }
+  };
+
   const displayTitle = projectFilter === 'all' ? "Intelligence Archive" : `Project: ${projectFilter}`;
 
   return (
     <div className="space-y-4 pb-40 animate-in fade-in h-full relative">
-      <UpgradeModal 
-        isOpen={showUpgradeModal}
-        onClose={() => setShowUpgradeModal(false)}
-        reason={upgradeReason}
-      />
       {/* Modals */}
       {/* Guest Download Prompt */}
       {showGuestDownloadPrompt && (
@@ -662,51 +826,71 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
 
       {/* Invite Members Modal */}
       {projectToManage && (
-        <div className="fixed inset-0 bg-brand-primary/60 backdrop-blur-sm z-[250] flex items-center justify-center p-6">
-          <div className="bg-white rounded-lg p-10 max-w-lg w-full space-y-8 shadow-2xl animate-in zoom-in-95">
-            <div className="flex items-center justify-between">
+        <div className="fixed inset-0 bg-brand-primary/60 backdrop-blur-sm z-[250] flex items-center justify-center p-6 sm:p-0">
+          <div className="bg-white rounded-2xl p-7 max-w-[320px] w-full space-y-7 shadow-2xl animate-in zoom-in-95 border border-brand-divider/20">
+            <div className="flex items-start justify-between">
               <div className="space-y-1">
-                <h2 className="text-[26px] font-medium text-brand-primary tracking-[-0.01em] leading-tight">Project Collaboration</h2>
-                <p className="text-slate-500 text-[14px] font-medium text-left">Manage access for <span className="text-brand-primary font-bold">{projectToManage.name}</span></p>
+                <h2 className="text-[22px] font-black text-brand-primary tracking-tight leading-tight uppercase">Project <br/>Collaboration</h2>
+                <p className="text-slate-500 text-[12px] font-bold leading-tight">
+                  Manage access for <span className="text-brand-primary font-black uppercase">{projectToManage.name}</span>
+                </p>
               </div>
-              <button onClick={() => setProjectToManage(null)} className="text-slate-400 hover:text-slate-600">
+              <button 
+                onClick={() => setProjectToManage(null)} 
+                className="text-slate-400 hover:text-brand-primary transition-colors p-1"
+              >
                 <i className="fa-solid fa-xmark text-xl"></i>
               </button>
             </div>
 
             <div className="space-y-6">
-              {/* Members List */}
-              <div className="space-y-3 text-left">
-                <label className="text-[11px] font-bold text-slate-400 uppercase tracking-widest">Team members</label>
-                <div className="space-y-2 max-h-48 overflow-y-auto custom-scrollbar pr-2">
-                  <div className="flex items-center justify-between p-3 bg-slate-50 rounded-lg border border-slate-100">
+               {/* Team Members List */}
+               <div className="space-y-3">
+                <label className="text-[10px] font-black text-slate-400 uppercase tracking-[0.15em]">Team members</label>
+                <div className="space-y-2 max-h-48 overflow-y-auto custom-scrollbar pr-1">
+                  <div className="flex items-center justify-between p-3 bg-slate-50 rounded-xl border border-slate-100 text-left">
                     <div className="flex items-center space-x-3">
-                      <div className="w-8 h-8 bg-brand-primary text-white rounded-full flex items-center justify-center text-[10px] font-bold">
-                        {(projectToManage.ownerEmail?.charAt(0) || 'U').toUpperCase()}
+                      <div className="w-9 h-9 bg-brand-primary text-white rounded-xl flex items-center justify-center text-[12px] font-black shadow-lg shadow-brand-primary/20 overflow-hidden">
+                        {projectToManage.ownerEmail === userProfile?.email && (userProfile?.photoURL || userProfile?.avatarUrl) ? (
+                          <img 
+                            src={userProfile.photoURL || userProfile.avatarUrl} 
+                            alt="Owner" 
+                            className="w-full h-full object-cover"
+                            referrerPolicy="no-referrer"
+                          />
+                        ) : (
+                          <span>{(projectToManage.ownerEmail?.charAt(0) || 'U').toUpperCase()}</span>
+                        )}
                       </div>
-                      <div>
-                        <p className="text-sm font-bold text-slate-900">{projectToManage.ownerEmail || 'Unknown Owner'}</p>
-                        <p className="text-[10px] text-slate-500">Project Owner • <span className="text-emerald-500 font-bold">Online</span></p>
+                      <div className="min-w-0">
+                        <p className="text-[13px] font-black text-brand-primary leading-tight truncate">{projectToManage.ownerEmail === userProfile?.email ? 'You' : (projectToManage as any).ownerName || projectToManage.ownerEmail?.split('@')[0]}</p>
+                        <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Project Owner</p>
                       </div>
                     </div>
-                    <span className="px-2 py-0.5 bg-brand-primary/10 text-brand-primary text-[10px] font-bold rounded uppercase tracking-widest">Owner</span>
                   </div>
 
-                  {projectToManage.members && (projectToManage.members || []).map((member, i) => (
-                    <div key={i} className="flex items-center justify-between p-3 bg-white rounded-lg border border-slate-100">
+                  {loadingMembers ? (
+                    <div className="flex justify-center py-4">
+                      <div className="w-5 h-5 border-2 border-brand-primary border-t-transparent rounded-full animate-spin" />
+                    </div>
+                  ) : projectMembers.map((member, i) => (
+                    <div key={i} className="flex items-center justify-between p-3 bg-white rounded-xl border border-slate-100 text-left">
                       <div className="flex items-center space-x-3">
-                        <div className="relative">
-                          <div className="w-8 h-8 bg-slate-200 text-slate-500 rounded-full flex items-center justify-center text-[10px] font-bold">
-                            {(member.email?.charAt(0) || 'U').toUpperCase()}
-                          </div>
-                          {member.isOnline && <div className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 bg-emerald-500 border-2 border-white rounded-full"></div>}
+                        <div className="w-9 h-9 bg-slate-100 text-slate-400 rounded-xl flex items-center justify-center text-[11px] font-black border border-slate-200 uppercase overflow-hidden">
+                          {member.photoURL || member.avatarUrl ? (
+                            <img 
+                              src={member.photoURL || member.avatarUrl} 
+                              alt="Member" 
+                              className="w-full h-full object-cover"
+                              referrerPolicy="no-referrer"
+                            />
+                          ) : (
+                            <span>{(member.displayName?.charAt(0) || member.email?.charAt(0) || 'U').toUpperCase()}</span>
+                          )}
                         </div>
-                        <div>
-                          <p className="text-sm font-bold text-slate-900">{member.email || 'Unknown Member'}</p>
-                          <p className="text-[10px] text-slate-500">
-                            {(member.role?.charAt(0).toUpperCase() || 'U') + (member.role?.slice(1) || 'ser')} • 
-                            {member.isOnline ? <span className="text-emerald-500 font-bold"> Online</span> : <span className="text-slate-300"> Offline</span>}
-                          </p>
+                        <div className="min-w-0">
+                          <p className="text-[13px] font-black text-brand-primary leading-tight truncate">{member.email === userProfile?.email ? 'You' : (member as any).displayName || member.email?.split('@')[0]}</p>
+                          <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">{member.role}</p>
                         </div>
                       </div>
                     </div>
@@ -726,45 +910,58 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
 
                 return (
                   <div className="space-y-3 text-left">
-                    <label className="text-[11px] font-bold text-slate-400 uppercase tracking-widest">Invite new member</label>
-                    <div className="flex space-x-2">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-[0.15em]">Invite new member</label>
+                    <div className="space-y-2">
                       <input 
                         type="email"
                         placeholder="colleague@company.com"
-                        className="flex-1 bg-slate-50 border border-slate-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-brand-primary/20"
+                        className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-[13px] font-medium outline-none focus:ring-2 focus:ring-brand-primary/30 transition-all placeholder:text-slate-400"
                         value={inviteEmail}
                         onChange={(e) => setInviteEmail(e.target.value)}
                       />
-                      <select 
-                        className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2.5 text-sm outline-none focus:ring-2 focus:ring-brand-primary/20"
-                        value={inviteRole}
-                        onChange={(e) => setInviteRole(e.target.value as CollaborationRole)}
-                      >
-                        <option value="viewer">Viewer</option>
-                        <option value="editor">Editor</option>
-                        <option value="owner">Owner</option>
-                      </select>
-                      <button 
-                        onClick={() => {
-                          if (inviteEmail.trim()) {
-                            onInviteToProject(projectToManage.name, inviteEmail, inviteRole);
-                            setInviteEmail('');
-                          }
-                        }}
-                        className="bg-brand-primary text-white px-6 py-2.5 rounded-lg text-xs font-bold tracking-widest hover:opacity-90 transition-opacity"
-                      >
-                        INVITE
-                      </button>
+                      <div className="flex gap-2">
+                        <div className="relative flex-1">
+                          <select 
+                            className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-[12px] font-black text-brand-primary outline-none focus:ring-2 focus:ring-brand-primary/30 transition-all appearance-none cursor-pointer uppercase tracking-widest"
+                            value={inviteRole}
+                            onChange={(e) => setInviteRole(e.target.value as CollaborationRole)}
+                          >
+                            <option value="viewer">Viewer</option>
+                            <option value="editor">Editor</option>
+                            <option value="owner">Owner</option>
+                          </select>
+                          <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none text-brand-primary opacity-50">
+                            <i className="fa-solid fa-chevron-down text-[10px]"></i>
+                          </div>
+                        </div>
+                        <button 
+                          disabled={isInviting || !inviteEmail.trim()}
+                          onClick={async () => {
+                            if (inviteEmail.trim()) {
+                              setIsInviting(true);
+                              try {
+                                await onInviteToProject(projectToManage.name, inviteEmail.trim(), inviteRole);
+                                setInviteEmail('');
+                              } finally {
+                                setIsInviting(false);
+                              }
+                            }
+                          }}
+                          className="bg-brand-primary text-white px-5 py-3 rounded-xl text-[11px] font-black uppercase tracking-[0.1em] hover:shadow-lg active:scale-95 transition-all shadow-md shadow-brand-primary/20 disabled:opacity-50"
+                        >
+                          {isInviting ? '...' : 'INVITE'}
+                        </button>
+                      </div>
                     </div>
                   </div>
                 );
               })()}
             </div>
 
-            <div className="pt-4 border-t border-slate-100">
+            <div className="pt-2">
               <button 
                 onClick={() => setProjectToManage(null)}
-                className="w-full py-4 bg-brand-primary text-white rounded-lg font-semibold tracking-widest text-[13px] shadow-xl active:scale-95 transition-all"
+                className="w-full py-4.5 bg-brand-primary text-white rounded-xl font-black tracking-[0.2em] text-[12px] shadow-2xl shadow-brand-primary/30 active:scale-[0.98] transition-all uppercase"
               >
                 DONE
               </button>
@@ -894,20 +1091,20 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
       {/* Page Header */}
       <header className="space-y-6 text-left border-b border-brand-divider/20 pb-8">
         <div className="space-y-2">
-          <h1 className="text-brand-primary text-[32px] md:text-[42px] font-semibold tracking-tight">
+          <h1 className="text-brand-primary text-3xl sm:text-[36px] md:text-[48px] font-bold tracking-tight">
             {displayTitle}
           </h1>
-          <p className="text-slate-500 text-sm md:text-base font-normal">Categorical record keeping for high-fidelity enterprise assets.</p>
+          <p className="text-slate-500 text-sm sm:text-base md:text-lg font-medium">Categorical record keeping for high-fidelity enterprise assets.</p>
         </div>
 
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-6">
-          <div className="flex flex-wrap items-center gap-6">
-             {projectFilter !== 'all' && projectFilter !== 'General' && (
-               <div className="flex items-center gap-4">
+          <div className="flex flex-wrap items-center gap-4 md:gap-6">
+             {projectFilter !== 'all' && (
+               <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
                  {/* Collaborators Indicator */}
                  <div className="flex -space-x-2">
                    {(() => {
-                     const project = (projects as Project[]).find(p => p.name === projectFilter);
+                     const project = (projects as Project[]).find(p => p.name === projectFilter) || (projects as Project[]).find(p => p.name === 'General');
                      const members = project?.members || [];
                      return (
                        <>
@@ -931,10 +1128,10 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
                    })()}
                  </div>
 
-                 <div className="flex bg-white border border-brand-divider/20 rounded-xl p-1 shadow-sm h-fit">
+                 <div className="flex bg-white border border-brand-divider/20 rounded-xl p-1 shadow-sm h-fit w-full sm:w-auto overflow-x-auto">
                    <button 
                      onClick={handleInviteClick}
-                     className="px-4 py-2.5 text-[12px] font-bold text-brand-primary hover:bg-brand-primary/5 rounded-lg transition-colors flex items-center gap-2"
+                     className="flex-1 sm:flex-none px-3 sm:px-4 py-2.5 text-[11px] sm:text-[12px] font-bold text-brand-primary hover:bg-brand-primary/5 rounded-lg transition-colors flex items-center justify-center gap-2 whitespace-nowrap"
                      title="Invite Members"
                    >
                      <i className="fa-solid fa-user-plus"></i>
@@ -943,11 +1140,12 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
                    <div className="w-[1px] h-5 bg-brand-divider/20 self-center"></div>
                    <button 
                      onClick={() => setBulkDownloadGroup(projectFilter)}
-                     className="px-4 py-2.5 text-[12px] font-bold text-slate-500 hover:text-brand-primary rounded-lg transition-colors flex items-center gap-2"
+                     className="flex-1 sm:flex-none px-3 sm:px-4 py-2.5 text-[11px] sm:text-[12px] font-bold text-slate-500 hover:text-brand-primary rounded-lg transition-colors flex items-center justify-center gap-2 whitespace-nowrap"
                      title="Bulk Export Project"
                    >
                      <i className="fa-solid fa-cloud-arrow-down"></i>
-                     <span>Bulk export</span>
+                     <span className="hidden sm:inline">Bulk export</span>
+                     <span className="sm:hidden">Export</span>
                    </button>
                    <div className="w-[1px] h-5 bg-brand-divider/20 self-center"></div>
                    <button 
@@ -961,11 +1159,12 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
                        setProjectToDelete({ name: projectFilter, deleteAssets: false });
                        setShowProjectDeleteConfirm(true);
                      }}
-                     className="px-4 py-2.5 text-[12px] font-bold text-slate-400 hover:text-red-500 rounded-lg transition-colors flex items-center gap-2"
+                     className="flex-1 sm:flex-none px-3 sm:px-4 py-2.5 text-[11px] sm:text-[12px] font-bold text-slate-400 hover:text-red-500 rounded-lg transition-colors flex items-center justify-center gap-2 whitespace-nowrap"
                      title="Delete Entire Project"
                    >
                      <i className="fa-solid fa-trash-can"></i>
-                     <span>Delete project</span>
+                     <span className="hidden sm:inline">Delete project</span>
+                     <span className="sm:hidden">Delete</span>
                    </button>
                  </div>
                </div>
@@ -1092,7 +1291,12 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
 
       {/* Data List */}
       <div className="space-y-4">
-        {filteredData.length === 0 ? (
+        {isLoading ? (
+          <div className="py-20 text-center space-y-4 bg-white rounded-xl border border-brand-divider/20 shadow-sm">
+            <div className="w-12 h-12 border-4 border-brand-primary/20 border-t-brand-primary rounded-full animate-spin mx-auto"></div>
+            <p className="text-sm font-bold text-brand-primary animate-pulse uppercase tracking-widest">Accessing Intelligence Archive...</p>
+          </div>
+        ) : filteredData.length === 0 ? (
           <div className="py-20 text-center space-y-4 bg-white rounded-xl border border-dashed border-brand-divider/30">
              <div className="w-20 h-20 bg-brand-background rounded-full flex items-center justify-center mx-auto text-slate-200 text-3xl">
                <i className="fa-solid fa-folder-open"></i>
@@ -1160,16 +1364,16 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
                   {isSelected && <i className="fa-solid fa-check text-brand-accent text-[10px]"></i>}
                 </div>
 
-                <div className="flex-1 lg:pl-10 space-y-6 text-left">
+                <div className="flex-1 lg:pl-10 space-y-4 md:space-y-6 text-left">
                   {isAudio ? (
                     // Audio Item Layout
-                    <div className="flex flex-col gap-8">
-                      <div className="flex flex-col lg:flex-row gap-8">
-                        <div className="lg:w-1/3 space-y-5">
+                    <div className="flex flex-col gap-4 md:gap-8">
+                      <div className="flex flex-col lg:flex-row gap-4 md:gap-8">
+                        <div className="lg:w-1/3 space-y-3 md:space-y-5">
                           <div className="flex justify-between items-center">
-                            <span className="text-[11px] font-medium text-slate-400 uppercase tracking-widest font-mono">{item.date}</span>
+                            <span className="text-[10px] md:text-[11px] font-medium text-slate-400 uppercase tracking-widest font-mono">{item.date}</span>
                             <div className="flex items-center space-x-2">
-                               <div className={`px-2 py-1 rounded text-[11px] font-medium uppercase tracking-tighter ${item.status === 'completed' ? 'bg-emerald-50 text-emerald-600' : item.status === 'error' ? 'bg-red-50 text-red-600' : 'bg-brand-background text-brand-primary'}`}>
+                               <div className={`px-2 py-1 rounded text-[9px] md:text-[11px] font-medium uppercase tracking-tighter ${item.status === 'completed' ? 'bg-emerald-50 text-emerald-600' : item.status === 'error' ? 'bg-red-50 text-red-600' : 'bg-brand-background text-brand-primary'}`}>
                                  {item.status}
                                </div>
                                <button 
@@ -1185,7 +1389,7 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
                                      isPermanent: activeTab === 'trash'
                                    });
                                  }}
-                                 className="p-2 text-slate-200 group-hover:text-red-500 transition-colors"
+                                 className="p-2 text-slate-300 hover:text-red-500 transition-colors"
                                  title={activeTab === 'trash' ? "Permanently Delete" : "Move to Trash"}
                                >
                                  <i className={`fa-solid ${activeTab === 'trash' ? 'fa-trash-can' : 'fa-trash-can'} text-sm`}></i>
@@ -1197,7 +1401,7 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
                                      name: isAudio ? item.fileName : item.title,
                                      type: isAudio ? 'audio' : 'synthesis'
                                    })}
-                                   className="p-2 text-slate-200 group-hover:text-brand-primary transition-colors"
+                                   className="p-2 text-slate-300 hover:text-brand-primary transition-colors"
                                    title="Restore Asset"
                                  >
                                    <i className="fa-solid fa-rotate-left text-sm"></i>
@@ -1238,14 +1442,11 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
                                 >
                                   {item.fileName}
                                 </h4>
-                                <span className="text-[10px] font-bold bg-slate-100 text-slate-500 px-2 py-1 rounded-md uppercase tracking-widest border border-slate-200/50">
-                                  {projects.some(p => p.name === item.group) ? (item.group || 'General') : 'General'}
-                                </span>
                               </div>
                             )}
                             <div className="flex items-center space-x-2">
-                              <div className="flex flex-col">
-                                <label className="text-[8px] font-black text-slate-400 mb-1 ml-1">Project</label>
+                              <div className="flex flex-col min-w-[100px]">
+                                <label className="text-[8px] font-black text-slate-400 mb-1 ml-1 uppercase tracking-tighter">Project Group</label>
                                 <select 
                                   value={item.group} 
                                   onChange={(e) => {
@@ -1273,14 +1474,14 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
                                     onUpdateAudio({ ...item, group: value });
                                   }} 
                                   disabled={!checkPermission(item, 'edit')}
-                                  className={`bg-brand-background border border-brand-divider/20 px-3 py-1.5 text-[11px] font-medium uppercase tracking-widest rounded-lg focus:ring-1 focus:ring-brand-primary font-mono ${!checkPermission(item, 'edit') ? 'text-slate-400 cursor-not-allowed' : 'text-brand-secondary'}`}
+                                  className={`bg-slate-50 border border-slate-200 px-2 py-1 text-[10px] font-bold uppercase tracking-tight rounded-md focus:ring-1 focus:ring-brand-primary/30 outline-none transition-all ${!checkPermission(item, 'edit') ? 'text-slate-400 cursor-not-allowed opacity-60' : 'text-brand-primary'}`}
                                 >
                                   {groups.map(g => (
                                     <option key={g} value={g}>
-                                      {g === 'General' ? 'General (Default)' : g}
+                                      {g}
                                     </option>
                                   ))}
-                                  <option value="new">+ Create new project</option>
+                                  <option value="new">+ New Project</option>
                                 </select>
                               </div>
                               <div 
@@ -1291,9 +1492,9 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
                                     alert("You do not have permission to update status.");
                                   }
                                 }} 
-                                className={`px-2 py-1 rounded-lg border text-[11px] font-medium uppercase cursor-pointer transition-colors font-mono ${getReadStatusStyle(item.readStatus)}`}
+                                className={`px-2 py-1.5 rounded-md border text-[9px] font-black uppercase cursor-pointer transition-all active:scale-95 shadow-sm ${getReadStatusStyle(item.readStatus)}`}
                               >
-                                {item.readStatus.replace('-', ' ')}
+                                {item.readStatus.replace('-', ' ').toUpperCase()}
                               </div>
                               {item.collaborators && item.collaborators.length > 0 && (
                                 <div className="flex -space-x-2 ml-2">
@@ -1326,10 +1527,10 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
                                   <>
                                     <button 
                                       onClick={() => {
-                                        if (usageStats.plan === 'guest' || usageStats.plan === 'free') {
+                                        if (usageStats.mode === 'guest') {
                                           addNotification({
-                                            title: 'Plan Limitation',
-                                            message: 'Collaboration features are only available in Pro and Enterprise plans.',
+                                            title: 'Feature Restricted',
+                                            message: 'Collaboration features are not available in Guest Mode. Please create an account to unlock.',
                                             type: 'error'
                                           });
                                           return;
@@ -1395,7 +1596,7 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
                       {expandedRecordId === item.id && (
                         <div className="pt-8 border-t border-brand-divider/10 space-y-10 animate-in slide-in-from-top-4 duration-500">
                           {/* Summary */}
-                          {item.summary && (
+                          {item.summary && !isThinkingLimitReached ? (
                             <div className="bg-brand-background rounded-xl p-8 border border-brand-divider/10 space-y-6">
                               <div className="flex items-center space-x-4">
                                 <div className="w-12 h-12 bg-brand-primary/10 border border-brand-primary/20 rounded-lg flex items-center justify-center text-brand-primary shadow-sm">
@@ -1425,161 +1626,474 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
                                 </div>
                               </div>
                             </div>
+                          ) : isThinkingLimitReached && (
+                            <div className="p-8 bg-brand-background rounded-xl border border-brand-divider/10">
+                              {renderThinkingLimitMessage()}
+                            </div>
                           )}
 
                           {/* Strategic Thinking Partner */}
-                          <div className="bg-brand-primary/5 rounded-xl border border-brand-primary/10 overflow-hidden">
-                            <div 
-                              className="p-6 flex items-center justify-between cursor-pointer hover:bg-brand-primary/10 transition-colors"
-                              onClick={() => toggleStrategicAnalysis(item.id)}
-                            >
-                              <div className="flex items-center space-x-4">
-                                <div className="w-10 h-10 bg-brand-primary text-brand-accent rounded-lg flex items-center justify-center shadow-md">
-                                  <i className="fa-solid fa-brain text-lg"></i>
+                          {(!item.selectedModules || item.selectedModules.includes('strategy')) && (
+                            <div className="bg-brand-primary/5 rounded-3xl border border-brand-primary/10 overflow-hidden shadow-sm">
+                              <div 
+                                className={`p-8 flex items-center justify-between transition-all duration-300 ${isGuest ? 'cursor-not-allowed opacity-50' : 'hover:bg-brand-primary/10 cursor-pointer'}`}
+                                onClick={() => {
+                                  if (isGuest) {
+                                    addNotification({
+                                      title: 'Feature Restricted',
+                                      message: 'AI Strategic Analysis is not available in Guest Mode. Please sign up to unlock full intelligence.',
+                                      type: 'error'
+                                    });
+                                    return;
+                                  }
+                                  toggleStrategicAnalysis(item.id);
+                                }}
+                              >
+                                <div className="flex items-center space-x-6">
+                                  <div className="w-14 h-14 bg-brand-primary text-brand-accent rounded-2xl flex items-center justify-center shadow-xl shadow-brand-primary/20">
+                                    <i className="fa-solid fa-brain text-2xl"></i>
+                                  </div>
+                                  <div>
+                                    <h4 className="text-xl font-black text-brand-primary tracking-tight">Strategic Thinking Partner</h4>
+                                    <p className="text-[11px] text-brand-secondary font-bold tracking-[0.2em] uppercase font-mono">Deep AI Analysis & Blindspot Detection</p>
+                                  </div>
                                 </div>
-                                <div>
-                                  <h4 className="text-sm font-black text-brand-primary tracking-tight">Strategic Thinking Partner</h4>
-                                  <p className="text-[10px] text-brand-secondary font-bold tracking-widest uppercase font-mono">Deep AI Analysis & Blindspot Detection</p>
+                                <div className="flex items-center space-x-4">
+                                  {!item.strategicAnalysis && (
+                                    <button
+                                      disabled={isGuest || isAnalyzing === item.id}
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        if (isGuest) {
+                                          addNotification({
+                                            title: 'Feature Restricted',
+                                            message: 'AI Strategic Analysis is not available in Guest Mode. Please sign up to unlock full intelligence.',
+                                            type: 'error'
+                                          });
+                                          return;
+                                        }
+                                        runStrategicAnalysis(item);
+                                      }}
+                                      className={`px-6 py-3 bg-brand-primary text-brand-accent rounded-xl text-[11px] font-black uppercase tracking-widest hover:shadow-2xl hover:-translate-y-0.5 transition-all disabled:opacity-50 ${isGuest ? 'cursor-not-allowed' : ''}`}
+                                    >
+                                      {isAnalyzing === item.id ? (
+                                        <><i className="fa-solid fa-spinner fa-spin mr-2"></i> Analyzing...</>
+                                      ) : (
+                                        <><i className="fa-solid fa-wand-magic-sparkles mr-2"></i> Run Analysis</>
+                                      )}
+                                    </button>
+                                  )}
+                                  <div className="w-10 h-10 rounded-full bg-brand-primary/5 flex items-center justify-center text-brand-primary/40">
+                                    <i className={`fa-solid fa-chevron-${expandedStrategicAnalysisIds.has(item.id) ? 'up' : 'down'} transition-transform duration-300`}></i>
+                                  </div>
                                 </div>
                               </div>
-                              <div className="flex items-center space-x-3">
-                                {!item.strategicAnalysis && (
-                                  <button
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      runStrategicAnalysis(item);
-                                    }}
-                                    disabled={isAnalyzing === item.id}
-                                    className="px-4 py-2 bg-brand-primary text-brand-accent rounded-lg text-[10px] font-black uppercase tracking-widest hover:shadow-lg transition-all disabled:opacity-50"
-                                  >
-                                    {isAnalyzing === item.id ? (
-                                      <><i className="fa-solid fa-spinner fa-spin mr-2"></i> Analyzing...</>
-                                    ) : (
-                                      <><i className="fa-solid fa-wand-magic-sparkles mr-2"></i> Run Analysis</>
-                                    )}
-                                  </button>
-                                )}
-                                <i className={`fa-solid fa-chevron-${expandedStrategicAnalysisIds.has(item.id) ? 'up' : 'down'} text-brand-primary/40`}></i>
-                              </div>
-                            </div>
 
-                            {expandedStrategicAnalysisIds.has(item.id) && (
-                              <div className="p-8 border-t border-brand-primary/10 bg-white/50 space-y-10 animate-in slide-in-from-top-2 duration-300">
-                                {item.strategicAnalysis ? (
-                                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-10">
-                                    <div className="space-y-8">
-                                      <div className="space-y-3">
-                                        <div className="flex items-center space-x-2 text-brand-primary">
-                                          <i className="fa-solid fa-bullseye text-xs"></i>
-                                          <span className="text-[11px] font-black uppercase tracking-widest font-mono">Core Intent</span>
-                                        </div>
-                                        <p className="text-sm text-slate-700 leading-relaxed font-medium pl-5 border-l-2 border-brand-primary/20">{item.strategicAnalysis.coreIntent}</p>
-                                      </div>
-
-                                      <div className="space-y-3">
-                                        <div className="flex items-center space-x-2 text-brand-primary">
-                                          <i className="fa-solid fa-compass text-xs"></i>
-                                          <span className="text-[11px] font-black uppercase tracking-widest font-mono">Context & Stakes</span>
-                                        </div>
-                                        <p className="text-sm text-slate-600 leading-relaxed pl-5 border-l-2 border-brand-primary/10">{item.strategicAnalysis.context}</p>
-                                      </div>
-
-                                      <div className="space-y-4">
-                                        <div className="flex items-center space-x-2 text-amber-600">
-                                          <i className="fa-solid fa-triangle-exclamation text-xs"></i>
-                                          <span className="text-[11px] font-black uppercase tracking-widest font-mono">Assumptions & Risks</span>
-                                        </div>
-                                        <ul className="space-y-3 pl-5">
-                                          {item.strategicAnalysis.assumptions.map((a, i) => (
-                                            <li key={i} className="text-xs text-slate-600 flex items-start gap-3">
-                                              <span className="w-1.5 h-1.5 rounded-full bg-amber-400 mt-1.5 shrink-0"></span>
-                                              {a}
-                                            </li>
-                                          ))}
-                                        </ul>
-                                      </div>
-                                    </div>
-
-                                    <div className="space-y-8">
-                                      <div className="space-y-4">
-                                        <div className="flex items-center space-x-2 text-rose-600">
-                                          <i className="fa-solid fa-eye-slash text-xs"></i>
-                                          <span className="text-[11px] font-black uppercase tracking-widest font-mono">Blind Spots & Gaps</span>
-                                        </div>
-                                        <div className="grid gap-4">
-                                          {item.strategicAnalysis.logicalGaps.map((gap, i) => (
-                                            <div key={i} className="p-4 bg-rose-50/50 border border-rose-100 rounded-lg text-xs text-rose-800 leading-relaxed">
-                                              <span className="font-black mr-2">GAP:</span> {gap}
+                              {expandedStrategicAnalysisIds.has(item.id) && (
+                                <div className="px-5 py-10 md:px-10 md:py-16 border-t border-brand-divider/10 bg-white/80 space-y-16 animate-in slide-in-from-top-4 duration-500">
+                                  {item.strategicAnalysis && !isThinkingLimitReached ? (
+                                    <div className="space-y-16">
+                                      {/* Top Section: Intent & Context */}
+                                      <div className="grid grid-cols-1 lg:grid-cols-2 gap-12">
+                                        <div className="space-y-4">
+                                          <div className="flex items-center space-x-3 text-brand-primary">
+                                            <div className="w-8 h-8 bg-brand-primary/10 rounded-lg flex items-center justify-center">
+                                              <i className="fa-solid fa-bullseye text-xs"></i>
                                             </div>
-                                          ))}
-                                          {item.strategicAnalysis.alternativePerspectives.map((p, i) => (
-                                            <div key={i} className="p-4 bg-blue-50/50 border border-blue-100 rounded-lg text-xs text-blue-800 leading-relaxed">
-                                              <span className="font-black mr-2">PERSPECTIVE:</span> {p}
+                                            <span className="text-[12px] font-black uppercase tracking-[0.2em] font-mono">Core Intent</span>
+                                          </div>
+                                          <div className="bg-white p-6 rounded-2xl border border-brand-divider/5 shadow-sm">
+                                            <p className="text-[15px] text-slate-800 leading-relaxed font-bold">{item.strategicAnalysis.coreIntent}</p>
+                                          </div>
+                                        </div>
+
+                                        <div className="space-y-4">
+                                          <div className="flex items-center space-x-3 text-brand-primary">
+                                            <div className="w-8 h-8 bg-brand-primary/10 rounded-lg flex items-center justify-center">
+                                              <i className="fa-solid fa-compass text-xs"></i>
                                             </div>
-                                          ))}
+                                            <span className="text-[12px] font-black uppercase tracking-[0.2em] font-mono">Context & Stakes</span>
+                                          </div>
+                                          <div className="bg-white p-6 rounded-2xl border border-brand-divider/5 shadow-sm">
+                                            <p className="text-[15px] text-slate-600 leading-relaxed font-medium">{item.strategicAnalysis.context}</p>
+                                          </div>
                                         </div>
                                       </div>
 
-                                      <div className="space-y-4">
-                                        <div className="flex items-center space-x-2 text-brand-secondary">
-                                          <i className="fa-solid fa-circle-question text-xs"></i>
-                                          <span className="text-[11px] font-black uppercase tracking-widest font-mono">Strategic Questions</span>
+                                      {/* Middle Section: Questions & Recommendations */}
+                                      <div className="grid grid-cols-1 lg:grid-cols-2 gap-12 pt-12 border-t border-brand-divider/10">
+                                        <div className="space-y-8">
+                                          <div className="flex items-center space-x-3 text-blue-600">
+                                            <div className="w-10 h-10 bg-blue-50 rounded-xl flex items-center justify-center">
+                                              <i className="fa-solid fa-circle-question text-lg"></i>
+                                            </div>
+                                            <span className="text-[12px] font-black uppercase tracking-[0.2em] font-mono">Strategic Questions</span>
+                                          </div>
+                                          <ul className="space-y-6">
+                                            {(item.strategicAnalysis.strategicQuestions || item.strategicAnalysis.ignoredQuestions || []).map((q, i) => (
+                                              <li key={i} className="text-[15px] text-blue-700 font-bold italic flex items-start gap-4 group">
+                                                <span className="text-2xl leading-none text-blue-400 group-hover:scale-110 transition-transform">?</span>
+                                                <span className="pt-1">{q}</span>
+                                              </li>
+                                            ))}
+                                          </ul>
                                         </div>
-                                        <ul className="space-y-3 pl-5">
-                                          {item.strategicAnalysis.ignoredQuestions.map((q, i) => (
-                                            <li key={i} className="text-xs text-brand-secondary font-bold italic flex items-start gap-3">
-                                              <span className="text-lg leading-none">?</span>
-                                              {q}
-                                            </li>
-                                          ))}
-                                        </ul>
+
+                                        <div className="space-y-8">
+                                          <div className="flex items-center space-x-3 text-emerald-600">
+                                            <div className="w-10 h-10 bg-emerald-50 rounded-xl flex items-center justify-center">
+                                              <i className="fa-solid fa-lightbulb text-lg"></i>
+                                            </div>
+                                            <span className="text-[12px] font-black uppercase tracking-[0.2em] font-mono">Recommendations</span>
+                                          </div>
+                                          <ul className="space-y-6">
+                                            {(item.strategicAnalysis.recommendations || []).map((rec, i) => (
+                                              <li key={i} className="text-[15px] text-emerald-700 font-bold flex items-start gap-4 group">
+                                                <div className="w-6 h-6 bg-emerald-100 text-emerald-600 rounded-lg flex items-center justify-center shrink-0 mt-0.5 group-hover:translate-x-1 transition-transform">
+                                                  <i className="fa-solid fa-arrow-right text-[10px]"></i>
+                                                </div>
+                                                <span className="pt-0.5">{rec}</span>
+                                              </li>
+                                            ))}
+                                          </ul>
+                                        </div>
                                       </div>
 
-                                      <div className="p-6 bg-brand-primary text-brand-accent rounded-xl space-y-4 shadow-xl">
-                                        <div className="flex items-center space-x-2">
-                                          <i className="fa-solid fa-chess text-xs"></i>
-                                          <span className="text-[11px] font-black uppercase tracking-widest font-mono">Recommended Framework</span>
-                                        </div>
-                                        <p className="text-xs leading-relaxed opacity-90">{item.strategicAnalysis.decisionFramework}</p>
-                                        <div className="pt-4 border-t border-brand-accent/20">
-                                          <span className="text-[10px] font-black uppercase tracking-widest block mb-3">Next Strategic Steps</span>
-                                          <div className="space-y-2">
-                                            {item.strategicAnalysis.nextSteps.map((step, i) => (
-                                              <div key={i} className="flex items-center gap-3 text-[11px] font-bold">
-                                                <span className="w-5 h-5 rounded-full bg-brand-accent/20 flex items-center justify-center text-[10px]">{i + 1}</span>
-                                                {step}
+                                      {/* Unresolved Topics Section */}
+                                      <div className="pt-12 border-t border-brand-divider/10">
+                                        <UnresolvedTopicsDetector unresolvedTopics={item.strategicAnalysis.unresolvedTopics || []} />
+                                      </div>
+
+                                      {/* Bottom Section: Framework & Steps */}
+                                      <div className="grid grid-cols-1 lg:grid-cols-2 gap-12 pt-12 border-t border-brand-divider/10">
+                                        <div className="space-y-6">
+                                          <div className="flex items-center space-x-3 text-amber-600">
+                                            <div className="w-8 h-8 bg-amber-50 rounded-lg flex items-center justify-center">
+                                              <i className="fa-solid fa-triangle-exclamation text-xs"></i>
+                                            </div>
+                                            <span className="text-[12px] font-black uppercase tracking-[0.2em] font-mono">Assumptions & Risks</span>
+                                          </div>
+                                          <div className="grid gap-4">
+                                            {item.strategicAnalysis.assumptions.map((a, i) => (
+                                              <div key={i} className="p-5 bg-amber-50/50 border border-amber-100 rounded-2xl text-[13px] text-slate-700 font-medium flex items-start gap-4">
+                                                <span className="w-2 h-2 rounded-full bg-amber-400 mt-1.5 shrink-0"></span>
+                                                {a}
                                               </div>
                                             ))}
                                           </div>
                                         </div>
+
+                                        <div className="bg-brand-primary text-brand-accent rounded-[2.5rem] p-10 space-y-8 shadow-2xl shadow-brand-primary/30 relative overflow-hidden group">
+                                          <div className="absolute top-0 right-0 w-40 h-40 bg-white/5 rounded-full -mr-20 -mt-20 blur-3xl group-hover:bg-white/10 transition-colors" />
+                                          
+                                          <div className="relative z-10 space-y-4">
+                                            <div className="flex items-center space-x-3">
+                                              <div className="w-10 h-10 bg-white/10 rounded-xl flex items-center justify-center">
+                                                <i className="fa-solid fa-chess text-lg"></i>
+                                              </div>
+                                              <span className="text-[12px] font-black uppercase tracking-[0.2em] font-mono">Decision Framework</span>
+                                            </div>
+                                            <p className="text-[15px] leading-relaxed font-bold opacity-90">{item.strategicAnalysis.decisionFramework}</p>
+                                          </div>
+
+                                          <div className="relative z-10 pt-8 border-t border-white/10">
+                                            <span className="text-[11px] font-black uppercase tracking-[0.2em] block mb-6 opacity-60">Next Strategic Steps</span>
+                                            <div className="space-y-4">
+                                              {item.strategicAnalysis.nextSteps.map((step, i) => (
+                                                <div key={i} className="flex items-center gap-5 group/step">
+                                                  <div className="w-10 h-10 rounded-2xl bg-white/10 flex items-center justify-center text-[13px] font-black group-hover/step:bg-brand-accent group-hover/step:text-brand-primary transition-all duration-300">
+                                                    {i + 1}
+                                                  </div>
+                                                  <span className="text-[14px] font-bold tracking-tight">{step}</span>
+                                                </div>
+                                              ))}
+                                            </div>
+                                          </div>
+                                        </div>
                                       </div>
                                     </div>
+                                  ) : isThinkingLimitReached ? (
+                                    renderThinkingLimitMessage()
+                                  ) : (
+                                    <div className="py-24 flex flex-col items-center justify-center text-center space-y-8">
+                                      <div className="w-24 h-24 bg-brand-primary/5 rounded-full flex items-center justify-center text-brand-primary animate-pulse border border-brand-primary/10">
+                                        <i className="fa-solid fa-wand-magic-sparkles text-4xl"></i>
+                                      </div>
+                                      <div className="max-w-md space-y-3">
+                                        <h5 className="text-2xl font-black text-brand-primary tracking-tight">No Strategic Analysis Yet</h5>
+                                        <p className="text-sm text-slate-500 leading-relaxed font-medium">Run the strategic thinking partner to uncover hidden meaning, challenge assumptions, and reveal blind spots in this conversation.</p>
+                                      </div>
+                                      <button
+                                        disabled={isGuest || isAnalyzing === item.id}
+                                        onClick={() => {
+                                          if (isGuest) {
+                                            addNotification({
+                                              title: 'Feature Restricted',
+                                              message: 'AI Strategic Analysis is not available in Guest Mode. Please sign up to unlock full intelligence.',
+                                              type: 'error'
+                                            });
+                                            return;
+                                          }
+                                          runStrategicAnalysis(item);
+                                        }}
+                                        className={`px-10 py-5 bg-brand-primary text-brand-accent rounded-2xl text-[11px] font-black uppercase tracking-[0.2em] hover:shadow-2xl hover:-translate-y-1 active:scale-95 transition-all disabled:opacity-50 shadow-xl shadow-brand-primary/20 ${isGuest ? 'cursor-not-allowed' : ''}`}
+                                      >
+                                        {isAnalyzing === item.id ? (
+                                          <><i className="fa-solid fa-spinner fa-spin mr-3"></i> Initializing Strategic Engine...</>
+                                        ) : (
+                                          <><i className="fa-solid fa-bolt mr-3"></i> Generate Strategic Insights</>
+                                        )}
+                                      </button>
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          )}
+
+                          {/* Meeting Intelligence Section */}
+                          {(!item.selectedModules || item.selectedModules.includes('meeting')) && (
+                            <div className="bg-brand-primary/5 rounded-xl border border-brand-primary/10 overflow-hidden">
+                              <div 
+                                className={`p-6 flex items-center justify-between transition-colors ${isGuest ? 'cursor-not-allowed opacity-50' : 'hover:bg-brand-primary/10 cursor-pointer'}`}
+                                onClick={() => {
+                                  if (isGuest) {
+                                    addNotification({
+                                      title: 'Feature Restricted',
+                                      message: 'Meeting Intelligence is not available in Guest Mode. Please sign up to unlock full intelligence.',
+                                      type: 'error'
+                                    });
+                                    return;
+                                  }
+                                  toggleIntelligence(item.id);
+                                }}
+                              >
+                                <div className="flex items-center space-x-4">
+                                  <div className="w-10 h-10 bg-brand-primary text-brand-accent rounded-lg flex items-center justify-center shadow-md">
+                                    <i className="fa-solid fa-microchip text-lg"></i>
                                   </div>
-                                ) : (
-                                  <div className="py-20 flex flex-col items-center justify-center text-center space-y-6">
-                                    <div className="w-20 h-20 bg-brand-primary/10 rounded-full flex items-center justify-center text-brand-primary animate-pulse">
-                                      <i className="fa-solid fa-wand-magic-sparkles text-3xl"></i>
-                                    </div>
-                                    <div className="max-w-md space-y-2">
-                                      <h5 className="text-lg font-black text-brand-primary">No Strategic Analysis Yet</h5>
-                                      <p className="text-sm text-slate-500 leading-relaxed">Run the strategic thinking partner to uncover hidden meaning, challenge assumptions, and reveal blind spots in this conversation.</p>
-                                    </div>
+                                  <div>
+                                    <h4 className="text-sm font-black text-brand-primary tracking-tight">Meeting Intelligence</h4>
+                                    <p className="text-[10px] text-brand-secondary font-bold tracking-widest uppercase font-mono">Decisions, Tasks & Unresolved Topics</p>
+                                  </div>
+                                </div>
+                                <div className="flex items-center space-x-3">
+                                  {!item.meetingIntelligence && (
                                     <button
-                                      onClick={() => runStrategicAnalysis(item)}
-                                      disabled={isAnalyzing === item.id}
-                                      className="px-8 py-4 bg-brand-primary text-brand-accent rounded-xl text-xs font-black uppercase tracking-widest hover:shadow-2xl hover:-translate-y-1 transition-all disabled:opacity-50"
+                                      disabled={isGuest || isAnalyzing === item.id}
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        if (isGuest) {
+                                          addNotification({
+                                            title: 'Feature Restricted',
+                                            message: 'Meeting Intelligence is not available in Guest Mode. Please sign up to unlock full intelligence.',
+                                            type: 'error'
+                                          });
+                                          return;
+                                        }
+                                        runMeetingIntelligence(item);
+                                      }}
+                                      className={`px-4 py-2 bg-brand-primary text-brand-accent rounded-lg text-[10px] font-black uppercase tracking-widest hover:shadow-lg transition-all disabled:opacity-50 ${isGuest ? 'cursor-not-allowed' : ''}`}
                                     >
                                       {isAnalyzing === item.id ? (
-                                        <><i className="fa-solid fa-spinner fa-spin mr-3"></i> Initializing Strategic Engine...</>
+                                        <><i className="fa-solid fa-spinner fa-spin mr-2"></i> Analyzing...</>
                                       ) : (
-                                        <><i className="fa-solid fa-bolt mr-3"></i> Generate Strategic Insights</>
+                                        <><i className="fa-solid fa-wand-magic-sparkles mr-2"></i> Run Intelligence</>
                                       )}
                                     </button>
-                                  </div>
-                                )}
+                                  )}
+                                  <i className={`fa-solid fa-chevron-${expandedIntelligenceIds.has(item.id) ? 'up' : 'down'} text-brand-primary/40`}></i>
+                                </div>
                               </div>
-                            )}
-                          </div>
+
+                              {expandedIntelligenceIds.has(item.id) && (
+                                <div className="p-8 border-t border-brand-primary/10 bg-white/50 space-y-10 animate-in slide-in-from-top-2 duration-300">
+                                  {item.meetingIntelligence && !isThinkingLimitReached ? (
+                                    <MeetingIntelligenceView intelligence={item.meetingIntelligence} />
+                                  ) : isThinkingLimitReached ? (
+                                    renderThinkingLimitMessage()
+                                  ) : (
+                                    <div className="py-10 text-center text-slate-500 text-xs">
+                                      No intelligence data available. Run analysis to generate.
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          )}
+
+                          {/* Execution Tracker Section */}
+                          {(!item.selectedModules || item.selectedModules.includes('execution')) && (
+                            <div className="bg-brand-primary/5 rounded-xl border border-brand-primary/10 overflow-hidden">
+                              <div 
+                                className="p-6 flex items-center justify-between cursor-pointer hover:bg-brand-primary/10 transition-colors"
+                                onClick={() => toggleExecution(item.id)}
+                              >
+                                <div className="flex items-center space-x-4">
+                                  <div className="w-10 h-10 bg-brand-primary text-brand-accent rounded-lg flex items-center justify-center shadow-md">
+                                    <i className="fa-solid fa-gauge-high text-lg"></i>
+                                  </div>
+                                  <div>
+                                    <h4 className="text-sm font-black text-brand-primary tracking-tight">Execution Tracker</h4>
+                                    <p className="text-[10px] text-brand-secondary font-bold tracking-widest uppercase font-mono">Project Momentum & Accountability</p>
+                                  </div>
+                                </div>
+                                <div className="flex items-center space-x-3">
+                                  <i className={`fa-solid fa-chevron-${expandedExecutionIds.has(item.id) ? 'up' : 'down'} text-brand-primary/40`}></i>
+                                </div>
+                              </div>
+
+                              {expandedExecutionIds.has(item.id) && (
+                                <div className="p-8 border-t border-brand-primary/10 bg-white/50 space-y-10 animate-in slide-in-from-top-2 duration-300">
+                                  {item.executionTracker && !isThinkingLimitReached ? (
+                                    <ExecutionTrackerView 
+                                      tracker={item.executionTracker} 
+                                      onChangeTracker={(updatedTracker) => {
+                                        onUpdateAudio({
+                                          ...item,
+                                          executionTracker: updatedTracker
+                                        });
+                                      }}
+                                    />
+                                  ) : isThinkingLimitReached ? (
+                                    renderThinkingLimitMessage()
+                                  ) : (
+                                    <div className="py-10 text-center text-slate-500 text-xs">
+                                      No execution tracking data available.
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          )}
+
+                          {/* Smart Reminders Section */}
+                          {(!item.selectedModules || item.selectedModules.includes('reminders')) && (
+                            <div className="bg-brand-primary/5 rounded-xl border border-brand-primary/10 overflow-hidden">
+                              <div 
+                                className="p-6 flex items-center justify-between cursor-pointer hover:bg-brand-primary/10 transition-colors"
+                                onClick={() => toggleReminders(item.id)}
+                              >
+                                <div className="flex items-center space-x-4">
+                                  <div className="w-10 h-10 bg-brand-primary text-brand-accent rounded-lg flex items-center justify-center shadow-md">
+                                    <i className="fa-solid fa-calendar-check text-lg"></i>
+                                  </div>
+                                  <div>
+                                    <h4 className="text-sm font-black text-brand-primary tracking-tight">Smart Reminders</h4>
+                                    <p className="text-[10px] text-brand-secondary font-bold tracking-widest uppercase font-mono">Calendar Integration & Follow-ups</p>
+                                  </div>
+                                </div>
+                                <div className="flex items-center space-x-3">
+                                  <i className={`fa-solid fa-chevron-${expandedReminderIds.has(item.id) ? 'up' : 'down'} text-brand-primary/40`}></i>
+                                </div>
+                              </div>
+
+                              {expandedReminderIds.has(item.id) && (
+                                <div className="p-8 border-t border-brand-primary/10 bg-white/50 space-y-10 animate-in slide-in-from-top-2 duration-300">
+                                  {item.calendarReminders && !isThinkingLimitReached ? (
+                                    <SmartReminderView reminders={item.calendarReminders} />
+                                  ) : isThinkingLimitReached ? (
+                                    renderThinkingLimitMessage()
+                                  ) : (
+                                    <div className="py-10 text-center text-slate-500 text-xs">
+                                      No reminders available.
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          )}
+
+
+                          {/* Key Insights & Follow-up Section */}
+                          {(!item.selectedModules || item.selectedModules.includes('meeting')) && (
+                            <div className="bg-brand-primary/5 rounded-xl border border-brand-primary/10 overflow-hidden">
+                              <div 
+                                className="p-6 flex items-center justify-between cursor-pointer hover:bg-brand-primary/10 transition-colors"
+                                onClick={() => toggleFollowUp(item.id)}
+                              >
+                                <div className="flex items-center space-x-4">
+                                  <div className="w-10 h-10 bg-brand-primary text-brand-accent rounded-lg flex items-center justify-center shadow-md">
+                                    <i className="fa-solid fa-lightbulb text-lg"></i>
+                                  </div>
+                                  <div>
+                                    <h4 className="text-sm font-black text-brand-primary tracking-tight">Key Insights & Follow-up</h4>
+                                    <p className="text-[10px] text-brand-secondary font-bold tracking-widest uppercase font-mono">Strategic Takeaways & Next Steps</p>
+                                  </div>
+                                </div>
+                                <div className="flex items-center space-x-3">
+                                  <i className={`fa-solid fa-chevron-${expandedFollowUpIds.has(item.id) ? 'up' : 'down'} text-brand-primary/40`}></i>
+                                </div>
+                              </div>
+
+                              {expandedFollowUpIds.has(item.id) && (
+                                <div className="p-8 border-t border-brand-primary/10 bg-white/50 space-y-8 animate-in slide-in-from-top-2 duration-300">
+                                  {!isThinkingLimitReached ? (
+                                    <>
+                                      {item.unifiedIntelligence?.keyInsights && item.unifiedIntelligence.keyInsights.length > 0 && (
+                                        <div className="space-y-4">
+                                          <div className="flex items-center space-x-2 text-brand-primary">
+                                            <i className="fa-solid fa-star text-xs"></i>
+                                            <span className="text-[11px] font-black uppercase tracking-widest font-mono">Key Insights</span>
+                                          </div>
+                                          <ul className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                            {item.unifiedIntelligence.keyInsights.map((insight, i) => (
+                                              <li key={i} className="p-4 bg-white border border-brand-divider/10 rounded-lg text-xs text-slate-600 flex items-start gap-3">
+                                                <span className="w-1.5 h-1.5 rounded-full bg-brand-primary mt-1.5 shrink-0"></span>
+                                                {insight}
+                                              </li>
+                                            ))}
+                                          </ul>
+                                        </div>
+                                      )}
+
+                                      {item.unifiedIntelligence?.followUp && (
+                                        <div className="space-y-6 pt-6 border-t border-brand-divider/10">
+                                          <div className="flex items-center space-x-2 text-brand-primary">
+                                            <i className="fa-solid fa-paper-plane text-xs"></i>
+                                            <span className="text-[11px] font-black uppercase tracking-widest font-mono">Follow-up Plan</span>
+                                          </div>
+                                          
+                                          <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                                            <div className="space-y-4">
+                                              <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest block">Next Meeting Agenda</span>
+                                              <ul className="space-y-2">
+                                                {(item.unifiedIntelligence.followUp.nextMeetingAgenda || []).map((agenda, i) => (
+                                                  <li key={i} className="text-xs text-slate-600 flex items-start gap-3">
+                                                    <span className="font-mono text-brand-primary/40">{i+1}.</span>
+                                                    {agenda}
+                                                  </li>
+                                                ))}
+                                              </ul>
+                                            </div>
+                                            <div className="space-y-4">
+                                              <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest block">Pending Items</span>
+                                              <ul className="space-y-2">
+                                                {(item.unifiedIntelligence.followUp.keyPendingItems || []).map((item, i) => (
+                                                  <li key={i} className="text-xs text-slate-600 flex items-start gap-3">
+                                                    <span className="w-1 h-1 rounded-full bg-brand-secondary mt-2 shrink-0"></span>
+                                                    {item}
+                                                  </li>
+                                                ))}
+                                              </ul>
+                                            </div>
+                                          </div>
+                                        </div>
+                                      )}
+
+                                      {!item.unifiedIntelligence?.keyInsights && !item.unifiedIntelligence?.followUp && (
+                                        <div className="py-10 text-center text-slate-500 text-xs">
+                                          No additional insights or follow-up data available.
+                                        </div>
+                                      )}
+                                    </>
+                                  ) : (
+                                    renderThinkingLimitMessage()
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          )}
 
                           {/* Full Transcript with Bookmarking */}
                           <div className="space-y-6">
@@ -1653,48 +2167,43 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
                     <div className="flex flex-col md:flex-row items-center justify-between gap-8">
                       <div className="flex-1 space-y-3">
                         <div className="flex items-center space-x-3">
-                           <span className={`text-[11px] font-medium uppercase px-2 py-1 rounded border tracking-widest ${item.gender === 'male' ? 'bg-blue-50 text-blue-500 border-blue-100' : 'bg-pink-50 text-pink-500 border-pink-100'}`}>{item.gender} Voice</span>
-                           <span className="text-[10px] font-bold bg-slate-100 text-slate-500 px-2 py-1 rounded-md uppercase tracking-widest border border-slate-200/50">
-                             {projects.some(p => p.name === item.group) ? (item.group || 'General') : 'General'}
-                           </span>
-                           <div className="flex flex-col">
-                             <label className="text-[8px] font-black text-slate-400 mb-1 ml-1">Project</label>
-                             <select 
-                               value={item.group} 
-                               onChange={(e) => {
-                                 const value = e.target.value;
-                                 if (value === 'new') {
-                                   onAddGroup(''); // This should open the modal in App.tsx
-                                   return;
-                                 }
-                                 
-                                 if (!checkPermission(item, 'edit')) {
-                                   alert("You do not have permission to change the project for this asset.");
-                                   return;
-                                 }
-                                 
-                                 // Check permission for the target group
-                                 const targetProject = (projects as Project[]).find(p => p.name === value);
-                                 if (targetProject && targetProject.ownerEmail !== userProfile?.email) {
-                                   const member = targetProject.members?.find(m => m.email === userProfile?.email);
-                                   if (member && member.role === 'viewer') {
-                                     alert("You do not have permission to add content to the target project.");
-                                     return;
-                                   }
-                                 }
+                           <span className={`text-[11px] font-black uppercase px-2 py-1 rounded border tracking-widest ${item.gender === 'male' ? 'bg-blue-50 text-blue-500 border-blue-100' : 'bg-pink-50 text-pink-500 border-pink-100'}`}>{item.gender} Voice</span>
+                           <div className="flex flex-col min-w-[100px]">
+                              <label className="text-[8px] font-black text-slate-400 mb-1 ml-1 uppercase tracking-tighter">Project Group</label>
+                              <select 
+                                value={item.group} 
+                                onChange={(e) => {
+                                  const value = e.target.value;
+                                  if (value === 'new') {
+                                    onAddGroup(''); // This should open the modal in App.tsx
+                                    return;
+                                  }
+                                  
+                                  if (!checkPermission(item, 'edit')) {
+                                    alert("You do not have permission to change the project for this asset.");
+                                    return;
+                                  }
+                                  
+                                  // Check permission for the target group
+                                  const targetProject = (projects as Project[]).find(p => p.name === value);
+                                  if (targetProject && targetProject.ownerEmail !== userProfile?.email) {
+                                    const member = targetProject.members?.find(m => m.email === userProfile?.email);
+                                    if (member && member.role === 'viewer') {
+                                      alert("You do not have permission to add content to the target project.");
+                                      return;
+                                    }
+                                  }
 
-                                 onUpdateText({ ...item, group: value });
-                               }} 
-                               className="bg-brand-background border border-brand-divider/20 px-3 py-1.5 text-[11px] font-medium uppercase tracking-widest rounded-lg focus:ring-1 focus:ring-brand-primary text-slate-400"
-                             >
+                                  onUpdateText({ ...item, group: value });
+                                }} 
+                                className="bg-slate-50 border border-slate-200 px-2 py-1 text-[10px] font-bold uppercase tracking-tight rounded-md focus:ring-1 focus:ring-brand-primary/30 outline-none transition-all text-brand-primary"
+                              >
                                 {groups.map(g => (
-                                  <option key={g} value={g}>
-                                    {g === 'General' ? 'General (Default)' : g}
-                                  </option>
+                                  <option key={g} value={g}>{g}</option>
                                 ))}
-                                <option value="new">+ Create new project</option>
-                             </select>
-                           </div>
+                                <option value="new">+ New Project</option>
+                              </select>
+                            </div>
                            <span className="text-[11px] font-medium text-slate-300 uppercase tracking-widest">{item.date}</span>
                         </div>
                         <div className="space-y-2">
@@ -1720,10 +2229,10 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
                            <>
                              <button 
                                onClick={() => {
-                                 if (usageStats.plan === 'guest' || usageStats.plan === 'free') {
+                                 if (usageStats.mode === 'guest') {
                                    addNotification({
-                                     title: 'Plan Limitation',
-                                     message: 'Collaboration features are only available in Pro and Enterprise plans.',
+                                     title: 'Feature Restricted',
+                                     message: 'Collaboration features are not available in Guest Mode. Please create an account to unlock.',
                                      type: 'error'
                                    });
                                    return;

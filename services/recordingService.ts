@@ -81,18 +81,19 @@ export const uploadAndProcessRecording = async (
               const base64Audio = (reader.result as string).split(',')[1];
               const aiResult = await processAudioTranscription(base64Audio, file.type);
 
-              // 5. Store Transcript
-              const transcriptId = doc(collection(db, 'transcripts')).id;
+              // 5. Store Transcription
+              const transcriptionId = doc(collection(db, 'transcriptions')).id;
               const transcript: Transcript = {
-                id: transcriptId,
+                id: transcriptionId,
                 recordingId,
+                userId: user.uid,
                 summary: aiResult.summary || '',
                 actionItems: aiResult.actionItems || [],
                 segments: aiResult.segments || [],
                 createdAt: new Date().toISOString()
               };
 
-              await setDoc(doc(db, 'transcripts', transcriptId), {
+              await setDoc(doc(db, 'transcriptions', transcriptionId), {
                 ...transcript,
                 createdAt: serverTimestamp()
               });

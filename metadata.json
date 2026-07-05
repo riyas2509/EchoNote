@@ -1,7 +1,7 @@
 {
-  "name": "EchoNote Website",
+  "name": "EchoNote",
   "description": "EchoNote is a premium AI audio intelligence platform featuring advanced multi-speaker transcription, natural conversation replay, and high-fidelity text-to-speech synthesis.",
   "requestFramePermissions": [
     "microphone"
   ]
-}
+} 

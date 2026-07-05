@@ -1,136 +1,198 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-
-    // ===============================================================
-    // Helper Functions
-    // ===============================================================
-
+    
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+    
+    // Helper functions
     function isAuthenticated() {
       return request.auth != null;
     }
 
+    function isAdmin() {
+      return isAuthenticated() && 
+             exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+             get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin';
+    }
+    
     function isOwner(userId) {
       return isAuthenticated() && request.auth.uid == userId;
     }
-
-    function isAdmin() {
-      return isAuthenticated() &&
-        (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' ||
-          (request.auth.token.email == "riyamshah2509@gmail.com" && request.auth.token.email_verified == true));
+    
+    function isDocOwner() {
+      return isAuthenticated() && request.auth.uid == resource.data.userId;
     }
 
-    function hasRequiredFields(fields) {
-      return request.resource.data.keys().hasAll(fields);
+    function isValidId(id) {
+      return id is string && id.size() <= 128;
     }
 
-    function hasOnlyAllowedFields(fields) {
-      return request.resource.data.keys().hasOnly(fields);
+    function isProjectOwner(projectId) {
+      return isAuthenticated() && get(/databases/$(database)/documents/projects/$(projectId)).data.userId == request.auth.uid;
     }
 
-    function uidUnchanged() {
-      return !('uid' in request.resource.data) || request.resource.data.uid == request.auth.uid;
+    function isProjectMember(projectId) {
+      return isAuthenticated() && (
+        // Check if owner
+        (exists(/databases/$(database)/documents/projects/$(projectId)) && 
+         get(/databases/$(database)/documents/projects/$(projectId)).data.userId == request.auth.uid) ||
+        // Check if member
+        exists(/databases/$(database)/documents/projectMembers/$(request.auth.uid + "_" + projectId))
+      );
     }
 
-    function uidNotModified() {
-      return !('uid' in request.resource.data) || request.resource.data.uid == resource.data.uid;
-    }
-
-    // ===============================================================
-    // Domain Validators
-    // ===============================================================
-
-    function isValidUser(data) {
-      return hasOnlyAllowedFields(['uid', 'email', 'displayName', 'role', 'plan', 'minutesUsed', 'minutesLimit', 'thinkingUsageCount', 'teamId', 'razorpayCustomerId', 'totalMinutesProcessed', 'createdAt']) &&
-             data.uid is string && data.uid.size() < 128 &&
-             data.email is string && data.email.size() < 256 &&
-             (data.displayName == null || (data.displayName is string && data.displayName.size() < 256)) &&
-             data.plan in ['free', 'pro', 'team', 'enterprise'] &&
-             (!('minutesUsed' in data) || data.minutesUsed is number) &&
-             (!('minutesLimit' in data) || data.minutesLimit is number) &&
-             (!('thinkingUsageCount' in data) || data.thinkingUsageCount is number) &&
-             (!('teamId' in data) || data.teamId is string);
-    }
-
-    function isValidAudioRecord(data) {
-      return hasRequiredFields(['id', 'date', 'fileName', 'status', 'ownerUid']) &&
-             data.id is string && data.id.size() < 128 &&
-             data.ownerUid is string && data.ownerUid.size() < 128 &&
-             data.fileName is string && data.fileName.size() < 512 &&
-             data.status in ['pending', 'processing', 'completed', 'error', 'draft'];
-    }
-
-    function isValidTextRecord(data) {
-      return hasRequiredFields(['id', 'date', 'audioUrl', 'ownerUid']) &&
-             data.id is string && data.id.size() < 128 &&
-             data.ownerUid is string && data.ownerUid.size() < 128 &&
-             data.audioUrl is string && data.audioUrl.size() < 2048;
-    }
-
-    function isValidProject(data) {
-      return hasRequiredFields(['id', 'name', 'ownerId', 'createdAt']) &&
-             data.id is string && data.id.size() < 128 &&
-             data.name is string && data.name.size() < 256 &&
-             data.ownerId is string && data.ownerId.size() < 128 &&
-             (!('isDefault' in data) || data.isDefault is bool);
-    }
-
-    function isValidDecisionHistory(data) {
-      return hasRequiredFields(['userId', 'title', 'inputType', 'inputText', 'output', 'createdAt']) &&
-             data.userId is string && data.userId.size() < 128 &&
-             data.title is string && data.title.size() < 512 &&
-             data.inputType in ['transcript', 'summary'] &&
-             data.inputText is string && data.inputText.size() < 100000 &&
-             data.output is map;
-    }
-
-    // ===============================================================
-    // Match Rules
-    // ===============================================================
-
+    // User Profiles
     match /users/{userId} {
-      allow read: if isOwner(userId) || isAdmin();
-      allow create: if isOwner(userId) && isValidUser(request.resource.data) && (request.resource.data.role == 'user' || isAdmin()) && (request.resource.data.plan == 'free' || isAdmin());
-      allow update: if (isOwner(userId) && 
-                       isValidUser(request.resource.data) && 
-                       request.resource.data.role == resource.data.role && 
-                       (request.resource.data.plan == resource.data.plan || isAdmin()) &&
-                       request.resource.data.get('thinkingUsageCount', 0) >= resource.data.get('thinkingUsageCount', 0) &&
-                       request.resource.data.get('minutesUsed', 0) >= resource.data.get('minutesUsed', 0)
-                      ) || isAdmin();
+      allow read: if isOwner(userId);
+      allow write: if isOwner(userId);
     }
-
-    match /audioRecords/{recordId} {
-      allow read: if isAuthenticated() && (resource.data.ownerUid == request.auth.uid || isAdmin());
-      allow create: if isAuthenticated() && request.resource.data.ownerUid == request.auth.uid && isValidAudioRecord(request.resource.data);
-      allow update: if isAuthenticated() && resource.data.ownerUid == request.auth.uid && isValidAudioRecord(request.resource.data) && request.resource.data.ownerUid == resource.data.ownerUid;
-      allow delete: if isAuthenticated() && (resource.data.ownerUid == request.auth.uid || isAdmin());
-    }
-
-    match /textRecords/{recordId} {
-      allow read: if isAuthenticated() && (resource.data.ownerUid == request.auth.uid || isAdmin());
-      allow create: if isAuthenticated() && request.resource.data.ownerUid == request.auth.uid && isValidTextRecord(request.resource.data);
-      allow update: if isAuthenticated() && resource.data.ownerUid == request.auth.uid && isValidTextRecord(request.resource.data) && request.resource.data.ownerUid == resource.data.ownerUid;
-      allow delete: if isAuthenticated() && (resource.data.ownerUid == request.auth.uid || isAdmin());
-    }
-
+    
+    // Projects
     match /projects/{projectId} {
-      allow read: if isAuthenticated() && (resource.data.ownerId == request.auth.uid || isAdmin());
-      allow create: if isAuthenticated() && request.resource.data.ownerId == request.auth.uid && isValidProject(request.resource.data);
-      allow update: if isAuthenticated() && resource.data.ownerId == request.auth.uid && isValidProject(request.resource.data) && request.resource.data.ownerId == resource.data.ownerId && (resource.data.get('isDefault', false) == false || request.resource.data.name == resource.data.name);
-      allow delete: if isAuthenticated() && (resource.data.ownerId == request.auth.uid || isAdmin()) && resource.data.get('isDefault', false) == false;
+      allow read: if isAuthenticated() && (
+        resource.data.userId == request.auth.uid || 
+        isProjectMember(projectId)
+      );
+      allow write: if isAuthenticated() && (resource == null || resource.data.userId == request.auth.uid);
     }
 
-    match /decisionHistory/{historyId} {
-      allow read: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
-      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid && isValidDecisionHistory(request.resource.data);
-      allow update: if isAuthenticated() && resource.data.userId == request.auth.uid && isValidDecisionHistory(request.resource.data) && request.resource.data.userId == resource.data.userId;
-      allow delete: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
+    // Project Members
+    match /projectMembers/{memberId} {
+      allow read: if isAuthenticated() && (
+        resource.data.userId == request.auth.uid || 
+        resource.data.ownerId == request.auth.uid ||
+        isProjectMember(resource.data.projectId) ||
+        // Double check for ownership/membership via ID
+        memberId.startsWith(request.auth.uid + "_") ||
+        isProjectOwner(resource.data.projectId)
+      );
+      allow create: if isAuthenticated() && 
+        request.resource.data.userId == request.auth.uid;
+      allow delete: if isAuthenticated() && (
+        resource.data.userId == request.auth.uid || 
+        isProjectOwner(resource.data.projectId)
+      );
     }
 
-    // Default deny
-    match /{allPaths=**} {
-      allow read, write: if false;
+    // Invitations
+    match /invites/{inviteId} {
+      allow read: if true; // Needed for join page validation before login if needed, or just let everyone see if they have the token
+      allow create: if isAuthenticated(); // Ideally check if project owner
+      allow update: if isAuthenticated() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status']);
+    }
+    
+    // Recordings
+    match /recordings/{recordingId} {
+       allow read: if isProjectMember(resource.data.group) || isProjectMember(resource.data.projectId) || isOwner(resource.data.userId);
+       allow write: if isAuthenticated() && (resource == null || isProjectMember(request.resource.data.projectId) || isOwner(request.resource.data.userId));
+    }
+    
+    // Transcriptions
+    match /transcriptions/{transcriptionId} {
+       allow read: if isProjectMember(resource.data.group) || isProjectMember(resource.data.projectId) || isOwner(resource.data.userId);
+       allow write: if isAuthenticated() && (resource == null || isProjectMember(request.resource.data.projectId) || isOwner(request.resource.data.userId));
+    }
+    
+    // Usage
+    match /usage/{userId} {
+      allow read: if isOwner(userId);
+      allow write: if isOwner(userId);
+    }
+
+    // Decision History
+    match /decisionHistory/{id} {
+      function isValidDecisionHistory(data) {
+        return data.userId == request.auth.uid &&
+               data.title is string && data.title.size() <= 500 &&
+               data.inputType in ['transcript', 'summary'] &&
+               data.inputText is string && data.inputText.size() <= 2000000 &&
+               data.output is map;
+      }
+      
+      allow read: if isAuthenticated() && (resource.data.userId == request.auth.uid);
+      allow create: if isAuthenticated() && isValidDecisionHistory(request.resource.data) && (request.resource.data.createdAt == request.time || request.resource.data.createdAt == null);
+      allow update: if false; // Decisions are immutable record of analysis
+      allow delete: if isAuthenticated() && resource.data.userId == request.auth.uid;
+    }
+    
+    // Subscriptions
+    match /subscriptions/{id} {
+      allow read: if isAuthenticated() && resource.data.userId == request.auth.uid;
+      allow write: if false; // Only server-side or admin
+    }
+
+    // Project Activities
+    match /projectActivities/{id} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+      allow delete: if isAuthenticated() && (resource.data.userId == request.auth.uid || isProjectOwner(resource.data.projectId));
+    }
+    
+    // Health Check
+    match /healthcheck/{id} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // AI Usage Logs (Admin only, secure read access, no client writes)
+    match /aiUsageLogs/{id} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
+    // User Cost Analytics (Admin only, secure aggregate read access, no client writes)
+    match /userCostAnalytics/{id} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
+    // Extended User Analytics (Admin only, secure aggregate read access, no client writes)
+    match /userAnalytics/{id} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
+    // Team Analytics (Admin only, secure aggregate read access, no client writes)
+    match /teamAnalytics/{id} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
+    // Monthly platform analytics (Admin only, secure aggregate read access, no client writes)
+    match /monthlyAnalytics/{id} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
+    // Feature Analytics (Admin only, secure aggregate read access, no client writes)
+    match /featureAnalytics/{id} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
+    // Organizations
+    match /organizations/{orgId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && request.resource.data.ownerEmail == request.auth.token.email;
+      allow update, delete: if isAuthenticated() && resource.data.ownerEmail == request.auth.token.email;
+    }
+
+    // Teams
+    match /teams/{teamId} {
+      allow read, write: if isAuthenticated();
+    }
+
+    // Org Members
+    match /orgMembers/{memberId} {
+      allow read, write: if isAuthenticated();
+    }
+
+    // Org Invoices
+    match /orgInvoices/{invoiceId} {
+      allow read, write: if isAuthenticated();
     }
   }
 }

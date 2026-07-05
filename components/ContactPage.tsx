@@ -35,7 +35,7 @@ const ContactPage: React.FC = () => {
               </div>
               <div className="space-y-1">
                 <h3 className="font-bold text-brand-primary">Email Support</h3>
-                <p className="text-brand-secondary/60 text-sm">support@echonote.ai</p>
+                <p className="text-brand-secondary/60 text-sm">riya@echotechai.in</p>
                 <p className="text-brand-secondary/40 text-[12px]">Response time: ~2 hours</p>
               </div>
             </div>
@@ -45,19 +45,11 @@ const ContactPage: React.FC = () => {
               </div>
               <div className="space-y-1">
                 <h3 className="font-bold text-brand-primary">Sales Inquiry</h3>
-                <p className="text-brand-secondary/60 text-sm">sales@echonote.ai</p>
+                <p className="text-brand-secondary/60 text-sm">riyamshah2509@gmail.com</p>
                 <p className="text-brand-secondary/40 text-[12px]">Response time: ~24 hours</p>
               </div>
             </div>
-            <div className="flex items-start space-x-6">
-              <div className="w-12 h-12 rounded-xl bg-brand-primary/5 flex items-center justify-center text-brand-primary shrink-0">
-                <Globe size={24} />
-              </div>
-              <div className="space-y-1">
-                <h3 className="font-bold text-brand-primary">Headquarters</h3>
-                <p className="text-brand-secondary/60 text-sm">123 AI Boulevard, San Francisco, CA 94105</p>
-              </div>
-            </div>
+
           </div>
         </motion.div>
 

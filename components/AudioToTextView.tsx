@@ -1,11 +1,17 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { transcribeAudio, summarizeTranscript, analyzeStrategically } from '../services/geminiService';
+import { MessageSquareOff, ArrowRight, AlertTriangle } from 'lucide-react';
+import UnresolvedTopicsDetector from './UnresolvedTopicsDetector';
+import MeetingIntelligenceView from './MeetingIntelligenceView';
+import ExecutionTrackerView from './ExecutionTrackerView';
+import SmartReminderView from './SmartReminderView';
+import { transcribeAudio, summarizeTranscript, analyzeStrategically, processUnifiedMeetingIntelligence } from '../services/geminiService';
 import { PLAN_FEATURES } from '../config/planConfig';
+import { getMinutesUsage, getThinkingUsage } from '../lib/usageUtils';
 import { executeDownload, generateTranscriptBlob } from '../services/downloadService';
-import { AudioToTextRecord, TranscriptSegment, AuthStatus, UserProfile, Bookmark, SpeakerMapping, CollaborationRole, PlaybackMetadata, PlaybackStatus, CallSummary, UsageStats, Project } from '../types';
+import { AudioToTextRecord, TranscriptSegment, AuthStatus, UserProfile, Bookmark, SpeakerMapping, CollaborationRole, PlaybackMetadata, PlaybackStatus, CallSummary, UsageStats, Project, ExecutionTracker, OrgRole } from '../types';
 
 interface AudioToTextViewProps {
-  onSave: (record: AudioToTextRecord) => void;
+  onSave: (record: AudioToTextRecord) => void; 
   groups: string[];
   projects: Project[];
   onAddGroup: (name: string) => void;
@@ -23,18 +29,34 @@ interface AudioToTextViewProps {
   addNotification: (notif: any) => void;
   usageStats: UsageStats;
   onDeductMinutes: (minutes: number) => void;
-  onUpgradeClick: () => void;
-  onBuyAddOnClick: () => void;
   onSignInClick: () => void;
   searchTerm?: string;
+  checkThinkingLimit: () => boolean;
+  checkTranscriptionLimit: (minutes: number) => boolean;
+  incrementThinkingUsage: () => Promise<void>;
+  incrementTranscriptionUsage: (minutes: number) => Promise<void>;
+  userOrgRole?: OrgRole;
 }
 
 const AudioToTextView: React.FC<AudioToTextViewProps> = ({ 
   onSave, groups, projects, onAddGroup, onInviteToProject, authStatus, userProfile, onNewProject, lastCreatedProjectId,
   activePlaybackId, activePlaybackSegIdx, playbackStatus, onPlay, onPause, onStop,
-  addNotification, usageStats, onDeductMinutes, onUpgradeClick, onBuyAddOnClick, onSignInClick, searchTerm = ''
+  addNotification, usageStats, onDeductMinutes, onSignInClick, searchTerm = '',
+  checkThinkingLimit, checkTranscriptionLimit, incrementThinkingUsage, incrementTranscriptionUsage, userOrgRole
 }) => {
+  const isGuest = usageStats.plan === 'guest';
+  const isFree = usageStats.plan === 'free';
+  const isPro = usageStats.plan === 'pro';
+
+  const getApiUrl = (path: string) => {
+    const baseUrl = import.meta.env.VITE_API_URL || "";
+    return `${baseUrl}${path}`;
+  };
+
   const checkPermission = (record: AudioToTextRecord, action: 'edit' | 'delete') => {
+    if (userOrgRole === 'super_admin' || userOrgRole === 'org_admin') return true;
+    if (userOrgRole === 'viewer') return false;
+
     if (record.group === 'General') return true;
     if (authStatus === AuthStatus.GUEST) return false;
     
@@ -47,6 +69,11 @@ const AudioToTextView: React.FC<AudioToTextViewProps> = ({
     if (project.ownerEmail === userProfile?.email) return true;
 
     const member = project.members?.find(m => m.email === userProfile?.email);
+    
+    if (userOrgRole === 'team_manager') {
+      return true;
+    }
+
     if (!member) return false;
 
     if (action === 'delete') {
@@ -66,6 +93,9 @@ const AudioToTextView: React.FC<AudioToTextViewProps> = ({
   const [activeTab, setActiveTab] = useState<'recorded' | 'live'>('recorded');
   const [expandedSummaryIds, setExpandedSummaryIds] = useState<Set<string>>(new Set());
   const [expandedStrategicAnalysisIds, setExpandedStrategicAnalysisIds] = useState<Set<string>>(new Set());
+  const [expandedIntelligenceIds, setExpandedIntelligenceIds] = useState<Set<string>>(new Set());
+  const [expandedExecutionTrackerIds, setExpandedExecutionTrackerIds] = useState<Set<string>>(new Set());
+  const [expandedSmartReminderIds, setExpandedSmartReminderIds] = useState<Set<string>>(new Set());
   const [editingFileName, setEditingFileName] = useState<{ id: string, name: string } | null>(null);
   const [showUsageModal, setShowUsageModal] = useState(false);
   const [usageError, setUsageError] = useState<string | null>(null);
@@ -112,6 +142,33 @@ const AudioToTextView: React.FC<AudioToTextViewProps> = ({
     });
   };
 
+  const toggleMeetingIntelligence = (id: string) => {
+    setExpandedIntelligenceIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleExecutionTracker = (id: string) => {
+    setExpandedExecutionTrackerIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleSmartReminders = (id: string) => {
+    setExpandedSmartReminderIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
   const runStrategicAnalysis = async (id: string) => {
     const queue = activeTab === 'recorded' ? recordedQueue : liveQueue;
     const record = queue.find(r => r.id === id);
@@ -121,6 +178,16 @@ const AudioToTextView: React.FC<AudioToTextViewProps> = ({
     
     setter(prev => prev.map(r => r.id === id ? { ...r, status: 'processing', processingStep: "Performing Strategic Analysis..." } : r));
 
+    if (!checkThinkingLimit()) {
+      setter(prev => prev.map(r => r.id === id ? { ...r, status: 'completed' } : r));
+      addNotification({
+        title: 'Thinking Limit Reached',
+        message: 'You have reached your thinking engine limit for the free plan.',
+        type: 'error'
+      });
+      return;
+    }
+
     try {
       // Prefer summary for analysis if available, otherwise use transcript
       const analysisType = record.summary ? 'summary' : 'transcript';
@@ -128,7 +195,8 @@ const AudioToTextView: React.FC<AudioToTextViewProps> = ({
         ? `Main Topic: ${record.summary.mainTopic}\nKey Points: ${record.summary.keyPoints.join(', ')}\nDecisions: ${record.summary.decisions.join(', ')}\nAction Items: ${record.summary.actionItems.join(', ')}`
         : record.transcript.map(s => `${s.speaker}: ${s.text}`).join('\n');
 
-      const strategicAnalysis = await analyzeStrategically(content, analysisType);
+      const strategicAnalysis = await analyzeStrategically(content, analysisType, userProfile?.plan || 'free');
+      await incrementThinkingUsage();
       
       const updatedRecord = { ...record, strategicAnalysis, status: 'completed' as const };
       setter(prev => prev.map(r => r.id === id ? updatedRecord : r));
@@ -145,6 +213,58 @@ const AudioToTextView: React.FC<AudioToTextViewProps> = ({
       addNotification({
         title: "Analysis Error",
         message: "Failed to perform strategic analysis. Please try again.",
+        type: 'error'
+      });
+    }
+  };
+
+  const runMeetingIntelligence = async (id: string) => {
+    const queue = activeTab === 'recorded' ? recordedQueue : liveQueue;
+    const record = queue.find(r => r.id === id);
+    if (!record || record.status !== 'completed') return;
+
+    const setter = activeTab === 'recorded' ? setRecordedQueue : setLiveQueue;
+    
+    setter(prev => prev.map(r => r.id === id ? { ...r, status: 'processing', processingStep: "Generating Meeting Intelligence..." } : r));
+
+    if (!checkThinkingLimit()) {
+      setter(prev => prev.map(r => r.id === id ? { ...r, status: 'completed' } : r));
+      addNotification({
+        title: 'Thinking Limit Reached',
+        message: 'You have reached your thinking engine limit for the free plan.',
+        type: 'error'
+      });
+      return;
+    }
+
+    try {
+      const fullTranscript = record.transcript.map(s => `${s.speaker}: ${s.text}`).join('\n');
+      const unifiedIntelligence = await processUnifiedMeetingIntelligence(fullTranscript, userProfile?.plan || 'free');
+      await incrementThinkingUsage();
+      
+      const updatedRecord: AudioToTextRecord = { 
+        ...record, 
+        strategicAnalysis: unifiedIntelligence.strategicAnalysis,
+        meetingIntelligence: unifiedIntelligence.meetingIntelligence,
+        executionTracker: unifiedIntelligence.executionTracker,
+        calendarReminders: unifiedIntelligence.calendarReminders,
+        unifiedIntelligence,
+        status: 'completed' as const 
+      };
+      setter(prev => prev.map(r => r.id === id ? updatedRecord : r));
+      onSave(updatedRecord);
+      
+      addNotification({
+        title: "Meeting Intelligence Ready",
+        message: `Intelligence score for "${record.fileName}" is ready.`,
+        recordId: id,
+        type: 'audio'
+      });
+    } catch (e) {
+      setter(prev => prev.map(r => r.id === id ? { ...r, status: 'completed' } : r));
+      addNotification({
+        title: "Analysis Error",
+        message: "Failed to generate meeting intelligence. Please try again.",
         type: 'error'
       });
     }
@@ -201,8 +321,10 @@ const AudioToTextView: React.FC<AudioToTextViewProps> = ({
     setSelectedFormat('');
   };
 
+  const minutesUsage = getMinutesUsage(usageStats);
+  
   const startRecording = async () => {
-    if (usageStats.usedMinutes >= usageStats.totalMinutes) {
+    if (minutesUsage.isExceeded) {
       setShowUsageModal(true);
       return;
     }
@@ -234,10 +356,10 @@ const AudioToTextView: React.FC<AudioToTextViewProps> = ({
     
     // Deduct minutes for live recording
     const estimatedMinutes = Math.max(1, Math.ceil(audioBlob.size / (1024 * 1024)));
-    onDeductMinutes(estimatedMinutes);
     
     const newLiveRecord: AudioToTextRecord = {
       id: Math.random().toString(36).substr(2, 9),
+      userId: userProfile?.uid || 'guest',
       date: new Date().toLocaleString(),
       fileName: `Live Recording - ${new Date().toLocaleTimeString()}`,
       sourceType: 'live',
@@ -257,6 +379,11 @@ const AudioToTextView: React.FC<AudioToTextViewProps> = ({
     setActiveTab('live');
     setSubWorkflow('recorded');
 
+    if (!checkTranscriptionLimit(estimatedMinutes)) {
+      setLiveQueue(prev => prev.map(item => item.id === newLiveRecord.id ? { ...item, status: 'error', errorMessage: 'Transcription limit reached.' } : item));
+      return;
+    }
+
     try {
       const reader = new FileReader();
       const b64 = await new Promise<string>(res => {
@@ -265,22 +392,17 @@ const AudioToTextView: React.FC<AudioToTextViewProps> = ({
       });
       
       const { transcript, qualityScore, summary } = await transcribeAudio(b64, 'audio/webm', liveLanguage);
+      await incrementTranscriptionUsage(estimatedMinutes);
       
-      // Perform strategic analysis automatically after transcription
-      let strategicAnalysis;
-      try {
-        const analysisType = summary ? 'summary' : 'transcript';
-        const content = summary 
-          ? `Main Topic: ${summary.mainTopic}\nKey Points: ${summary.keyPoints.join(', ')}\nDecisions: ${summary.decisions.join(', ')}\nAction Items: ${summary.actionItems.join(', ')}`
-          : transcript.map(s => `${s.speaker}: ${s.text}`).join('\n');
-        strategicAnalysis = await analyzeStrategically(content, analysisType);
-      } catch (err) {
-        console.error("Strategic analysis failed:", err);
-      }
-
-      const finalRecord: AudioToTextRecord = { ...newLiveRecord, status: 'completed', transcript, summary, qualityScore, strategicAnalysis };
-      setLiveQueue(prev => prev.map(item => item.id === newLiveRecord.id ? finalRecord : item));
-      onSave(finalRecord);
+      // Show module selection modal instead of auto-processing
+      setModuleSelectionModal({
+        id: newLiveRecord.id,
+        transcript,
+        summary,
+        qualityScore,
+        estimatedMinutes,
+        isLive: true
+      });
     } catch (e) {
       setLiveQueue(prev => prev.map(item => item.id === newLiveRecord.id ? { 
         ...item, 
@@ -295,6 +417,32 @@ const AudioToTextView: React.FC<AudioToTextViewProps> = ({
   const [selectedProject, setSelectedProject] = useState<string>('General');
   const [activeDropdownId, setActiveDropdownId] = useState<string | null>(null);
   const [isGlobalDropdownOpen, setIsGlobalDropdownOpen] = useState(false);
+
+  // AI Module Selection Modal State
+  const [moduleSelectionModal, setModuleSelectionModal] = useState<{
+    id: string;
+    transcript: TranscriptSegment[];
+    summary: CallSummary | undefined;
+    qualityScore: number | undefined;
+    estimatedMinutes: number;
+    isLive: boolean;
+  } | null>(null);
+  const [selectedModules, setSelectedModules] = useState<string[]>(['summary', 'insights']);
+
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.hidden && isRecording) {
+        console.warn("⚠️ Recording may pause when screen is off");
+        addNotification({
+          title: 'Recording Warning',
+          message: 'Recording may stop if screen is locked or app is in background.',
+          type: 'info'
+        });
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
+  }, [isRecording, addNotification]);
 
   useEffect(() => {
     if (lastCreatedProjectId) {
@@ -387,12 +535,12 @@ const AudioToTextView: React.FC<AudioToTextViewProps> = ({
 
     if (files.length > 0) {
       
-      if (authStatus === AuthStatus.GUEST && files.length > 1) {
-        setUsageError("Batch processing is available in Pro and Enterprise plans.");
+    if (isGuest && files.length > 1) {
+        setUsageError("Batch processing is available in Pro plans.");
         return;
       }
 
-      if (authStatus === AuthStatus.GUEST && recordedQueue.length > 0) {
+      if (isGuest && recordedQueue.length > 0) {
         setUsageError("Guest Preview allows only one audio file upload at a time.");
         return;
       }
@@ -426,7 +574,7 @@ const AudioToTextView: React.FC<AudioToTextViewProps> = ({
   };
 
   const processSingleRecord = async (id: string) => {
-    if (usageStats.usedMinutes >= usageStats.totalMinutes) {
+    if (minutesUsage.isExceeded) {
       setShowUsageModal(true);
       return;
     }
@@ -439,19 +587,14 @@ const AudioToTextView: React.FC<AudioToTextViewProps> = ({
     // Simulate duration check (assuming 1MB ~ 1 minute for this prototype)
     const estimatedMinutes = Math.ceil(file.size / (1024 * 1024));
     
-    if (authStatus === AuthStatus.GUEST) {
-      if (estimatedMinutes > PLAN_FEATURES.guest.minutesPerFileLimit) {
-        setUsageError(`Guest Preview allows up to ${PLAN_FEATURES.guest.minutesPerFileLimit} minutes per file.`);
+      if (estimatedMinutes > PLAN_FEATURES[usageStats.plan].minutesPerFileLimit) {
+        setUsageError(`Plan limit: ${PLAN_FEATURES[usageStats.plan].minutesPerFileLimit} minutes per file.`);
         return;
       }
-      if (usageStats.usedMinutes + estimatedMinutes > PLAN_FEATURES.guest.totalMinutesLimit) {
+      if (minutesUsage.used + estimatedMinutes > minutesUsage.limit) {
         setShowUsageModal(true);
         return;
       }
-    } else if (estimatedMinutes > usageStats.minutesPerFileLimit) {
-      setUsageError(`File duration exceeds your plan's limit of ${usageStats.minutesPerFileLimit} minutes per file. Please upgrade your plan.`);
-      return;
-    }
 
     const strategy = fileStrategies[id] || (authStatus === AuthStatus.GUEST ? 'original' : null);
     if (!strategy) {
@@ -466,6 +609,11 @@ const AudioToTextView: React.FC<AudioToTextViewProps> = ({
     // Update status to processing
     setRecordedQueue(prev => prev.map(r => r.id === id ? { ...r, status: 'processing', processingStep: "Initializing intelligence module..." } : r));
     
+    if (!checkTranscriptionLimit(estimatedMinutes)) {
+      setRecordedQueue(prev => prev.map(r => r.id === id ? { ...r, status: 'pending' } : r));
+      return;
+    }
+
     try {
       const reader = new FileReader();
       const b64 = await new Promise<string>(res => {
@@ -482,43 +630,16 @@ const AudioToTextView: React.FC<AudioToTextViewProps> = ({
       setRecordedQueue(prev => prev.map(r => r.id === id ? { ...r, status: 'processing', processingStep: "Generating intelligence summary..." } : r));
       
       const { transcript, qualityScore, summary } = await transcribeAudio(b64, file.type, strategy);
+      await incrementTranscriptionUsage(estimatedMinutes);
       
-      setRecordedQueue(prev => prev.map(r => r.id === id ? { ...r, status: 'processing', processingStep: "Performing Strategic Analysis..." } : r));
-      
-      let strategicAnalysis;
-      try {
-        const analysisType = summary ? 'summary' : 'transcript';
-        const content = summary 
-          ? `Main Topic: ${summary.mainTopic}\nKey Points: ${summary.keyPoints.join(', ')}\nDecisions: ${summary.decisions.join(', ')}\nAction Items: ${summary.actionItems.join(', ')}`
-          : transcript.map(s => `${s.speaker}: ${s.text}`).join('\n');
-        strategicAnalysis = await analyzeStrategically(content, analysisType);
-      } catch (err) {
-        console.error("Strategic analysis failed:", err);
-      }
-
-      setRecordedQueue(prev => prev.map(r => r.id === id ? { ...r, status: 'processing', processingStep: "Finalizing intelligence report..." } : r));
-      await new Promise(res => setTimeout(res, 800));
-      
-      // Deduct minutes based on estimated duration
-      onDeductMinutes(estimatedMinutes);
-
-      const finalRecord: AudioToTextRecord = {
-        ...record,
-        status: 'completed',
+      // Show module selection modal instead of auto-processing
+      setModuleSelectionModal({
+        id,
         transcript,
         summary,
         qualityScore,
-        strategicAnalysis
-      };
-
-      setRecordedQueue(prev => prev.map(r => r.id === id ? finalRecord : r));
-      onSave(finalRecord);
-      
-      addNotification({
-        title: "Intelligence Released",
-        message: `Analysis for "${record.fileName}" is complete and ready for review.`,
-        recordId: finalRecord.id,
-        type: 'audio'
+        estimatedMinutes,
+        isLive: false
       });
     } catch (e: any) {
       setRecordedQueue(prev => prev.map(r => r.id === id ? { 
@@ -533,6 +654,77 @@ const AudioToTextView: React.FC<AudioToTextViewProps> = ({
         recordId: id,
         type: 'audio'
       });
+    }
+  };
+
+  const handleModuleSelectionConfirm = async () => {
+    if (!moduleSelectionModal) return;
+    const { id, transcript, summary, qualityScore, estimatedMinutes, isLive } = moduleSelectionModal;
+    const setter = isLive ? setLiveQueue : setRecordedQueue;
+    const queue = isLive ? liveQueue : recordedQueue;
+    const record = queue.find(r => r.id === id);
+
+    if (!record) return;
+
+    console.log("Selected modules:", selectedModules);
+    
+    let finalSelectedModules = selectedModules;
+    if (isGuest) {
+      finalSelectedModules = ['summary']; // Force only Executive Summary for guests
+      console.log("Guest mode detected: Forcing Executive Summary only");
+    }
+    
+    setter(prev => prev.map(r => r.id === id ? { ...r, status: 'processing', processingStep: "Running selected AI modules..." } : r));
+    setModuleSelectionModal(null);
+
+    try {
+      let unifiedIntelligence;
+      if (finalSelectedModules.length > 0 && checkThinkingLimit()) {
+        try {
+          const fullTranscript = transcript.map(s => `${s.speaker}: ${s.text}`).join('\n');
+          
+          // Only run the full intelligence if we need more than just summary
+          // OR if we are not a guest
+          if (!isGuest && (finalSelectedModules.includes('strategy') || finalSelectedModules.includes('meeting') || finalSelectedModules.includes('execution') || finalSelectedModules.includes('reminders'))) {
+            unifiedIntelligence = await processUnifiedMeetingIntelligence(fullTranscript, userProfile?.plan || 'free');
+            await incrementThinkingUsage();
+          } else if (finalSelectedModules.includes('summary')) {
+            // Already handled or light version
+          }
+        } catch (err) {
+          console.error("Unified intelligence analysis failed:", err);
+        }
+      }
+
+      const finalRecord: AudioToTextRecord = {
+        ...record,
+        status: 'completed',
+        transcript,
+        summary: finalSelectedModules.includes('summary') ? summary : undefined,
+        qualityScore,
+        selectedModules: finalSelectedModules,
+        strategicAnalysis: !isGuest && finalSelectedModules.includes('strategy') ? unifiedIntelligence?.strategicAnalysis : undefined,
+        meetingIntelligence: !isGuest && finalSelectedModules.includes('meeting') ? unifiedIntelligence?.meetingIntelligence : undefined,
+        executionTracker: !isGuest && finalSelectedModules.includes('execution') ? unifiedIntelligence?.executionTracker : undefined,
+        calendarReminders: !isGuest && finalSelectedModules.includes('reminders') ? unifiedIntelligence?.calendarReminders : undefined,
+        unifiedIntelligence: !isGuest && finalSelectedModules.length > 0 ? unifiedIntelligence : undefined
+      };
+
+      setter(prev => prev.map(r => r.id === id ? finalRecord : r));
+      onSave(finalRecord);
+      
+      addNotification({
+        title: "Intelligence Released",
+        message: `Analysis for "${record.fileName}" is complete.`,
+        recordId: finalRecord.id,
+        type: 'audio'
+      });
+    } catch (e) {
+      setter(prev => prev.map(r => r.id === id ? { 
+        ...r, 
+        status: 'error', 
+        errorMessage: "Failed to process AI modules." 
+      } : r));
     }
   };
 
@@ -632,6 +824,20 @@ const AudioToTextView: React.FC<AudioToTextViewProps> = ({
     }
   };
 
+  const updateExecutionTracker = (id: string, executionTracker: ExecutionTracker) => {
+    const setter = activeTab === 'recorded' ? setRecordedQueue : setLiveQueue;
+    const queue = activeTab === 'recorded' ? recordedQueue : liveQueue;
+    const record = queue.find(q => q.id === id);
+
+    if (record) {
+      const updated = { ...record, executionTracker };
+      setter(prev => prev.map(q => q.id === id ? updated : q));
+      if (record.status === 'completed') {
+        onSave(updated);
+      }
+    }
+  };
+
   const toggleBookmark = (id: string, segIdx: number) => {
     const record = [...recordedQueue, ...liveQueue].find(r => r.id === id);
     if (record && !checkPermission(record, 'edit')) {
@@ -688,15 +894,15 @@ const AudioToTextView: React.FC<AudioToTextViewProps> = ({
         </div>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6 md:gap-10 w-full max-w-4xl px-4">
           <button 
-            onClick={() => authStatus === AuthStatus.GUEST ? setUsageError("Live transcription is available in Pro and Enterprise plans.") : setSubWorkflow('live')} 
-            className={`group bg-white p-8 md:p-12 rounded-lg shadow-sm border border-brand-divider/20 text-left hover:shadow-xl transition-all ${authStatus === AuthStatus.GUEST ? 'opacity-60 grayscale-[0.5]' : ''}`}
+            onClick={() => authStatus === AuthStatus.GUEST ? setUsageError("Live transcription is not available in Guest Mode. Please create an account to unlock.") : setSubWorkflow('live')} 
+            className={`group bg-white p-8 md:p-12 rounded-lg shadow-sm border border-brand-divider/20 text-left hover:shadow-xl transition-all ${authStatus === AuthStatus.GUEST ? 'opacity-40 grayscale-[0.8]' : ''}`}
           >
             <div className="w-12 h-12 md:w-14 md:h-14 bg-brand-primary/5 rounded-lg flex items-center justify-center mb-6 md:mb-8 group-hover:bg-brand-primary transition-colors">
               <i className="fa-solid fa-tower-broadcast text-brand-primary group-hover:text-white text-lg md:text-xl animate-pulse"></i>
             </div>
-            <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center gap-3 mb-2">
               <h2 className="text-brand-primary text-[26px] font-medium">Live transcription</h2>
-              {authStatus === AuthStatus.GUEST && <i className="fa-solid fa-lock text-slate-400 text-sm"></i>}
+              {authStatus === AuthStatus.GUEST && <i className="fa-solid fa-lock text-slate-300 text-sm"></i>}
             </div>
             <p className="text-slate-500 text-xs md:text-sm leading-relaxed font-normal">Secure real-time internal capture with on-the-fly speaker segmentation.</p>
           </button>
@@ -717,33 +923,31 @@ const AudioToTextView: React.FC<AudioToTextViewProps> = ({
       {showUsageModal && (
         <div className="fixed inset-0 bg-brand-primary/60 backdrop-blur-sm z-[200] flex items-center justify-center p-6">
           <div className="bg-white rounded-lg p-10 max-w-md w-full space-y-8 shadow-2xl animate-in zoom-in-95">
-            <div className="text-center space-y-4">
-              <div className="w-20 h-20 bg-brand-accent/10 rounded-full flex items-center justify-center mx-auto">
-                <i className="fa-solid fa-triangle-exclamation text-brand-accent text-3xl"></i>
+            <div className="text-center space-y-6">
+              <div className="w-20 h-20 bg-amber-50 rounded-full flex items-center justify-center mx-auto">
+                <AlertTriangle className="text-amber-500 w-12 h-12" />
               </div>
-              <h2 className="text-brand-primary text-[26px] font-medium">
-                {authStatus === AuthStatus.GUEST ? "Guest Preview Limit Reached" : "Monthly Usage Limit Reached"}
-              </h2>
-              <p className="text-slate-500 font-normal">
-                {authStatus === AuthStatus.GUEST 
-                  ? "You have reached your Guest Preview limit. Create an account to continue using EchoNote without restrictions."
-                  : "You have reached your monthly transcription limit. Upgrade your plan or purchase additional minutes to continue."}
-              </p>
+              <div className="space-y-2">
+                <h2 className="text-brand-primary text-[26px] font-medium">
+                  {authStatus === AuthStatus.GUEST ? "Guest Preview Limit" : "Usage Limit Reached"}
+                </h2>
+                <p className="text-slate-500 font-normal">
+                  {authStatus === AuthStatus.GUEST 
+                    ? "You have reached your Guest Preview limit. Create an account to continue using EchoNote."
+                    : "You have reached your monthly transcription limit for the free plan. Usage resets next month."}
+                </p>
+              </div>
             </div>
             <div className="flex flex-col space-y-3">
-              <button 
-                onClick={() => { setShowUsageModal(false); authStatus === AuthStatus.GUEST ? onSignInClick() : onUpgradeClick(); }} 
-                className="w-full py-4 bg-brand-primary text-white rounded-lg font-medium tracking-widest text-[11px] shadow-xl shadow-brand-primary/20 active:scale-95 transition-all"
-              >
-                {authStatus === AuthStatus.GUEST ? "Sign up" : "Upgrade plan"}
-              </button>
-              <button 
-                onClick={() => { setShowUsageModal(false); onUpgradeClick(); }} 
-                className="w-full py-4 bg-white border border-brand-divider text-brand-primary rounded-lg font-medium tracking-widest text-[11px] shadow-sm active:scale-95 transition-all"
-              >
-                View plans
-              </button>
-              <button onClick={() => setShowUsageModal(false)} className="text-[13px] font-medium text-slate-400 text-center hover:text-slate-600 transition-colors">Maybe Later</button>
+              {authStatus === AuthStatus.GUEST && (
+                <button 
+                  onClick={() => { setShowUsageModal(false); onSignInClick(); }} 
+                  className="w-full py-4 bg-brand-primary text-white rounded-lg font-medium tracking-widest text-[11px] shadow-xl shadow-brand-primary/20 active:scale-95 transition-all"
+                >
+                  Sign up
+                </button>
+              )}
+              <button onClick={() => setShowUsageModal(false)} className="w-full py-4 bg-slate-100 text-slate-600 rounded-lg font-medium tracking-widest text-[11px] active:scale-95 transition-all">Close</button>
             </div>
           </div>
         </div>
@@ -752,21 +956,26 @@ const AudioToTextView: React.FC<AudioToTextViewProps> = ({
       {usageError && (
         <div className="fixed inset-0 bg-brand-primary/60 backdrop-blur-sm z-[200] flex items-center justify-center p-6">
           <div className="bg-white rounded-lg p-10 max-w-md w-full space-y-8 shadow-2xl animate-in zoom-in-95">
-            <div className="text-center space-y-4">
+            <div className="text-center space-y-6">
               <div className="w-20 h-20 bg-red-50 rounded-full flex items-center justify-center mx-auto">
-                <i className="fa-solid fa-circle-xmark text-red-500 text-3xl"></i>
+                <AlertTriangle className="text-red-500 w-12 h-12" />
               </div>
-              <h2 className="text-brand-primary text-[26px] font-medium">Plan Restriction</h2>
-              <p className="text-slate-500 font-normal">{usageError}</p>
+              <div className="space-y-2">
+                <h2 className="text-brand-primary text-[26px] font-medium">Feature Restricted</h2>
+                <p className="text-slate-500 font-normal">
+                  {authStatus === AuthStatus.GUEST 
+                    ? "This feature is not available in Guest Mode. Please create an account to unlock full access."
+                    : usageError}
+                </p>
+              </div>
             </div>
             <div className="flex flex-col space-y-3">
               <button 
-                onClick={() => { setUsageError(null); onUpgradeClick(); }} 
+                onClick={() => { setUsageError(null); }} 
                 className="w-full py-4 bg-brand-primary text-white rounded-lg font-medium tracking-widest text-[11px] shadow-xl shadow-brand-primary/20 active:scale-95 transition-all"
               >
-                View plans
+                Close
               </button>
-              <button onClick={() => setUsageError(null)} className="text-[13px] font-medium text-slate-400 text-center hover:text-slate-600 transition-colors">Close</button>
             </div>
           </div>
         </div>
@@ -952,12 +1161,18 @@ const AudioToTextView: React.FC<AudioToTextViewProps> = ({
             )}
             
             {isRecording && (
-              <button 
-                onClick={stopRecording}
-                className="px-12 py-5 bg-brand-primary text-white rounded-xl font-bold uppercase tracking-[0.2em] text-[11px] shadow-xl shadow-brand-primary/20 hover:scale-[1.02] active:scale-95 transition-all"
-              >
-                Stop Recording
-              </button>
+              <div className="space-y-6 flex flex-col items-center">
+                <div className="flex items-center gap-2 px-4 py-2 bg-amber-50 border border-amber-200 rounded-lg text-amber-700 animate-pulse">
+                  <i className="fa-solid fa-triangle-exclamation"></i>
+                  <span className="text-[10px] font-bold uppercase tracking-wider">⚠️ Recording may stop if screen is locked or app is in background</span>
+                </div>
+                <button 
+                  onClick={stopRecording}
+                  className="px-12 py-5 bg-brand-primary text-white rounded-xl font-bold uppercase tracking-[0.2em] text-[11px] shadow-xl shadow-brand-primary/20 hover:scale-[1.02] active:scale-95 transition-all"
+                >
+                  Stop Recording
+                </button>
+              </div>
             )}
           </div>
         </div>
@@ -1151,7 +1366,7 @@ const AudioToTextView: React.FC<AudioToTextViewProps> = ({
                         {authStatus === AuthStatus.LOGGED_IN && (() => {
                           const project = projects.find(p => p.name === item.group);
                           const isOwner = project?.ownerEmail === userProfile?.email;
-                          const canManage = usageStats.plan === 'enterprise' || (usageStats.plan === 'pro' && isOwner);
+                          const canManage = usageStats.mode !== 'guest' && isOwner;
                           if (!canManage) return null;
                           return (
                             <button 
@@ -1311,8 +1526,14 @@ const AudioToTextView: React.FC<AudioToTextViewProps> = ({
                   {/* Strategic Analysis Section */}
                   <div className={`bg-brand-background rounded-xl border border-brand-divider/20 overflow-hidden transition-all shadow-sm ${authStatus === AuthStatus.GUEST ? 'opacity-75 grayscale-[0.5]' : ''}`}>
                     <div 
-                      onClick={() => authStatus !== AuthStatus.GUEST && item.strategicAnalysis && toggleStrategicAnalysis(item.id)}
-                      className={`w-full flex items-center justify-between p-6 transition-colors ${authStatus === AuthStatus.GUEST ? 'cursor-not-allowed' : 'hover:bg-brand-divider/5 cursor-pointer'}`}
+                      onClick={() => {
+                        if (isGuest) {
+                          setUsageError("AI Strategic Analysis is not available in Guest Mode. Please sign up to unlock full intelligence.");
+                          return;
+                        }
+                        if (item.strategicAnalysis) toggleStrategicAnalysis(item.id);
+                      }}
+                      className={`w-full flex items-center justify-between p-6 transition-colors ${isGuest ? 'cursor-not-allowed opacity-50' : 'hover:bg-brand-divider/5 cursor-pointer'}`}
                     >
                       <div className="flex items-center space-x-4">
                         <div className="w-12 h-12 bg-indigo-50 border border-indigo-100 rounded-lg flex items-center justify-center text-indigo-600 shadow-sm">
@@ -1326,11 +1547,16 @@ const AudioToTextView: React.FC<AudioToTextViewProps> = ({
                       <div className="flex items-center space-x-4">
                         {!item.strategicAnalysis && item.status === 'completed' && (
                           <button 
+                            disabled={isGuest}
                             onClick={(e) => {
                               e.stopPropagation();
+                              if (isGuest) {
+                                setUsageError("AI Strategic Analysis is not available in Guest Mode. Please sign up to unlock full intelligence.");
+                                return;
+                              }
                               runStrategicAnalysis(item.id);
                             }}
-                            className="px-4 py-2 bg-indigo-600 text-white text-[10px] font-bold uppercase tracking-widest rounded-lg hover:bg-indigo-700 transition-colors shadow-md"
+                            className={`px-4 py-2 bg-indigo-600 text-white text-[10px] font-bold uppercase tracking-widest rounded-lg hover:bg-indigo-700 transition-colors shadow-md ${isGuest ? 'opacity-50 cursor-not-allowed' : ''}`}
                           >
                             Run Analysis
                           </button>
@@ -1445,6 +1671,171 @@ const AudioToTextView: React.FC<AudioToTextViewProps> = ({
                               ))}
                             </ul>
                           </div>
+
+                          {/* Unresolved Topics Detector */}
+                          <UnresolvedTopicsDetector unresolvedTopics={item.strategicAnalysis.unresolvedTopics} />
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Meeting Intelligence Section */}
+                  <div className={`bg-brand-background rounded-xl border border-brand-divider/20 overflow-hidden transition-all shadow-sm ${isGuest ? 'opacity-75 grayscale-[0.5] cursor-not-allowed' : ''}`}>
+                    <div 
+                      onClick={() => {
+                        if (isGuest) {
+                          setUsageError("Meeting Intelligence is not available in Guest Mode. Please sign up to unlock full intelligence.");
+                          return;
+                        }
+                        if (item.meetingIntelligence) toggleMeetingIntelligence(item.id);
+                      }}
+                      className={`w-full flex items-center justify-between p-6 transition-colors ${isGuest ? 'cursor-not-allowed' : 'hover:bg-brand-divider/5 cursor-pointer'}`}
+                    >
+                      <div className="flex items-center space-x-4">
+                        <div className="w-12 h-12 bg-emerald-50 border border-emerald-100 rounded-lg flex items-center justify-center text-emerald-600 shadow-sm">
+                          <i className="fa-solid fa-chart-line text-lg"></i>
+                        </div>
+                        <div className="text-left">
+                          <h4 className="text-sm font-black text-brand-primary tracking-tight">Meeting Intelligence Score</h4>
+                          <p className="text-[10px] text-brand-primary/60 font-black tracking-widest font-mono">Productivity, Clarity & Actionability</p>
+                        </div>
+                      </div>
+                      <div className="flex items-center space-x-4">
+                        {!item.meetingIntelligence && item.status === 'completed' && (
+                          <button 
+                            disabled={isGuest}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (isGuest) {
+                                setUsageError("Meeting Intelligence is not available in Guest Mode. Please sign up to unlock full intelligence.");
+                                return;
+                              }
+                              runMeetingIntelligence(item.id);
+                            }}
+                            className={`px-4 py-2 bg-emerald-600 text-white text-[10px] font-bold uppercase tracking-widest rounded-lg hover:bg-emerald-700 transition-colors shadow-md ${isGuest ? 'opacity-50 cursor-not-allowed' : ''}`}
+                          >
+                            Run Intelligence
+                          </button>
+                        )}
+                        {item.meetingIntelligence && (
+                          <i className={`fa-solid fa-chevron-down transition-transform duration-300 ${expandedIntelligenceIds.has(item.id) && authStatus !== AuthStatus.GUEST ? 'rotate-180' : ''}`}></i>
+                        )}
+                      </div>
+                    </div>
+
+                    {expandedIntelligenceIds.has(item.id) && item.meetingIntelligence && authStatus !== AuthStatus.GUEST && (
+                      <div className="px-6 pb-8 animate-in slide-in-from-top-4 duration-500">
+                        <div className="pt-4 border-t border-brand-divider/20">
+                          <MeetingIntelligenceView intelligence={item.meetingIntelligence} />
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Execution Tracker Section */}
+                  <div className={`mb-12 bg-white border border-brand-divider/20 rounded-2xl overflow-hidden shadow-sm hover:shadow-md transition-all duration-300 ${isGuest ? 'opacity-50 grayscale-[0.5] cursor-not-allowed' : ''}`}>
+                    <div 
+                      className={`p-6 flex items-center justify-between transition-colors ${isGuest ? 'cursor-not-allowed' : 'hover:bg-slate-50/50 cursor-pointer'}`}
+                      onClick={() => {
+                        if (isGuest) {
+                          setUsageError("Execution Tracking is not available in Guest Mode. Please sign up to unlock full intelligence.");
+                          return;
+                        }
+                        if (item.executionTracker) toggleExecutionTracker(item.id);
+                      }}
+                    >
+                      <div className="flex items-center space-x-4">
+                        <div className="w-12 h-12 bg-blue-50 border border-blue-100 rounded-lg flex items-center justify-center text-blue-600 shadow-sm">
+                          <i className="fa-solid fa-list-check text-lg"></i>
+                        </div>
+                        <div className="text-left">
+                          <h4 className="text-sm font-black text-brand-primary tracking-tight">Execution Tracker</h4>
+                          <p className="text-[10px] text-brand-primary/60 font-black tracking-widest font-mono">Task Metrics & Completion Insights</p>
+                        </div>
+                      </div>
+                      <div className="flex items-center space-x-4">
+                        {!item.executionTracker && item.status === 'completed' && (
+                          <button 
+                            disabled={isGuest}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (isGuest) {
+                                setUsageError("Execution Tracking is not available in Guest Mode. Please sign up to unlock full intelligence.");
+                                return;
+                              }
+                              runMeetingIntelligence(item.id);
+                            }}
+                            className={`px-4 py-2 bg-blue-600 text-white text-[10px] font-bold uppercase tracking-widest rounded-lg hover:bg-blue-700 transition-colors shadow-md ${isGuest ? 'opacity-50 cursor-not-allowed' : ''}`}
+                          >
+                            Track Execution
+                          </button>
+                        )}
+                        {item.executionTracker && (
+                          <i className={`fa-solid fa-chevron-down transition-transform duration-300 ${expandedExecutionTrackerIds.has(item.id) && authStatus !== AuthStatus.GUEST ? 'rotate-180' : ''}`}></i>
+                        )}
+                      </div>
+                    </div>
+
+                    {expandedExecutionTrackerIds.has(item.id) && item.executionTracker && authStatus !== AuthStatus.GUEST && (
+                      <div className="px-6 pb-8 animate-in slide-in-from-top-4 duration-500">
+                        <div className="pt-4 border-t border-brand-divider/20">
+                          <ExecutionTrackerView 
+                            tracker={item.executionTracker} 
+                            onChangeTracker={(updatedTracker) => updateExecutionTracker(item.id, updatedTracker)}
+                          />
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Smart Reminder System Section */}
+                  <div className={`mb-12 bg-white border border-brand-divider/20 rounded-2xl overflow-hidden shadow-sm hover:shadow-md transition-all duration-300 ${isGuest ? 'opacity-50 grayscale-[0.5] cursor-not-allowed' : ''}`}>
+                    <div 
+                      className={`p-6 flex items-center justify-between transition-colors ${isGuest ? 'cursor-not-allowed' : 'hover:bg-slate-50/50 cursor-pointer'}`}
+                      onClick={() => {
+                        if (isGuest) {
+                          setUsageError("Smart Reminders are not available in Guest Mode. Please sign up to unlock full intelligence.");
+                          return;
+                        }
+                        if (item.calendarReminders) toggleSmartReminders(item.id);
+                      }}
+                    >
+                      <div className="flex items-center space-x-4">
+                        <div className="w-12 h-12 bg-rose-50 border border-rose-100 rounded-lg flex items-center justify-center text-rose-600 shadow-sm">
+                          <i className="fa-solid fa-bell text-lg"></i>
+                        </div>
+                        <div className="text-left">
+                          <h4 className="text-sm font-black text-brand-primary tracking-tight">Smart Reminder System</h4>
+                          <p className="text-[10px] text-brand-primary/60 font-black tracking-widest font-mono">Google Calendar Sync & Follow-ups</p>
+                        </div>
+                      </div>
+                      <div className="flex items-center space-x-4">
+                        {!item.calendarReminders && item.status === 'completed' && (
+                          <button 
+                            disabled={isGuest}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (isGuest) {
+                                setUsageError("Smart Reminders are not available in Guest Mode. Please sign up to unlock full intelligence.");
+                                return;
+                              }
+                              runMeetingIntelligence(item.id);
+                            }}
+                            className={`px-4 py-2 bg-rose-600 text-white text-[10px] font-bold uppercase tracking-widest rounded-lg hover:bg-rose-700 transition-colors shadow-md ${isGuest ? 'opacity-50 cursor-not-allowed' : ''}`}
+                          >
+                            Generate Reminders
+                          </button>
+                        )}
+                        {item.calendarReminders && (
+                          <i className={`fa-solid fa-chevron-down transition-transform duration-300 ${expandedSmartReminderIds.has(item.id) && authStatus !== AuthStatus.GUEST ? 'rotate-180' : ''}`}></i>
+                        )}
+                      </div>
+                    </div>
+
+                    {expandedSmartReminderIds.has(item.id) && item.calendarReminders && authStatus !== AuthStatus.GUEST && (
+                      <div className="px-6 pb-8 animate-in slide-in-from-top-4 duration-500">
+                        <div className="pt-4 border-t border-brand-divider/20">
+                          <SmartReminderView reminders={item.calendarReminders} />
                         </div>
                       </div>
                     )}
@@ -1559,6 +1950,90 @@ const AudioToTextView: React.FC<AudioToTextViewProps> = ({
         })}
       </div>
 
+      {/* AI Module Selection Modal */}
+      {moduleSelectionModal && (
+        <div className="fixed inset-0 bg-brand-primary/80 backdrop-blur-md z-[500] flex items-center justify-center p-6 text-left">
+          <div className="bg-white rounded-2xl p-8 max-w-md w-full space-y-6 shadow-2xl animate-in zoom-in-95">
+            <div className="flex items-center justify-between">
+              <div className="space-y-1">
+                <h2 className="text-xl font-bold text-brand-primary">AI Insights Selection</h2>
+                <p className="text-sm text-slate-500">Select which AI modules you want to run for this transcription.</p>
+              </div>
+              <div className="w-12 h-12 bg-brand-background text-brand-primary rounded-xl flex items-center justify-center text-xl">
+                <i className="fa-solid fa-microchip"></i>
+              </div>
+            </div>
+
+            <div className="space-y-3">
+              {[
+                { id: 'summary', name: 'Executive Summary', icon: 'fa-align-left', desc: 'Concise overview of the key points.' },
+                { id: 'strategy', name: 'Strategic Thinking Partner', icon: 'fa-brain', desc: 'Deep strategic analysis and insights.', restricted: true },
+                { id: 'meeting', name: 'Meeting Intelligence', icon: 'fa-handshake', desc: 'Detailed meeting notes and context.', restricted: true },
+                { id: 'execution', name: 'Execution Tracker', icon: 'fa-list-check', desc: 'Action items and deliverables.', restricted: true },
+                { id: 'reminders', name: 'Calendar Reminders', icon: 'fa-calendar-day', desc: 'Important dates and follow-ups.', restricted: true }
+              ].map(module => (
+                <label 
+                  key={module.id}
+                  className={`flex items-start p-4 rounded-xl border-2 transition-all ${
+                    isGuest && module.restricted
+                      ? 'opacity-50 cursor-not-allowed border-slate-100 bg-slate-50'
+                      : selectedModules.includes(module.id) 
+                        ? 'border-brand-primary bg-brand-background cursor-pointer' 
+                        : 'border-slate-100 hover:border-brand-divider/20 cursor-pointer'
+                  }`}
+                >
+                  <div className="flex items-center h-5 mt-0.5">
+                    <input
+                      type="checkbox"
+                      className="w-4 h-4 text-brand-primary border-slate-300 rounded focus:ring-brand-primary disabled:opacity-50"
+                      checked={selectedModules.includes(module.id)}
+                      disabled={isGuest && module.restricted}
+                      onChange={() => {
+                        if (isGuest && module.restricted) return;
+                        setSelectedModules(prev => 
+                          prev.includes(module.id) 
+                            ? prev.filter(id => id !== module.id) 
+                            : [...prev, module.id]
+                        );
+                      }}
+                    />
+                  </div>
+                  <div className="ml-4 flex-1">
+                    <div className="flex items-center space-x-2">
+                      <i className={`fa-solid ${module.icon} text-brand-primary text-sm`}></i>
+                      <span className="text-sm font-bold text-brand-primary">{module.name}</span>
+                      {isGuest && module.restricted && (
+                        <span className="text-[8px] font-black bg-brand-primary text-white px-1.5 py-0.5 rounded uppercase tracking-widest ml-auto">Pro</span>
+                      )}
+                    </div>
+                    <p className="text-xs text-slate-500 mt-1">{module.desc}</p>
+                  </div>
+                </label>
+              ))}
+            </div>
+
+            <div className="pt-4 flex flex-col space-y-3">
+              <button 
+                onClick={handleModuleSelectionConfirm}
+                className="w-full py-4 bg-brand-primary text-white rounded-xl font-bold tracking-widest text-[13px] shadow-xl active:scale-95 transition-all flex items-center justify-center space-x-2"
+              >
+                <span>RUN SELECTED MODULES</span>
+                <i className="fa-solid fa-play text-[10px]"></i>
+              </button>
+              <button 
+                onClick={() => {
+                  setSelectedModules([]);
+                  handleModuleSelectionConfirm();
+                }}
+                className="text-[12px] font-bold text-slate-400 text-center hover:text-brand-primary transition-colors"
+              >
+                SKIP AI INSIGHTS (TRANSCRIPT ONLY)
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Collaboration Settings Modal */}
       {projectToManage && (
         <div className="fixed inset-0 bg-brand-primary/60 backdrop-blur-sm z-[250] flex items-center justify-center p-6">
@@ -1624,7 +2099,7 @@ const AudioToTextView: React.FC<AudioToTextViewProps> = ({
                 const member = projectToManage.members?.find(m => m.email === userProfile?.email);
                 const isEditor = member?.role === 'editor';
                 const isDefaultAdmin = userProfile?.email === 'riyamshah2509@gmail.com';
-                const canInvite = isOwner || (usageStats.plan === 'enterprise' && isEditor) || isDefaultAdmin;
+                const canInvite = isOwner || (usageStats.mode !== 'guest' && isEditor) || isDefaultAdmin;
 
                 if (!canInvite) return null;
 

@@ -1,4 +1,5 @@
 import React from 'react';
+import { Link } from 'react-router-dom';
 import { PlaybackMetadata, PlaybackStatus, AuthStatus } from '../types';
 
 interface GlobalPlayerProps {
@@ -42,13 +43,13 @@ const GlobalPlayer: React.FC<GlobalPlayerProps> = ({
       <div className="max-w-6xl mx-auto px-4 md:px-6 py-3 md:py-4 flex flex-col md:flex-row items-center gap-3 md:gap-6">
         {/* Asset Info */}
         <div className="flex items-center space-x-3 md:space-x-4 w-full md:w-64 shrink-0">
-          <div className="h-8 w-8 md:h-10 md:w-10 bg-brand-primary rounded-lg flex items-center justify-center shrink-0 shadow-md overflow-hidden border border-white/10">
+          <Link to="/" className="h-8 w-8 md:h-10 md:w-10 bg-brand-primary rounded-lg flex items-center justify-center shrink-0 shadow-md overflow-hidden border border-white/10 hover:opacity-80 transition-opacity">
             <img 
               src="/Logo-2.png" 
               alt="EchoNote" 
               className="h-6 w-6 object-contain" 
             />
-          </div>
+          </Link>
           <div className="overflow-hidden text-left">
             <p className="text-[13px] font-bold text-brand-primary truncate tracking-tight">
               {metadata.title}

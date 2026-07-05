@@ -2,7 +2,7 @@
 import React, { useState, useEffect } from 'react';
 import { synthesizeSpeech, pcmToWavUrl } from '../services/geminiService';
 import { executeDownload } from '../services/downloadService';
-import { TextToAudioRecord, AuthStatus, VoiceGender, PlaybackMetadata, PlaybackStatus, AppNotification, Project, UserProfile } from '../types';
+import { TextToAudioRecord, AuthStatus, VoiceGender, PlaybackMetadata, PlaybackStatus, AppNotification, Project, UserProfile, OrgRole } from '../types';
 
 interface TextToAudioViewProps {
   onSave: (record: TextToAudioRecord) => void;
@@ -18,13 +18,17 @@ interface TextToAudioViewProps {
   onPause: () => void;
   onStop: () => void;
   addNotification: (notif: Omit<AppNotification, 'id' | 'timestamp' | 'isRead'>) => void;
+  userOrgRole?: OrgRole;
 }
 
 const TextToAudioView: React.FC<TextToAudioViewProps> = ({ 
   onSave, projects, onAddGroup, authStatus, userProfile, onNewProject, lastCreatedProjectId,
-  activePlaybackId, playbackStatus, onPlay, onPause, addNotification
+  activePlaybackId, playbackStatus, onPlay, onPause, addNotification, userOrgRole
 }) => {
   const checkPermission = (groupName: string, action: 'edit' | 'delete') => {
+    if (userOrgRole === 'super_admin' || userOrgRole === 'org_admin') return true;
+    if (userOrgRole === 'viewer') return false;
+
     if (groupName === 'General') return true;
     if (authStatus === AuthStatus.GUEST) return false;
     
@@ -34,6 +38,11 @@ const TextToAudioView: React.FC<TextToAudioViewProps> = ({
     if (project.ownerEmail === userProfile?.email) return true;
 
     const member = project.members?.find(m => m.email === userProfile?.email);
+    
+    if (userOrgRole === 'team_manager') {
+      return true;
+    }
+
     if (!member) return false;
 
     if (action === 'delete') {
@@ -257,8 +266,8 @@ const TextToAudioView: React.FC<TextToAudioViewProps> = ({
 
     if (authStatus === AuthStatus.GUEST && validScripts.length > 1) {
       addNotification({
-        title: 'Plan Limitation',
-        message: 'Batch processing is available in Pro and Enterprise plans.',
+        title: 'Feature Restricted',
+        message: 'Batch processing is not available in Guest Mode. Please create an account to unlock.',
         type: 'error'
       });
       return;

@@ -1,7 +1,7 @@
 
 import React from 'react';
 import { motion } from 'framer-motion';
-import { ShieldCheck, Lock, Users, BarChart3, Globe, Zap } from 'lucide-react';
+import { ShieldCheck, Lock, Users, BarChart3, Globe, Zap, Check } from 'lucide-react';
 
 const SecurityPage: React.FC = () => {
   const fadeIn = {
@@ -37,12 +37,12 @@ const SecurityPage: React.FC = () => {
           className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8"
         >
           {[
-            { icon: <Lock />, title: 'End-to-End Encryption', desc: 'All data is encrypted at rest using AES-256 and in transit using TLS 1.3. Your keys are managed using FIPS 140-2 Level 3 hardware security modules.' },
-            { icon: <Users />, title: 'Granular RBAC', desc: 'Implement strict Role-Based Access Control (RBAC) across your entire organization. Define custom roles and permissions at the project level.' },
-            { icon: <BarChart3 />, title: 'Audit Logging', desc: 'Every action taken within EchoNote is logged in a comprehensive, immutable audit trail. Export logs directly to your SIEM for real-time monitoring.' },
-            { icon: <Globe />, title: 'Data Residency', desc: 'Choose where your data is stored. We offer data residency options in the US, EU, and APAC to help you meet local regulatory requirements.' },
-            { icon: <Zap />, title: 'Zero-Knowledge AI', desc: 'Your data is never used to train our global AI models. We use isolated, single-tenant processing environments for every enterprise customer.' },
-            { icon: <ShieldCheck />, title: 'Compliance Standards', desc: 'We are SOC2 Type II, GDPR, and HIPAA compliant. Our security controls are independently audited annually.' }
+            { icon: <Lock />, title: 'Encryption Standards', desc: 'All communications are fully secured in transit using TLS 1.3, and database records are encrypted at rest using industry-standard AES-256.' },
+            { icon: <Users />, title: 'Granular RBAC', desc: 'Strict role-based access control. Assign Owner, Editor, or Viewer roles to restrict who can view, transcribe, edit, or invite project members.' },
+            { icon: <BarChart3 />, title: 'Project Activity Trail', desc: 'Core milestones, uploads, and collaborator modifications are automatically logged in an immutable, real-time activity timeline.' },
+            { icon: <ShieldCheck />, title: 'Firestore Security Rules', desc: 'Server-side access policy checks enforced at the database layer on every single read and write, ensuring bulletproof user data isolation.' },
+            { icon: <Zap />, title: 'Zero-Training AI Policy', desc: 'Your transcripts, decisions, and thinking tasks are processed via private API keys and are never used to retrain global models.' },
+            { icon: <ShieldCheck />, title: 'Firebase Authentication', desc: 'Secure identity management, industry-standard password hashing, and secure token-based session validation.' }
           ].map((item, i) => (
             <motion.div 
               key={i}
@@ -56,6 +56,85 @@ const SecurityPage: React.FC = () => {
               <p className="text-brand-secondary/60 text-sm leading-relaxed">{item.desc}</p>
             </motion.div>
           ))}
+        </motion.div>
+
+        {/* Enterprise Identity & SSO Section */}
+        <motion.div {...fadeIn} className="space-y-12">
+          <div className="text-center space-y-4 max-w-2xl mx-auto">
+            <h2 className="text-3xl md:text-4xl font-bold tracking-tight text-brand-primary">Identity & Access Control</h2>
+            <p className="text-brand-secondary/60 text-base leading-relaxed">
+              Verify credentials and regulate user workspaces with modern, enterprise-ready identity integration patterns.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-8 max-w-5xl mx-auto">
+            {/* Active Integrations */}
+            <div className="p-8 rounded-3xl bg-white border border-brand-divider/20 shadow-sm space-y-6">
+              <div className="inline-flex items-center space-x-2 px-3 py-1 rounded-full text-xs font-bold bg-emerald-50 text-emerald-700">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
+                <span>Active & Implemented</span>
+              </div>
+              <h3 className="text-xl font-bold text-brand-primary">Corporate Single Sign-On</h3>
+              <p className="text-brand-secondary/60 text-sm leading-relaxed">
+                EchoNote leverages fully active, secure identity integration architectures so teams can log in instantly with zero additional setup:
+              </p>
+              <ul className="space-y-3">
+                <li className="flex items-start space-x-3 text-sm text-brand-secondary/70">
+                  <div className="w-5 h-5 rounded-full bg-brand-primary/5 flex items-center justify-center text-brand-primary mt-0.5 shrink-0">
+                    <Check size={12} className="text-emerald-600" />
+                  </div>
+                  <div>
+                    <span className="font-bold text-brand-primary">Google Workspace:</span> Connect automatically with your company's Google accounts for instant, secure authentication and workspace onboarding.
+                  </div>
+                </li>
+                <li className="flex items-start space-x-3 text-sm text-brand-secondary/70">
+                  <div className="w-5 h-5 rounded-full bg-brand-primary/5 flex items-center justify-center text-brand-primary mt-0.5 shrink-0">
+                    <Check size={12} className="text-emerald-600" />
+                  </div>
+                  <div>
+                    <span className="font-bold text-brand-primary">Microsoft Authentication:</span> Log in directly with standard secure corporate Microsoft accounts to guarantee immediate identity verification.
+                  </div>
+                </li>
+              </ul>
+            </div>
+
+            {/* Roadmap Integrations */}
+            <div className="p-8 rounded-3xl bg-white border border-brand-divider/20 shadow-sm space-y-6">
+              <div className="inline-flex items-center space-x-2 px-3 py-1 rounded-full text-xs font-bold bg-amber-50 text-amber-700">
+                <span>Enterprise Roadmap</span>
+              </div>
+              <h3 className="text-xl font-bold text-brand-primary">Future Integrations</h3>
+              <p className="text-brand-secondary/60 text-sm leading-relaxed">
+                We are actively building deeper, central enterprise security controllers. The following systems are scheduled for upcoming production deployment:
+              </p>
+              <ul className="space-y-3">
+                <li className="flex items-start space-x-3 text-sm text-brand-secondary/60">
+                  <div className="w-5 h-5 rounded-full bg-amber-50 flex items-center justify-center text-amber-700 mt-0.5 shrink-0">
+                    <span className="text-[9px] font-black uppercase">Roadmap</span>
+                  </div>
+                  <div>
+                    <span className="font-bold text-brand-primary">SAML SSO:</span> Centralized federated single sign-on security linking organization directories with external networks.
+                  </div>
+                </li>
+                <li className="flex items-start space-x-3 text-sm text-brand-secondary/60">
+                  <div className="w-5 h-5 rounded-full bg-amber-50 flex items-center justify-center text-amber-700 mt-0.5 shrink-0">
+                    <span className="text-[9px] font-black uppercase">Roadmap</span>
+                  </div>
+                  <div>
+                    <span className="font-bold text-brand-primary">Okta Integration:</span> Universal directory sync, security policy coordination, and automated user provisioning.
+                  </div>
+                </li>
+                <li className="flex items-start space-x-3 text-sm text-brand-secondary/60">
+                  <div className="w-5 h-5 rounded-full bg-amber-50 flex items-center justify-center text-amber-700 mt-0.5 shrink-0">
+                    <span className="text-[9px] font-black uppercase">Roadmap</span>
+                  </div>
+                  <div>
+                    <span className="font-bold text-brand-primary">Microsoft Entra ID:</span> Direct cloud infrastructure directory sync for real-time security coordination.
+                  </div>
+                </li>
+              </ul>
+            </div>
+          </div>
         </motion.div>
 
         <motion.div {...fadeIn} className="bg-brand-primary text-white p-12 md:p-24 rounded-[40px] text-center space-y-10 relative overflow-hidden">

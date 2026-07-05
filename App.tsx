@@ -10,7 +10,7 @@ import TextToAudioView from './components/TextToAudioView';
 import DecisionIntelligence from './components/DecisionIntelligence';
 import DecisionHistory from './components/DecisionHistory';
 import HistoryDashboard from './components/HistoryDashboard';
-import SubscriptionView from './components/SubscriptionView';
+import { AdminTrackerView } from './components/AdminTrackerView';
 import GlobalPlayer from './components/GlobalPlayer';
 import LandingNavbar from './components/LandingNavbar';
 import LandingFooter from './components/LandingFooter';
@@ -19,16 +19,22 @@ import TermsOfService from './components/TermsOfService';
 import SecurityPage from './components/SecurityPage';
 import ContactPage from './components/ContactPage';
 import BookDemoPage from './components/BookDemoPage';
-import TestDashboard from './components/TestDashboard';
+import JoinPage from './pages/JoinPage';
+import PricingPage from './pages/PricingPage';
 import EchoNoteAssistant from './components/EchoNoteAssistant';
 import Home from './pages/Home';
 import Features from './pages/Features';
 import Solutions from './pages/Solutions';
-import Pricing from './pages/Pricing';
-import { AppWorkflow, AudioToTextRecord, TextToAudioRecord, AuthStatus, UserProfile, PlaybackMetadata, PlaybackStatus, AppNotification, UsageStats, SubscriptionTier, Project, ProjectMember, CollaborationRole, MainView } from './types';
+import SubscriptionModal from './components/SubscriptionModal';
+import { CollaborationDashboard } from './components/CollaborationDashboard';
+import { OrganizationDashboard } from './components/OrganizationDashboard';
+import { AppWorkflow, AudioToTextRecord, TextToAudioRecord, AuthStatus, UserProfile, PlaybackMetadata, PlaybackStatus, AppNotification, UsageStats, SubscriptionTier, Project, ProjectMember, CollaborationRole, MainView, ProjectActivity, OrgRole, OrgMember, Team } from './types';
 import { PLAN_FEATURES } from './config/planConfig';
 import { useFirebase } from './components/FirebaseProvider';
-import { auth, db, collection, query, where, onSnapshot, doc, setDoc, updateDoc, deleteDoc, orderBy, handleFirestoreError, OperationType } from './firebase';
+import { Toaster } from 'sonner';
+import { auth, db, collection, query, where, getDocs, onSnapshot, doc, setDoc, updateDoc, deleteDoc, orderBy, handleFirestoreError, OperationType, serverTimestamp, getDoc, increment, addDoc } from './firebase';
+import { summarizeTranscript, analyzeDecisionIntelligence, analyzeStrategically } from './services/geminiService';
+import { getMinutesUsage, getThinkingUsage, getNextResetDate } from './lib/usageUtils';
 
 const ScrollToTop = () => {
   const { pathname } = useLocation();
@@ -78,6 +84,13 @@ const App: React.FC = () => {
     }
   });
 
+  const isGuest = authStatus === AuthStatus.GUEST || profile?.plan === 'guest';
+  const isFree = authStatus === AuthStatus.LOGGED_IN && profile?.plan === 'free';
+
+  useEffect(() => {
+    console.log("User plan:", profile?.plan || (authStatus === AuthStatus.GUEST ? 'guest' : 'unknown'));
+  }, [authStatus, profile]);
+
   useEffect(() => {
     if (isAuthReady) {
       if (user && profile) {
@@ -91,6 +104,14 @@ const App: React.FC = () => {
           localStorage.removeItem('remembered_user');
         }
         
+        // Handle redirect after login (e.g. from invitation)
+        const redirectPath = localStorage.getItem('redirectAfterLogin');
+        if (redirectPath) {
+          localStorage.removeItem('redirectAfterLogin');
+          navigate(redirectPath);
+          return;
+        }
+
         // Immediately redirect to app if we're on the auth page and login is successful
         if (location.pathname === '/auth') {
           navigate('/app');
@@ -107,9 +128,11 @@ const App: React.FC = () => {
       }
     }
   }, [user, profile, isAuthReady, location.pathname, navigate]);
+
   const [currentTab, setCurrentTab] = useState<AppWorkflow>(AppWorkflow.HOME);
   const [selectedGroupFilter, setSelectedGroupFilter] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
+  const [showUpgradeModal, setShowUpgradeModal] = useState(false);
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [toasts, setToasts] = useState<{id: string, title: string, message: string, type: 'info' | 'error' | 'success'}[]>([]);
 
@@ -141,134 +164,312 @@ const App: React.FC = () => {
   // Usage Stats State
   const [usageStats, setUsageStats] = useState<UsageStats>({
     usedMinutes: 0,
-    totalMinutes: PLAN_FEATURES.guest.totalMinutesLimit,
-    plan: 'guest',
-    renewalDate: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toLocaleDateString(),
-    minutesPerFileLimit: PLAN_FEATURES.guest.minutesPerFileLimit
+    totalMinutes: PLAN_FEATURES.free.totalMinutesLimit,
+    aiRequestCount: 0,
+    aiRequestLimit: PLAN_FEATURES.free.aiRequestLimit,
+    thinkingLimit: PLAN_FEATURES.free.thinkingLimit,
+    plan: 'free',
+    mode: 'free', // Legacy support
+    renewalDate: 'May 1, 2026',
+    minutesPerFileLimit: PLAN_FEATURES.free.minutesPerFileLimit
   });
 
   useEffect(() => {
-    if (authStatus === AuthStatus.LOGGED_IN && userProfile) {
+    if (userProfile) {
       const tier = userProfile.plan || 'free';
-      const features = PLAN_FEATURES[tier as SubscriptionTier];
+      const features = PLAN_FEATURES[tier];
+      
+      const mUsage = getMinutesUsage(userProfile);
+      const tUsage = getThinkingUsage(userProfile);
       
       setUsageStats({
-        usedMinutes: userProfile.minutesUsed || 0,
-        totalMinutes: features.totalMinutesLimit,
-        plan: tier as SubscriptionTier,
-        renewalDate: 'Next Month', // Simplified
+        usedMinutes: mUsage.used,
+        totalMinutes: mUsage.limit,
+        extraMinutes: userProfile.extraMinutes || 0,
+        aiRequestCount: tUsage.used,
+        aiRequestLimit: tUsage.limit,
+        thinkingLimit: tUsage.limit,
+        plan: tier,
+        mode: tier === 'guest' ? 'guest' : 'free',
+        renewalDate: getNextResetDate(userProfile.billingStartDate),
         minutesPerFileLimit: features.minutesPerFileLimit
       });
-    }
-  }, [authStatus, userProfile]);
 
-  const upgradePlan = useCallback(async (tier: SubscriptionTier, silent: boolean = false) => {
-    const features = PLAN_FEATURES[tier];
-
-    if (authStatus === AuthStatus.LOGGED_IN && user) {
-      try {
-        await updateDoc(doc(db, 'users', user.uid), { plan: tier });
-      } catch (error) {
-        handleFirestoreError(error, OperationType.UPDATE, `users/${user.uid}`);
+      // Auto-trigger upgrade modal if limits are reached for free plan
+      if (tier === 'free') {
+        if (mUsage.isExceeded || tUsage.isExceeded) {
+          const hasShown = sessionStorage.getItem('upgrade_modal_shown');
+          if (!hasShown) {
+            setShowUpgradeModal(true);
+            sessionStorage.setItem('upgrade_modal_shown', 'true');
+          }
+        }
       }
-    } else {
-      // Set renewal date to 1 month from now
-      const nextMonth = new Date();
-      nextMonth.setMonth(nextMonth.getMonth() + 1);
-      const renewalDate = nextMonth.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
-
-      setUsageStats(prev => ({
-        ...prev,
-        plan: tier,
-        totalMinutes: features.totalMinutesLimit,
-        minutesPerFileLimit: features.minutesPerFileLimit,
-        renewalDate: renewalDate
-      }));
     }
+  }, [userProfile]);
 
-    if (tier !== 'guest' && !silent) {
+  const checkThinkingLimit = useCallback(() => {
+    if (!userProfile) return true;
+    const tUsage = getThinkingUsage(userProfile);
+
+    if (tUsage.isExceeded) {
+      console.log("Thinking usage limit reached:", tUsage.used, "/", tUsage.limit);
+      return false;
+    }
+    return true;
+  }, [userProfile]);
+
+  const checkTranscriptionLimit = useCallback((estimatedMinutes: number) => {
+    if (!userProfile) return true;
+    const mUsage = getMinutesUsage(userProfile);
+
+    if (mUsage.used + estimatedMinutes > mUsage.limit) {
       addNotification({
-        title: 'Plan Upgraded',
-        message: `Your account has been successfully upgraded to the ${tier.toUpperCase()} plan.`,
-        type: 'success'
+        title: 'Transcription Limit Reached',
+        message: `You don't have enough minutes left for this transcription.`,
+        type: 'error'
       });
+      return false;
     }
-  }, [authStatus, user, addNotification]);
+    return true;
+  }, [userProfile, addNotification]);
 
-  const buyAddOn = useCallback((minutes: number) => {
-    setUsageStats(prev => ({
-      ...prev,
-      totalMinutes: prev.totalMinutes + minutes
-    }));
-
-    addNotification({
-      title: 'Minutes Added',
-      message: `Successfully added ${minutes} minutes to your account.`,
-      type: 'success'
-    });
-  }, []);
-
-  const deductMinutes = useCallback(async (minutes: number) => {
+  const incrementThinkingUsage = useCallback(async () => {
     if (authStatus === AuthStatus.LOGGED_IN && user) {
-      const newTotal = (userProfile?.minutesUsed || 0) + minutes;
+      const userRef = doc(db, 'users', user.uid);
+      
       try {
-        await updateDoc(doc(db, 'users', user.uid), { minutesUsed: newTotal });
+        const tier = userProfile?.plan || 'free';
+        const limit = PLAN_FEATURES[tier].thinkingLimit;
+        const currentUsage = userProfile?.thinkingUsed || 0;
+
+        console.log("Thinking usage check:", currentUsage, "/", limit);
+
+        if (limit !== 'unlimited' && currentUsage >= (limit as number)) {
+          throw new Error("❌ Thinking limit exceeded");
+        }
+
+        await updateDoc(userRef, { 
+          thinkingUsed: increment(1)
+        });
+        
+        console.log("✅ Thinking usage incremented");
       } catch (error) {
-        handleFirestoreError(error, OperationType.UPDATE, `users/${user.uid}`);
+        console.error("❌ Failed to increment thinking usage:", error);
       }
     } else {
       setUsageStats(prev => ({
         ...prev,
-        usedMinutes: Math.min(prev.totalMinutes, prev.usedMinutes + minutes)
+        aiRequestCount: prev.aiRequestCount + 1
       }));
     }
   }, [authStatus, user, userProfile]);
+
+  const incrementTranscriptionUsage = useCallback(async (minutes: number) => {
+    if (authStatus === AuthStatus.LOGGED_IN && user) {
+      const userRef = doc(db, 'users', user.uid);
+      
+      try {
+        await updateDoc(userRef, { 
+          minutesUsed: increment(minutes)
+        });
+        
+        console.log("✅ Transcription usage incremented by:", minutes);
+      } catch (error) {
+        console.error("❌ Failed to increment transcription usage:", error);
+      }
+    } else {
+      setUsageStats(prev => ({
+        ...prev,
+        usedMinutes: prev.usedMinutes + minutes
+      }));
+    }
+  }, [authStatus, user]);
+
+  const deductMinutes = useCallback(async (minutes: number) => {
+    if (authStatus === AuthStatus.LOGGED_IN && user) {
+      try {
+        await updateDoc(doc(db, 'users', user.uid), { 
+          minutesUsed: increment(minutes) 
+        });
+      } catch (error) {
+        handleFirestoreError(error, OperationType.UPDATE, `users/${user.uid}`);
+      }
+    } else {
+      setUsageStats(prev => ({
+        ...prev,
+        usedMinutes: prev.usedMinutes + minutes
+      }));
+    }
+  }, [authStatus, user]);
   
   const [audioHistory, setAudioHistory] = useState<AudioToTextRecord[]>([]);
+  const [loadingArchive, setLoadingArchive] = useState(false);
   const [textHistory, setTextHistory] = useState<TextToAudioRecord[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
+
+  // Organization, Teams, and Roles States
+  const [currentOrg, setCurrentOrg] = useState<any>(null);
+  const [currentOrgMember, setCurrentOrgMember] = useState<OrgMember | null>(null);
+  const [orgTeams, setOrgTeams] = useState<Team[]>([]);
+  const [userOrgRole, setUserOrgRole] = useState<OrgRole>('viewer');
+
+  // Last Refreshed State and automated triggers for:
+  // - usage updates (usageString)
+  // - subscription updates (subscriptionString)
+  // - analytics updates (historyString, manualAnalyticsTrigger)
+  // - profile updates (profileString)
+  const [lastRefreshed, setLastRefreshed] = useState<Date>(() => new Date());
+  const [manualAnalyticsTrigger, setManualAnalyticsTrigger] = useState(0);
+
+  const handleAnalyticsUpdate = useCallback(() => {
+    setManualAnalyticsTrigger(prev => prev + 1);
+  }, []);
+
+  const profileString = userProfile ? `${userProfile.displayName || ''}-${userProfile.email || ''}-${userProfile.photoURL || userProfile.avatarUrl || ''}` : '';
+  const subscriptionString = userProfile?.plan || 'free';
+  const usageString = `${usageStats.usedMinutes}-${usageStats.aiRequestCount}-${usageStats.extraMinutes || 0}`;
+  const historyString = `${audioHistory.length}-${textHistory.length}`;
+
+  useEffect(() => {
+    setLastRefreshed(new Date());
+  }, [profileString, subscriptionString, usageString, historyString, manualAnalyticsTrigger]);
   // Real-time Firestore listeners
   useEffect(() => {
     if (authStatus === AuthStatus.LOGGED_IN && user) {
+      setLoadingArchive(true);
+      
       const audioQuery = query(
-        collection(db, 'audioRecords'),
-        where('ownerUid', '==', user.uid),
-        orderBy('date', 'desc')
+        collection(db, 'recordings'),
+        where('userId', '==', user.uid),
+        orderBy('createdAt', 'desc')
       );
+      
       const unsubscribeAudio = onSnapshot(audioQuery, (snapshot) => {
-        const records = snapshot.docs.map(doc => doc.data() as AudioToTextRecord);
-        setAudioHistory(records);
-      }, (error) => handleFirestoreError(error, OperationType.LIST, 'audioRecords'));
+        const audioRecords = snapshot.docs.map(doc => doc.data() as AudioToTextRecord);
+        setAudioHistory(audioRecords);
+        setLoadingArchive(false);
+      }, (error) => {
+        handleFirestoreError(error, OperationType.LIST, 'recordings', false);
+        setLoadingArchive(false);
+      });
 
       const textQuery = query(
-        collection(db, 'textRecords'),
-        where('ownerUid', '==', user.uid),
-        orderBy('date', 'desc')
+        collection(db, 'transcriptions'),
+        where('userId', '==', user.uid),
+        orderBy('createdAt', 'desc')
       );
+      
       const unsubscribeText = onSnapshot(textQuery, (snapshot) => {
-        const records = snapshot.docs.map(doc => doc.data() as TextToAudioRecord);
-        setTextHistory(records);
-      }, (error) => handleFirestoreError(error, OperationType.LIST, 'textRecords'));
+        const textRecords = snapshot.docs.map(doc => doc.data() as TextToAudioRecord);
+        setTextHistory(textRecords);
+      }, (error) => {
+        handleFirestoreError(error, OperationType.LIST, 'transcriptions', false);
+      });
 
-      const projectsQuery = query(
-        collection(db, 'projects'),
-        where('ownerId', '==', user.uid)
+      // Fetch ALL projects to support cross-project permission queries
+      const allProjectsQuery = query(collection(db, 'projects'));
+      
+      // Fetch projects the user IS A MEMBER OF
+      const sharedProjectsQuery = query(
+        collection(db, 'projectMembers'),
+        where('userId', '==', user.uid)
       );
-      const unsubscribeProjects = onSnapshot(projectsQuery, async (snapshot) => {
-        const projs = snapshot.docs.map(doc => doc.data() as Project);
-        setProjects(projs);
-        
-        // Safety check: if user doesn't have a "General" project, auto-create it
-        const hasGeneral = projs.some(p => p.name.toLowerCase() === 'general');
-        if (!hasGeneral && authStatus === AuthStatus.LOGGED_IN) {
-          await addGroup('General');
+
+      let allProjectsList: Project[] = [];
+      let sharedProjectMemberships: ProjectMember[] = [];
+
+      const updateMergedProjects = () => {
+        let visibleProjects: Project[] = [];
+
+        if (userOrgRole === 'super_admin') {
+          visibleProjects = [...allProjectsList];
+        } else if (currentOrg) {
+          const orgOwnerEmail = currentOrg.ownerEmail;
+          const orgTeamProjIds = new Set(orgTeams.flatMap(t => t.projectIds || []));
+
+          if (userOrgRole === 'org_admin') {
+            // Org Admins see all projects belonging to the org
+            visibleProjects = allProjectsList.filter(p => 
+              p.userId === user.uid || 
+              p.ownerEmail === orgOwnerEmail || 
+              orgTeamProjIds.has(p.id)
+            );
+          } else if (userOrgRole === 'team_manager') {
+            // Team Managers see assigned projects, plus owned or shared projects
+            visibleProjects = allProjectsList.filter(p => 
+              p.userId === user.uid || 
+              orgTeamProjIds.has(p.id) ||
+              sharedProjectMemberships.some(m => m.projectId === p.id)
+            );
+          } else {
+            // Members and Viewers see projects assigned to their specific team, or owned, or explicitly shared
+            const userTeamId = currentOrgMember?.teamId;
+            const userTeams = userTeamId ? orgTeams.filter(t => t.id === userTeamId) : orgTeams;
+            const teamProjIds = new Set(userTeams.flatMap(t => t.projectIds || []));
+            
+            visibleProjects = allProjectsList.filter(p => 
+              p.userId === user.uid || 
+              teamProjIds.has(p.id) ||
+              sharedProjectMemberships.some(m => m.projectId === p.id)
+            );
+          }
+        } else {
+          // Personal scope: owned + shared
+          visibleProjects = allProjectsList.filter(p => 
+            p.userId === user.uid || 
+            sharedProjectMemberships.some(m => m.projectId === p.id)
+          );
         }
-      }, (error) => handleFirestoreError(error, OperationType.LIST, 'projects'));
+
+        // Add shared projects if not already present
+        sharedProjectMemberships.forEach(membership => {
+          if (!visibleProjects.find(p => p.id === membership.projectId)) {
+            const originalProj = allProjectsList.find(p => p.id === membership.projectId);
+            visibleProjects.push(originalProj || {
+              id: membership.projectId,
+              name: (membership as any).projectName || 'Shared Project',
+              userId: 'shared',
+              ownerEmail: 'Team',
+              members: [],
+              createdAt: membership.joinedAt
+            });
+          }
+        });
+
+        // Ensure General project is always present or created
+        const hasGeneral = visibleProjects.some(p => p.name.toLowerCase() === 'general');
+        if (!hasGeneral && visibleProjects.length > 0) {
+          // Keep General at the top if possible
+        }
+
+        setProjects(visibleProjects);
+      };
+
+      const unsubscribeAllProjects = onSnapshot(allProjectsQuery, (snapshot) => {
+        allProjectsList = snapshot.docs.map(doc => doc.data() as Project);
+        updateMergedProjects();
+
+        const hasGeneral = allProjectsList.some(p => p.name.toLowerCase() === 'general');
+        if (!hasGeneral) {
+          addGroup('General').catch(err => console.error("Auto-create General failed", err));
+        }
+      }, (error) => {
+        handleFirestoreError(error, OperationType.LIST, 'projects', false);
+      });
+
+      const unsubscribeShared = onSnapshot(sharedProjectsQuery, (snapshot) => {
+        sharedProjectMemberships = snapshot.docs.map(doc => doc.data() as ProjectMember);
+        updateMergedProjects();
+      }, (error) => {
+        handleFirestoreError(error, OperationType.LIST, 'projectMembers', false);
+      });
 
       return () => {
         unsubscribeAudio();
         unsubscribeText();
-        unsubscribeProjects();
+        unsubscribeAllProjects();
+        unsubscribeShared();
       };
     } else {
       setAudioHistory([]);
@@ -276,11 +477,118 @@ const App: React.FC = () => {
       setProjects([{
         id: 'general',
         name: 'General',
-        ownerId: 'system',
+        userId: 'system',
         createdAt: new Date().toISOString()
       }]);
+      setLoadingArchive(false);
     }
-  }, [authStatus, user]);
+  }, [authStatus, user, userOrgRole, currentOrg, orgTeams, currentOrgMember]);
+
+  // Real-time Organization, Teams, and Role tracking
+  useEffect(() => {
+    if (authStatus !== AuthStatus.LOGGED_IN || !user) {
+      setCurrentOrg(null);
+      setCurrentOrgMember(null);
+      setOrgTeams([]);
+      setUserOrgRole('viewer');
+      return;
+    }
+
+    // 1. First listen to organizations owned by the user
+    const ownedOrgQuery = query(
+      collection(db, 'organizations'),
+      where('ownerEmail', '==', user.email)
+    );
+
+    // 2. Also listen to orgMembers where the user is a member
+    const memberQuery = query(
+      collection(db, 'orgMembers'),
+      where('email', '==', user.email)
+    );
+
+    let activeOrgId: string | null = null;
+    let isUnsubscribed = false;
+
+    const unsubscribeOwnedOrg = onSnapshot(ownedOrgQuery, (snapshot) => {
+      if (isUnsubscribed) return;
+      if (!snapshot.empty) {
+        const orgDoc = snapshot.docs[0].data();
+        setCurrentOrg(orgDoc);
+        activeOrgId = orgDoc.id;
+        
+        if (userProfile?.role === 'admin') {
+          setUserOrgRole('super_admin');
+        } else {
+          setUserOrgRole('org_admin');
+        }
+      }
+    });
+
+    const unsubscribeMember = onSnapshot(memberQuery, (snapshot) => {
+      if (isUnsubscribed) return;
+      if (!snapshot.empty) {
+        const memberDoc = snapshot.docs[0].data() as OrgMember;
+        setCurrentOrgMember(memberDoc);
+        
+        if (!activeOrgId) {
+          activeOrgId = memberDoc.orgId;
+          const orgRef = doc(db, 'organizations', memberDoc.orgId);
+          onSnapshot(orgRef, (orgSnap) => {
+            if (isUnsubscribed) return;
+            if (orgSnap.exists()) {
+              setCurrentOrg(orgSnap.data());
+            }
+          });
+        }
+
+        if (userProfile?.role === 'admin') {
+          setUserOrgRole('super_admin');
+        } else if (memberDoc.role === 'owner' || memberDoc.role === 'admin') {
+          setUserOrgRole('org_admin');
+        } else if (memberDoc.role === 'team_lead') {
+          setUserOrgRole('team_manager');
+        } else if (memberDoc.role === 'member') {
+          setUserOrgRole('member');
+        } else if (memberDoc.role === 'guest') {
+          setUserOrgRole('viewer');
+        }
+      } else {
+        if (userProfile?.role === 'admin') {
+          setUserOrgRole('super_admin');
+        } else {
+          // Default to personal workspace: treat as org_admin for personal scope
+          setUserOrgRole('org_admin');
+        }
+      }
+    });
+
+    // 3. Listen to teams when organization ID is known
+    let unsubscribeTeams: (() => void) | null = null;
+    const watchTeams = (orgId: string) => {
+      if (isUnsubscribed) return;
+      const teamsQuery = query(collection(db, 'teams'), where('orgId', '==', orgId));
+      unsubscribeTeams = onSnapshot(teamsQuery, (snapshot) => {
+        if (isUnsubscribed) return;
+        const teamList = snapshot.docs.map(doc => doc.data() as Team);
+        setOrgTeams(teamList);
+      });
+    };
+
+    const interval = setInterval(() => {
+      if (activeOrgId) {
+        clearInterval(interval);
+        watchTeams(activeOrgId);
+      }
+    }, 1000);
+
+    return () => {
+      isUnsubscribed = true;
+      unsubscribeOwnedOrg();
+      unsubscribeMember();
+      if (unsubscribeTeams) unsubscribeTeams();
+      clearInterval(interval);
+    };
+  }, [authStatus, user, userProfile]);
 
   const groups = Array.from(new Set([
     'General',
@@ -406,18 +714,23 @@ const App: React.FC = () => {
     setCurrentTab(AppWorkflow.HOME);
     
     if (status === AuthStatus.GUEST) {
+      localStorage.setItem('guest', 'true');
       setUsageStats({
         usedMinutes: 0,
-        totalMinutes: 30,
+        totalMinutes: 15,
+        aiRequestCount: 0,
+        aiRequestLimit: 5,
+        thinkingLimit: 3,
         plan: 'guest',
-        renewalDate: 'April 3, 2026',
+        mode: 'guest',
+        renewalDate: 'May 1, 2026',
         minutesPerFileLimit: 5
       });
       // Clear history for guest session
       setAudioHistory([]);
       setTextHistory([]);
     } else if (status === AuthStatus.LOGGED_IN && profile?.plan) {
-      upgradePlan(profile.plan);
+      localStorage.removeItem('guest');
     }
 
     if (status === AuthStatus.LOGGED_IN && profile && rememberMe) {
@@ -436,6 +749,7 @@ const App: React.FC = () => {
     if (auth) {
       await auth.signOut();
     }
+    localStorage.removeItem('guest');
     setAuthStatus(AuthStatus.UNAUTHENTICATED);
     setUserProfile(undefined);
     setCurrentTab(AppWorkflow.HOME);
@@ -459,113 +773,238 @@ const App: React.FC = () => {
     return newObj;
   };
 
+  const logProjectActivity = useCallback(async (
+    projectId: string, 
+    actionType: ProjectActivity['actionType'], 
+    description: string,
+    metadata?: any
+  ) => {
+    if (authStatus !== AuthStatus.LOGGED_IN || !user) return;
+    try {
+      await addDoc(collection(db, 'projectActivities'), {
+        projectId: projectId || 'general',
+        userId: user.uid,
+        userEmail: user.email || '',
+        userName: userProfile?.displayName || user.displayName || user.email?.split('@')[0] || 'Member',
+        actionType,
+        description,
+        createdAt: serverTimestamp(),
+        metadata: metadata || null
+      });
+      console.log(`📡 Logged project activity: [${actionType}] ${description}`);
+    } catch (err) {
+      console.error("❌ Failed to log project activity:", err);
+    }
+  }, [authStatus, user, userProfile]);
+
   const saveAudioRecord = useCallback(async (record: AudioToTextRecord) => {
+    console.log("💾 Saving audio record to archive...", record.id);
+    
+    // GUEST MODE: Do not save to Firestore
+    if (authStatus === AuthStatus.GUEST || localStorage.getItem('guest') === 'true') {
+      setAudioHistory(prev => [record, ...prev]);
+      console.log("✅ Record saved to local state (Guest Mode)");
+      return;
+    }
+
     if (authStatus === AuthStatus.LOGGED_IN && user) {
       const groupName = record.group || 'General';
       const project = projects.find(p => p.name.toLowerCase() === groupName.toLowerCase());
+      
+      // Extract transcript text and speakers for easier access in archive
+      const transcriptText = record.transcript.map(s => s.text).join(' ');
+      const speakers = Array.from(new Set(record.transcript.map(s => s.speaker)));
+
+      // Filter out AI fields if they weren't selected
       const recordWithUid = sanitize({ 
         ...record, 
-        ownerUid: user.uid,
+        userId: user.uid,
         group: groupName,
-        projectId: project?.id || null
+        projectId: project?.id || null,
+        createdAt: serverTimestamp(),
+        transcriptText,
+        speakers,
+        status: 'completed',
+        // Ensure only selected modules are saved
+        summary: record.selectedModules?.includes('summary') ? record.summary : null,
+        strategicAnalysis: record.selectedModules?.includes('strategy') ? record.strategicAnalysis : null,
+        meetingIntelligence: record.selectedModules?.includes('meeting') ? record.meetingIntelligence : null,
+        executionTracker: record.selectedModules?.includes('execution') ? record.executionTracker : null,
+        calendarReminders: record.selectedModules?.includes('reminders') ? record.calendarReminders : null,
+        unifiedIntelligence: record.selectedModules && record.selectedModules.length > 0 ? record.unifiedIntelligence : null
       });
+
       try {
-        await setDoc(doc(db, 'audioRecords', record.id), recordWithUid);
+        await setDoc(doc(db, 'recordings', record.id), recordWithUid);
+        console.log("✅ Record saved successfully to Firestore");
+
+        const uName = userProfile?.displayName || user.displayName || user.email?.split('@')[0] || 'Someone';
+        await logProjectActivity(
+          project?.id || 'general',
+          'upload_file',
+          `${uName} uploaded recording "${record.fileName || 'Audio'}"`
+        );
       } catch (error) {
-        handleFirestoreError(error, OperationType.WRITE, `audioRecords/${record.id}`);
+        console.error("❌ Failed to save record:", error);
+        handleFirestoreError(error, OperationType.WRITE, `recordings/${record.id}`);
       }
     }
-  }, [authStatus, user, projects]);
+  }, [authStatus, user, projects, userProfile, logProjectActivity]);
 
   const saveTextRecord = useCallback(async (record: TextToAudioRecord) => {
+    console.log("💾 Saving synthesis record to archive...", record.id);
     if (authStatus === AuthStatus.LOGGED_IN && user) {
       const groupName = record.group || 'General';
       const project = projects.find(p => p.name.toLowerCase() === groupName.toLowerCase());
       const recordWithUid = sanitize({ 
         ...record, 
-        ownerUid: user.uid,
+        userId: user.uid,
         group: groupName,
-        projectId: project?.id || null
+        projectId: project?.id || null,
+        createdAt: serverTimestamp()
       });
       try {
-        await setDoc(doc(db, 'textRecords', record.id), recordWithUid);
+        await setDoc(doc(db, 'transcriptions', record.id), recordWithUid);
+        console.log("✅ Synthesis record saved successfully to Firestore");
+
+        const uName = userProfile?.displayName || user.displayName || user.email?.split('@')[0] || 'Someone';
+        await logProjectActivity(
+          project?.id || 'general',
+          'upload_file',
+          `${uName} synthesized audio file "${record.fullText.slice(0, 30)}..."`
+        );
       } catch (error) {
-        handleFirestoreError(error, OperationType.WRITE, `textRecords/${record.id}`);
+        console.error("❌ Failed to save synthesis record:", error);
+        handleFirestoreError(error, OperationType.WRITE, `transcriptions/${record.id}`);
       }
+    } else if (authStatus === AuthStatus.GUEST) {
+      setTextHistory(prev => [record, ...prev]);
+      console.log("✅ Synthesis record saved to local state (Guest Mode)");
     }
-  }, [authStatus, user, projects]);
+  }, [authStatus, user, projects, userProfile, logProjectActivity]);
 
   const updateAudioRecord = async (updated: AudioToTextRecord) => {
-    try {
-      const project = projects.find(p => p.name.toLowerCase() === (updated.group || 'General').toLowerCase());
-      const dataToUpdate = {
-        ...updated,
-        projectId: project?.id || null
-      };
-      await updateDoc(doc(db, 'audioRecords', updated.id), sanitize(dataToUpdate) as any);
-    } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, `audioRecords/${updated.id}`);
+    // Determine if bookmark count changed
+    const current = audioHistory.find(r => r.id === updated.id);
+    const oldBookmarksCount = (current?.bookmarks || []).length;
+    const newBookmarksCount = (updated.bookmarks || []).length;
+
+    // Optimistically update local state for immediate UI feedback
+    setAudioHistory(prev => prev.map(r => r.id === updated.id ? updated : r));
+
+    if (authStatus === AuthStatus.LOGGED_IN && user) {
+      try {
+        const project = projects.find(p => p.name.toLowerCase() === (updated.group || 'General').toLowerCase());
+        const dataToUpdate = {
+          ...updated,
+          projectId: project?.id || null
+        };
+        await updateDoc(doc(db, 'recordings', updated.id), sanitize(dataToUpdate) as any);
+
+        if (newBookmarksCount > oldBookmarksCount) {
+          const uName = userProfile?.displayName || user.displayName || user.email?.split('@')[0] || 'Someone';
+          await logProjectActivity(
+            project?.id || 'general',
+            'create_bookmark',
+            `${uName} bookmarked recording "${updated.fileName || 'Audio'}"`
+          );
+        }
+      } catch (error) {
+        console.error("❌ Failed to update record in Firestore:", error);
+        // Rollback on error if needed, but for simplicity we keep local state in sync with failed attempt for now
+        handleFirestoreError(error, OperationType.UPDATE, `recordings/${updated.id}`);
+      }
     }
   };
 
   const updateTextRecord = async (updated: TextToAudioRecord) => {
-    try {
-      const project = projects.find(p => p.name.toLowerCase() === (updated.group || 'General').toLowerCase());
-      const dataToUpdate = {
-        ...updated,
-        projectId: project?.id || null
-      };
-      await updateDoc(doc(db, 'textRecords', updated.id), sanitize(dataToUpdate) as any);
-    } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, `textRecords/${updated.id}`);
+    // Optimistically update local state
+    setTextHistory(prev => prev.map(r => r.id === updated.id ? updated : r));
+
+    if (authStatus === AuthStatus.LOGGED_IN && user) {
+      try {
+        const project = projects.find(p => p.name.toLowerCase() === (updated.group || 'General').toLowerCase());
+        const dataToUpdate = {
+          ...updated,
+          projectId: project?.id || null
+        };
+        await updateDoc(doc(db, 'transcriptions', updated.id), sanitize(dataToUpdate) as any);
+      } catch (error) {
+        console.error("❌ Failed to update synthesis record in Firestore:", error);
+        handleFirestoreError(error, OperationType.UPDATE, `transcriptions/${updated.id}`);
+      }
     }
   };
 
   const deleteAudioRecord = async (id: string) => {
-    try {
-      await updateDoc(doc(db, 'audioRecords', id), { deletedAt: new Date().toISOString() });
-    } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, `audioRecords/${id}`);
+    if (authStatus === AuthStatus.LOGGED_IN && user) {
+      try {
+        await updateDoc(doc(db, 'recordings', id), { deletedAt: new Date().toISOString() });
+      } catch (error) {
+        handleFirestoreError(error, OperationType.UPDATE, `recordings/${id}`);
+      }
+    } else if (authStatus === AuthStatus.GUEST) {
+      setAudioHistory(prev => prev.map(r => r.id === id ? { ...r, deletedAt: new Date().toISOString() } : r));
     }
   };
 
   const deleteTextRecord = async (id: string) => {
-    try {
-      await updateDoc(doc(db, 'textRecords', id), { deletedAt: new Date().toISOString() });
-    } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, `textRecords/${id}`);
+    if (authStatus === AuthStatus.LOGGED_IN && user) {
+      try {
+        await updateDoc(doc(db, 'transcriptions', id), { deletedAt: new Date().toISOString() });
+      } catch (error) {
+        handleFirestoreError(error, OperationType.UPDATE, `transcriptions/${id}`);
+      }
+    } else if (authStatus === AuthStatus.GUEST) {
+      setTextHistory(prev => prev.map(r => r.id === id ? { ...r, deletedAt: new Date().toISOString() } : r));
     }
   };
 
   const permanentlyDeleteAudioRecord = async (id: string) => {
-    try {
-      await deleteDoc(doc(db, 'audioRecords', id));
-    } catch (error) {
-      handleFirestoreError(error, OperationType.DELETE, `audioRecords/${id}`);
+    if (authStatus === AuthStatus.LOGGED_IN && user) {
+      try {
+        await deleteDoc(doc(db, 'recordings', id));
+      } catch (error) {
+        handleFirestoreError(error, OperationType.DELETE, `recordings/${id}`);
+      }
+    } else if (authStatus === AuthStatus.GUEST) {
+      setAudioHistory(prev => prev.filter(r => r.id !== id));
     }
   };
 
   const permanentlyDeleteTextRecord = async (id: string) => {
-    try {
-      await deleteDoc(doc(db, 'textRecords', id));
-    } catch (error) {
-      handleFirestoreError(error, OperationType.DELETE, `textRecords/${id}`);
+    if (authStatus === AuthStatus.LOGGED_IN && user) {
+      try {
+        await deleteDoc(doc(db, 'transcriptions', id));
+      } catch (error) {
+        handleFirestoreError(error, OperationType.DELETE, `transcriptions/${id}`);
+      }
+    } else if (authStatus === AuthStatus.GUEST) {
+      setTextHistory(prev => prev.filter(r => r.id !== id));
     }
   };
 
   const restoreAudioRecord = async (id: string) => {
-    try {
-      await updateDoc(doc(db, 'audioRecords', id), { deletedAt: null });
-    } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, `audioRecords/${id}`);
+    if (authStatus === AuthStatus.LOGGED_IN && user) {
+      try {
+        await updateDoc(doc(db, 'recordings', id), { deletedAt: null });
+      } catch (error) {
+        handleFirestoreError(error, OperationType.UPDATE, `recordings/${id}`);
+      }
+    } else if (authStatus === AuthStatus.GUEST) {
+      setAudioHistory(prev => prev.map(r => r.id === id ? { ...r, deletedAt: undefined } : r));
     }
   };
 
   const restoreTextRecord = async (id: string) => {
-    try {
-      await updateDoc(doc(db, 'textRecords', id), { deletedAt: null });
-    } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, `textRecords/${id}`);
+    if (authStatus === AuthStatus.LOGGED_IN && user) {
+      try {
+        await updateDoc(doc(db, 'transcriptions', id), { deletedAt: null });
+      } catch (error) {
+        handleFirestoreError(error, OperationType.UPDATE, `transcriptions/${id}`);
+      }
+    } else if (authStatus === AuthStatus.GUEST) {
+      setTextHistory(prev => prev.map(r => r.id === id ? { ...r, deletedAt: undefined } : r));
     }
   };
 
@@ -604,6 +1043,14 @@ const App: React.FC = () => {
   const [lastCreatedProjectId, setLastCreatedProjectId] = useState<string | null>(null);
 
   const addGroup = async (name: string) => {
+    if (isGuest) {
+      addNotification({
+        title: 'Feature Restricted',
+        message: 'Creating projects is not available in Guest Mode. Please create an account to save your work.',
+        type: 'error'
+      });
+      return null;
+    }
     if (!name.trim()) return null;
     const existing = projects.find(p => p.name.toLowerCase() === name.toLowerCase());
     if (!existing) {
@@ -612,8 +1059,9 @@ const App: React.FC = () => {
       const newProject: Project = {
         id,
         name,
-        ownerId: user?.uid || 'guest',
+        userId: user?.uid || 'guest',
         ownerEmail: user?.email || 'guest',
+        ownerName: userProfile?.displayName || userProfile?.name || user?.displayName || user?.email?.split('@')[0] || 'User',
         isDefault,
         members: [],
         createdAt: new Date().toISOString()
@@ -665,35 +1113,58 @@ const App: React.FC = () => {
     if (selectedGroupFilter === name) setSelectedGroupFilter(null);
   };
 
-  const inviteToProject = (projectName: string, email: string, role: CollaborationRole) => {
-    if (usageStats.plan === 'guest' || usageStats.plan === 'free') {
-      alert("Collaboration features are only available in Pro and Enterprise plans.");
+  const inviteToProject = async (projectName: string, email: string, role: CollaborationRole) => {
+    if (isGuest) {
+      addToast('Feature Restricted', 'Team collaboration is not available in Guest Mode. Please create an account to invite others.', 'error');
       return;
     }
 
     const project = projects.find(p => p.name === projectName);
-    if (usageStats.plan === 'pro' && project && (project.members || []).length >= 3) {
-      alert("Pro plan is limited to 3 collaborators per project. Upgrade to Enterprise for unlimited team members.");
+    if (!project || !user) {
+      addToast('Invite Error', 'Could not find the selected project.', 'error');
       return;
     }
-    
-    setProjects(prev => (prev || []).map(p => {
-      if (p.name === projectName) {
-        const members = p.members || [];
-        const existingMember = members.find(m => m.email === email);
-        if (existingMember) {
-          return {
-            ...p,
-            members: members.map(m => m.email === email ? { ...m, role } : m)
-          };
-        }
-        return {
-          ...p,
-          members: [...members, { email, role, status: 'not-read', isOnline: Math.random() > 0.5 }]
-        };
+
+    try {
+      const response = await fetch('/api/invite-member', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email,
+          role,
+          projectId: project.id,
+          projectName: project.name,
+          invitedBy: user.email,
+          ownerId: project.userId
+        })
+      });
+
+      if (!response.ok) {
+        const data = await response.json();
+        throw new Error(data.error || 'Failed to send invitation');
       }
-      return p;
-    }));
+
+      const inviteData = await response.json();
+      
+      addToast('Success', `Invitation sent to ${email}`, 'success');
+      
+      addNotification({
+        title: 'Invite Sent',
+        message: `You invited ${email} to join ${projectName} as ${role}.`,
+        type: 'success'
+      });
+
+      const uName = userProfile?.displayName || user.displayName || user.email?.split('@')[0] || 'Someone';
+      await logProjectActivity(
+        project.id,
+        'invite_member',
+        `${uName} invited ${email} to join project "${projectName}" as ${role}`
+      );
+      
+    } catch (error: any) {
+      console.error('Invite Error:', error);
+      addToast('Invite Failed', error.message, 'error');
+    }
   };
 
   const selectGroup = (name: string | null) => {
@@ -705,7 +1176,41 @@ const App: React.FC = () => {
   };
 
   const [searchQuery, setSearchQuery] = useState('');
+  const [isCollapsed, setIsCollapsed] = useState(false);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [decisionIntelligenceInitialInput, setDecisionIntelligenceInitialInput] = useState<{ text: string; type: 'transcript' | 'summary' } | undefined>(undefined);
+
+  const handleSummarizeTranscript = async (recordId: string) => {
+    const record = audioHistory.find(r => r.id === recordId);
+    if (!record || !record.transcript) {
+      addToast('AI Action', 'No transcript found to summarize.', 'error');
+      return;
+    }
+
+    if (!checkThinkingLimit()) return;
+
+    addToast('AI Action', 'Summarizing transcript...', 'info');
+    try {
+      // Convert string transcript to TranscriptSegment[] if it's stored as string
+      // In this app, it seems record.transcript is a string (the full text)
+      // But geminiService.summarizeTranscript expects TranscriptSegment[]
+      // Let's check the type of transcript in AudioToTextRecord
+      
+      // If it's a string, we might need a different summarizer or convert it.
+      // Looking at geminiService.ts, transcribeAudio returns { transcript: TranscriptSegment[], ... }
+      // And AudioToTextRecord has transcript: string; (from types.ts)
+      
+      // Wait, let's check types.ts
+      const summary = await summarizeTranscript([{ speaker: 'Speaker', text: record.transcript, startTime: 0, endTime: 0 }], userProfile.plan);
+      await incrementThinkingUsage();
+      
+      await updateAudioRecord({ ...record, summary });
+      addToast('AI Action', 'Summary updated successfully!', 'success');
+    } catch (error) {
+      console.error('Summarization failed:', error);
+      addToast('AI Action', 'Failed to summarize transcript.', 'error');
+    }
+  };
 
   const handleReuseDecision = (text: string, type: 'transcript' | 'summary') => {
     setDecisionIntelligenceInitialInput({ text, type });
@@ -713,18 +1218,18 @@ const App: React.FC = () => {
   };
 
   const renderContent = () => {
-    if (currentTab === AppWorkflow.HISTORY && authStatus === AuthStatus.GUEST) {
+    if ((currentTab === AppWorkflow.HISTORY || currentTab === AppWorkflow.DECISION_HISTORY || currentTab === AppWorkflow.DECISION_INTELLIGENCE || currentTab === AppWorkflow.COLLABORATION_DASHBOARD || currentTab === AppWorkflow.ORGANIZATION_DASHBOARD) && authStatus === AuthStatus.GUEST) {
       return (
         <div className="flex flex-col items-center justify-center h-full text-center space-y-8 animate-in fade-in duration-700">
           <div className="w-24 h-24 bg-brand-background rounded-lg flex items-center justify-center text-brand-primary text-4xl shadow-inner border border-brand-divider/20">
             <i className="fa-solid fa-lock"></i>
           </div>
           <div className="space-y-4 max-w-md">
-            <h2 className="text-[26px] font-medium text-brand-primary tracking-[-0.01em] leading-tight">Archive Restricted</h2>
-            <p className="text-slate-600 text-[16px] font-medium">Enterprise authentication is required to access the Intelligence Archive and collaboration tools.</p>
+            <h2 className="text-[26px] font-medium text-brand-primary tracking-[-0.01em] leading-tight">Advanced Intelligence Restricted</h2>
+            <p className="text-slate-600 text-[16px] font-medium">Guest users only have access to session-based transcription and synthesis. Sign up for a free account to unlock meeting history, decision intelligence, and persistent storage.</p>
           </div>
           <button onClick={handleLogout} className="px-10 py-4 bg-brand-primary text-white rounded-lg font-semibold uppercase tracking-widest text-[13px] shadow-xl hover:opacity-90 active:scale-95 transition-all">
-            Sign In for History
+            Sign In for Full Access
           </button>
         </div>
       );
@@ -732,7 +1237,7 @@ const App: React.FC = () => {
 
     switch (currentTab) {
       case AppWorkflow.HOME:
-        return <HomeView setTab={setCurrentTab} authStatus={authStatus} userProfile={userProfile} onSignInClick={handleLogout} onAddGroup={addGroup} />;
+        return <HomeView setTab={setCurrentTab} authStatus={authStatus} userProfile={userProfile} onSignInClick={handleLogout} onAddGroup={addGroup} usageStats={usageStats} />;
       case AppWorkflow.AUDIO_TO_TEXT:
         return (
           <AudioToTextView 
@@ -754,10 +1259,13 @@ const App: React.FC = () => {
             addNotification={addNotification}
             usageStats={usageStats}
             onDeductMinutes={deductMinutes}
-            onUpgradeClick={() => setCurrentTab(AppWorkflow.SUBSCRIPTION)}
-            onBuyAddOnClick={() => setCurrentTab(AppWorkflow.SUBSCRIPTION)}
             onSignInClick={handleLogout}
             searchTerm={searchQuery}
+            checkThinkingLimit={checkThinkingLimit}
+            checkTranscriptionLimit={checkTranscriptionLimit}
+            incrementThinkingUsage={incrementThinkingUsage}
+            incrementTranscriptionUsage={incrementTranscriptionUsage}
+            userOrgRole={userOrgRole}
           />
         );
       case AppWorkflow.TEXT_TO_AUDIO:
@@ -776,6 +1284,7 @@ const App: React.FC = () => {
             onPlay={handleGlobalPlay}
             onPause={handleGlobalPause}
             addNotification={addNotification}
+            userOrgRole={userOrgRole}
           />
         );
       case AppWorkflow.DECISION_INTELLIGENCE:
@@ -786,6 +1295,9 @@ const App: React.FC = () => {
             userProfile={userProfile}
             addNotification={addNotification}
             initialInput={decisionIntelligenceInitialInput}
+            checkThinkingLimit={checkThinkingLimit}
+            incrementThinkingUsage={incrementThinkingUsage}
+            onLogActivity={logProjectActivity}
           />
         );
       case AppWorkflow.DECISION_HISTORY:
@@ -810,17 +1322,6 @@ const App: React.FC = () => {
             userProfile={userProfile!}
             addNotification={addNotification}
             onReuse={handleReuseDecision}
-          />
-        );
-      case AppWorkflow.SUBSCRIPTION:
-        return (
-          <SubscriptionView 
-            usageStats={usageStats}
-            onUpgrade={upgradePlan}
-            onBuyAddOn={buyAddOn}
-            authStatus={authStatus}
-            onSignInClick={handleLogout}
-            addNotification={addNotification}
           />
         );
       case AppWorkflow.HISTORY:
@@ -861,6 +1362,44 @@ const App: React.FC = () => {
             usageStats={usageStats}
             searchQuery={searchQuery}
             addNotification={addNotification}
+            isLoading={loadingArchive}
+            checkThinkingLimit={checkThinkingLimit}
+            incrementThinkingUsage={incrementThinkingUsage}
+            userOrgRole={userOrgRole}
+          />
+        );
+      case AppWorkflow.ADMIN_TRACKER:
+        if (userProfile?.role !== 'admin') {
+          return (
+            <div className="flex flex-col items-center justify-center h-full text-center p-8">
+              <i className="fa-solid fa-triangle-exclamation text-red-500 text-4xl mb-4"></i>
+              <h1 className="text-xl font-bold">Access Denied</h1>
+              <p className="text-slate-500">You must be an administrator to view this page.</p>
+            </div>
+          );
+        }
+        return <AdminTrackerView userProfile={userProfile} onAnalyticsUpdate={handleAnalyticsUpdate} />;
+      case AppWorkflow.COLLABORATION_DASHBOARD:
+        return (
+          <CollaborationDashboard 
+            projects={projects}
+            selectedProjectName={selectedGroupFilter}
+            onSelectProjectName={setSelectedGroupFilter}
+            userProfile={userProfile}
+            audioHistory={audioHistory}
+            textHistory={textHistory}
+            addNotification={addNotification}
+            onInviteToProject={inviteToProject}
+            userOrgRole={userOrgRole}
+          />
+        );
+      case AppWorkflow.ORGANIZATION_DASHBOARD:
+        return (
+          <OrganizationDashboard 
+            projects={projects}
+            userProfile={userProfile}
+            addNotification={addNotification}
+            userOrgRole={userOrgRole}
           />
         );
       default:
@@ -870,7 +1409,7 @@ const App: React.FC = () => {
 
   const renderDashboard = () => {
     return (
-      <div className="flex flex-col md:flex-row md:h-screen bg-brand-background text-brand-primary">
+      <div className="flex flex-col md:flex-row md:h-screen bg-brand-background text-brand-primary overflow-hidden">
         {showSettings && (
           <AuthView onAuth={handleAuth} isSettingsMode onCloseSettings={() => setShowSettings(false)} onLogout={handleLogout} userProfile={userProfile} onBackToHome={handleBackToHome} />
         )}
@@ -951,44 +1490,36 @@ const App: React.FC = () => {
           onSignInClick={handleLogin}
           onAddGroup={() => setIsCreateProjectModalOpen(true)}
           onOpenSettings={() => setShowSettings(true)}
+          onOpenUpgrade={() => setShowUpgradeModal(true)}
           notifications={notifications}
           onMarkNotificationRead={markNotificationRead}
           onClearNotifications={clearNotifications}
           usageStats={usageStats}
+          isCollapsed={isCollapsed}
+          setIsCollapsed={setIsCollapsed}
+          isOpen={isSidebarOpen}
+          setIsOpen={setIsSidebarOpen}
+          lastRefreshed={lastRefreshed}
+          userOrgRole={userOrgRole}
         />
         
-        <main className="flex-1 overflow-y-auto custom-scrollbar bg-brand-background relative">
+        <main className={`flex-1 overflow-y-auto custom-scrollbar bg-brand-background relative transition-all duration-300 ${isCollapsed ? 'lg:ml-20' : 'lg:ml-64 xl:ml-72'}`}>
           <Topbar 
             usageStats={usageStats} 
             userProfile={userProfile} 
             authStatus={authStatus} 
-            onNavigateToSubscription={() => setCurrentTab(AppWorkflow.SUBSCRIPTION)}
             onLogout={handleLogout}
             onOpenSettings={() => setShowSettings(true)}
+            onOpenUpgrade={() => setShowUpgradeModal(true)}
             searchQuery={searchQuery}
             onSearchChange={setSearchQuery}
             showSearch={currentTab === AppWorkflow.HISTORY}
             selectedProjectName={selectedGroupFilter}
+            onToggleSidebar={() => setIsSidebarOpen(!isSidebarOpen)}
+            lastRefreshed={lastRefreshed}
           />
           
-          {usageStats.usedMinutes / usageStats.totalMinutes >= 0.75 && usageStats.usedMinutes / usageStats.totalMinutes < 1 && (
-            <div className="bg-amber-50 border-b border-amber-100 px-8 py-3 flex items-center justify-between animate-in slide-in-from-top duration-500">
-              <div className="flex items-center space-x-3">
-                <i className="fa-solid fa-circle-exclamation text-amber-500"></i>
-                <p className="text-[13px] font-semibold text-amber-800">
-                  Approaching your monthly transcription limit.
-                </p>
-              </div>
-              <button 
-                onClick={() => setCurrentTab(AppWorkflow.SUBSCRIPTION)}
-                className="text-[11px] font-semibold tracking-widest text-amber-600 hover:underline"
-              >
-                Upgrade plan
-              </button>
-            </div>
-          )}
-          
-          <div className="max-w-7xl mx-auto p-6 sm:p-12 md:p-16 lg:p-24 pb-48">
+          <div className="w-full max-w-screen-xl mx-auto px-4 py-6 md:px-8 md:py-12 lg:px-16 lg:py-20 pb-48">
             {renderContent()}
           </div>
           
@@ -1029,6 +1560,7 @@ const App: React.FC = () => {
       <div className="min-h-screen flex flex-col bg-brand-background">
         <LandingNavbar 
           onLogin={handleLogin} 
+          onStartFree={handleStartFree}
           onGoToDashboard={handleGoToDashboard}
           authStatus={authStatus}
         />
@@ -1063,15 +1595,22 @@ const App: React.FC = () => {
   return (
     <>
       <ScrollToTop />
+      <Toaster position="top-center" richColors />
+      
+      <SubscriptionModal 
+        isOpen={showUpgradeModal} 
+        onClose={() => setShowUpgradeModal(false)} 
+        userProfile={userProfile}
+      />
+
       <Routes>
         {/* Public Routes */}
         <Route path="/" element={renderPublicPage(<Home onLogin={handleLogin} onStartFree={handleStartFree} onNavigateToDemo={handleNavigateToDemo} authStatus={authStatus} onGoToDashboard={handleGoToDashboard} />)} />
         <Route path="/features" element={renderPublicPage(<Features onLogin={handleLogin} onStartFree={handleStartFree} onNavigateToDemo={handleNavigateToDemo} authStatus={authStatus} />)} />
         <Route path="/solutions" element={renderPublicPage(<Solutions onLogin={handleLogin} onStartFree={handleStartFree} onNavigateToDemo={handleNavigateToDemo} authStatus={authStatus} />)} />
-        <Route path="/pricing" element={renderPublicPage(<Pricing onLogin={handleLogin} onStartFree={handleStartFree} onNavigateToDemo={handleNavigateToDemo} authStatus={authStatus} />)} />
+        <Route path="/pricing" element={renderPublicPage(<PricingPage />)} />
         <Route path="/contact" element={renderPublicPage(<ContactPage />)} />
         <Route path="/demo" element={renderPublicPage(<BookDemoPage />)} />
-        <Route path="/test" element={renderPublicPage(<TestDashboard />)} />
         <Route path="/privacy" element={renderPublicPage(<PrivacyPolicy />)} />
         <Route path="/terms" element={renderPublicPage(<TermsOfService />)} />
         <Route path="/security" element={renderPublicPage(<SecurityPage />)} />
@@ -1164,14 +1703,12 @@ const App: React.FC = () => {
           summary: audioHistory.find(r => r.id === activeRecordId)?.summary || 'None',
           user_plan: usageStats.plan,
           minutes_used: usageStats.usedMinutes,
-          minutes_remaining: usageStats.totalMinutes - usageStats.usedMinutes
+          minutes_remaining: Math.max(0, usageStats.totalMinutes - usageStats.usedMinutes)
         }}
         actions={{
           summarizeTranscript: () => {
             if (activeRecordId) {
-              setCurrentTab(AppWorkflow.AUDIO_TO_TEXT);
-              // In a real app, we'd trigger the summary logic here
-              addToast('AI Action', 'Summarizing transcript...', 'info');
+              handleSummarizeTranscript(activeRecordId);
             } else {
               addToast('AI Action', 'Please select a file first.', 'error');
             }

@@ -3,13 +3,14 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { 
   History, Search, Filter, Calendar, ChevronDown, ChevronUp, 
   Trash2, Copy, Play, Clock, FileText, Brain, AlertTriangle, 
-  CheckCircle, Lightbulb, HelpCircle, ArrowRight, Sparkles, Lock
+  CheckCircle, Lightbulb, HelpCircle, ArrowRight, Sparkles, Lock,
+  MessageSquareOff
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import UnresolvedTopicsDetector from './UnresolvedTopicsDetector';
 import { DecisionHistoryItem, UserProfile } from '../types';
-import { db, collection, query, where, orderBy, limit, onSnapshot, deleteDoc, doc, OperationType, handleFirestoreError } from '../firebase';
+import { db, collection, query, where, orderBy, limit, getDocs, deleteDoc, doc, OperationType, handleFirestoreError } from '../firebase';
 import { PLAN_FEATURES } from '../config/planConfig';
-import UpgradeModal from './UpgradeModal';
 
 interface DecisionHistoryProps {
   userProfile: UserProfile;
@@ -28,38 +29,42 @@ const DecisionHistory: React.FC<DecisionHistoryProps> = ({
   const [filterType, setFilterType] = useState<'all' | 'transcript' | 'summary'>('all');
   const [sortOrder, setSortOrder] = useState<'desc' | 'asc'>('desc');
   const [expandedId, setExpandedId] = useState<string | null>(null);
-  const [showUpgradeModal, setShowUpgradeModal] = useState(false);
 
   const planFeatures = PLAN_FEATURES[userProfile.plan];
 
   useEffect(() => {
     if (!userProfile) return;
 
-    const q = query(
-      collection(db, 'decisionHistory'),
-      where('userId', '==', userProfile.uid),
-      orderBy('createdAt', sortOrder),
-      limit(50)
-    );
+    const fetchHistory = async () => {
+      setLoading(true);
+      try {
+        console.log("📡 Fetching decision history (one-time)");
+        const q = query(
+          collection(db, 'decisionHistory'),
+          where('userId', '==', userProfile.uid),
+          orderBy('createdAt', sortOrder),
+          limit(50)
+        );
 
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const items: DecisionHistoryItem[] = [];
-      snapshot.forEach((doc) => {
-        const data = doc.data();
-        items.push({
-          id: doc.id,
-          ...data,
-          createdAt: data.createdAt?.toDate()?.toISOString() || new Date().toISOString()
-        } as DecisionHistoryItem);
-      });
-      setHistory(items);
-      setLoading(false);
-    }, (error) => {
-      handleFirestoreError(error, OperationType.LIST, 'decisionHistory');
-      setLoading(false);
-    });
+        const snapshot = await getDocs(q);
+        const items: DecisionHistoryItem[] = [];
+        snapshot.forEach((doc) => {
+          const data = doc.data();
+          items.push({
+            id: doc.id,
+            ...data,
+            createdAt: data.createdAt?.toDate()?.toISOString() || new Date().toISOString()
+          } as DecisionHistoryItem);
+        });
+        setHistory(items);
+      } catch (error) {
+        handleFirestoreError(error, OperationType.LIST, 'decisionHistory');
+      } finally {
+        setLoading(false);
+      }
+    };
 
-    return () => unsubscribe();
+    fetchHistory();
   }, [userProfile, sortOrder]);
 
   const filteredHistory = useMemo(() => {
@@ -304,6 +309,9 @@ Decision Clarity: ${item.output.decisionClarity}
                         />
                       </div>
 
+                      {/* Unresolved Topics */}
+                      <UnresolvedTopicsDetector unresolvedTopics={item.output.unresolvedTopics} />
+
                       {/* Clarity */}
                       <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-3">
                         <div className="flex items-center space-x-2">
@@ -334,33 +342,7 @@ Decision Clarity: ${item.output.decisionClarity}
             </div>
           ))
         )}
-
-        {hasHiddenItems && (
-          <div className="bg-slate-50 rounded-2xl border border-slate-200 p-8 text-center space-y-4 border-dashed">
-            <div className="w-12 h-12 bg-white rounded-full flex items-center justify-center mx-auto text-slate-400 shadow-sm">
-              <Lock size={20} />
-            </div>
-            <div className="space-y-1">
-              <h3 className="text-lg font-bold text-slate-700">More history is hidden</h3>
-              <p className="text-slate-400 text-sm max-w-xs mx-auto">
-                Your current plan only shows the last {planFeatures.decisionHistoryLimit} insights. Upgrade to unlock your full history.
-              </p>
-            </div>
-            <button
-              onClick={() => setShowUpgradeModal(true)}
-              className="px-6 py-2 bg-brand-primary text-white rounded-lg text-xs font-bold uppercase tracking-widest shadow-lg hover:opacity-90 transition-all"
-            >
-              Upgrade Now
-            </button>
-          </div>
-        )}
       </div>
-
-      <UpgradeModal 
-        isOpen={showUpgradeModal}
-        onClose={() => setShowUpgradeModal(false)}
-        reason={`Your current plan only shows the last ${planFeatures.decisionHistoryLimit} insights. Upgrade to unlock your full history.`}
-      />
     </div>
   );
 };

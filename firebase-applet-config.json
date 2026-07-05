@@ -1,10 +1,10 @@
 {
-  "projectId": "gen-lang-client-0960448654",
-  "appId": "1:236260186696:web:d9f6e83b0c6d3394edd67d",
-  "apiKey": "AIzaSyBbdfEYM3c75eDRppmaqW-AhncdqdfPOVk",
-  "authDomain": "gen-lang-client-0960448654.firebaseapp.com",
+  "projectId": "echonote-2509",
+  "appId": "1:200551109142:web:462b574459e512c6d69b37",
+  "apiKey": "AIzaSyBCyM_oazmnVLbu61gUoe5_9tTFwO57oIA",
+  "authDomain": "echonote-2509.firebaseapp.com",
   "firestoreDatabaseId": "ai-studio-eb588566-0d1e-4ef9-bca0-1194fd2bb6d5",
-  "storageBucket": "gen-lang-client-0960448654.firebasestorage.app",
-  "messagingSenderId": "236260186696",
+  "storageBucket": "echonote-2509.firebasestorage.app",
+  "messagingSenderId": "200551109142",
   "measurementId": ""
 }

@@ -2,63 +2,23 @@
   "entities": {
     "UserProfile": {
       "title": "User Profile",
-      "description": "Enterprise user account and subscription state.",
+      "description": "EchoNote user account and subscription state.",
       "type": "object",
       "properties": {
         "uid": { "type": "string" },
         "email": { "type": "string", "format": "email" },
-        "displayName": { "type": "string" },
-        "role": { "type": "string", "enum": ["admin", "user"] },
-        "plan": { "type": "string", "enum": ["free", "pro", "team", "enterprise"] },
-        "minutes_remaining": { "type": "number" },
-        "billing_cycle": { "type": "string", "enum": ["monthly", "yearly"] },
+        "name": { "type": "string" },
+        "plan": { "type": "string", "enum": ["free", "pro", "team", "enterprise", "guest"] },
         "minutesUsed": { "type": "number" },
+        "extraMinutes": { "type": "number" },
         "minutesLimit": { "type": "number" },
         "thinkingUsageCount": { "type": "number" },
-        "teamId": { "type": "string" },
-        "razorpayCustomerId": { "type": "string" },
-        "totalMinutesProcessed": { "type": "number" },
-        "createdAt": { "type": "string", "format": "date-time" }
+        "renewal_date": { "type": "string", "format": "date-time" },
+        "billing_cycle": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["uid", "email", "plan"]
-    },
-    "AudioToTextRecord": {
-      "title": "Audio to Text Record",
-      "description": "Transcription record with metadata and segments.",
-      "type": "object",
-      "properties": {
-        "id": { "type": "string" },
-        "date": { "type": "string", "format": "date-time" },
-        "fileName": { "type": "string" },
-        "sourceType": { "type": "string", "enum": ["live", "recorded"] },
-        "originalAudioUrl": { "type": "string" },
-        "transcript": { "type": "array", "items": { "type": "object" } },
-        "summary": { "type": "object" },
-        "status": { "type": "string", "enum": ["pending", "processing", "completed", "error", "draft"] },
-        "ownerEmail": { "type": "string" },
-        "ownerUid": { "type": "string" },
-        "speakerMap": { "type": "object" },
-        "group": { "type": "string" },
-        "deletedAt": { "type": "string" }
-      },
-      "required": ["id", "date", "fileName", "status", "ownerUid"]
-    },
-    "TextToAudioRecord": {
-      "title": "Text to Audio Record",
-      "description": "Speech synthesis record.",
-      "type": "object",
-      "properties": {
-        "id": { "type": "string" },
-        "date": { "type": "string", "format": "date-time" },
-        "textPreview": { "type": "string" },
-        "fullText": { "type": "string" },
-        "audioUrl": { "type": "string" },
-        "gender": { "type": "string", "enum": ["male", "female"] },
-        "group": { "type": "string" },
-        "ownerUid": { "type": "string" },
-        "deletedAt": { "type": "string" }
-      },
-      "required": ["id", "date", "audioUrl", "ownerUid"]
     },
     "Project": {
       "title": "Project",
@@ -66,16 +26,99 @@
       "type": "object",
       "properties": {
         "id": { "type": "string" },
+        "userId": { "type": "string" },
         "name": { "type": "string" },
-        "ownerId": { "type": "string" },
+        "ownerEmail": { "type": "string" },
         "isDefault": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "userId", "name"]
+    },
+    "ProjectMember": {
+      "title": "Project Member",
+      "description": "Links a user to a project with a role.",
+      "type": "object",
+      "properties": {
+        "projectId": { "type": "string" },
+        "userId": { "type": "string" },
+        "email": { "type": "string" },
+        "role": { "type": "string", "enum": ["owner", "editor", "viewer"] },
+        "joinedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["projectId", "userId", "role"]
+    },
+    "Invitation": {
+      "title": "Invitation",
+      "description": "Pending project invitation.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "email": { "type": "string" },
+        "projectId": { "type": "string" },
+        "projectName": { "type": "string" },
+        "role": { "type": "string" },
+        "invitedBy": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "accepted", "expired"] },
         "createdAt": { "type": "string", "format": "date-time" }
       },
-      "required": ["id", "name", "ownerId"]
+      "required": ["id", "email", "projectId", "role"]
+    },
+    "Recording": {
+      "title": "Recording",
+      "description": "Audio recording metadata.",
+      "type": "object",
+      "properties": {
+        "recordingId": { "type": "string" },
+        "userId": { "type": "string" },
+        "projectId": { "type": "string" },
+        "audioUrl": { "type": "string" },
+        "duration": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["recordingId", "userId", "audioUrl"]
+    },
+    "Transcription": {
+      "title": "Transcription",
+      "description": "AI-generated transcription and analysis.",
+      "type": "object",
+      "properties": {
+        "transcriptionId": { "type": "string" },
+        "recordingId": { "type": "string" },
+        "userId": { "type": "string" },
+        "text": { "type": "string" },
+        "summary": { "type": "string" },
+        "actionItems": { "type": "array", "items": { "type": "string" } },
+        "speakers": { "type": "array", "items": { "type": "object" } },
+        "confidenceScore": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["transcriptionId", "recordingId", "userId"]
+    },
+    "Usage": {
+      "title": "Usage",
+      "description": "Usage tracking for minutes and AI requests.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "minutesUsed": { "type": "number" },
+        "aiRequestsUsed": { "type": "number" },
+        "lastUpdated": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId"]
+    },
+    "HealthCheck": {
+      "title": "Health Check",
+      "description": "Simple status check.",
+      "type": "object",
+      "properties": {
+        "status": { "type": "string" }
+      },
+      "required": ["status"]
     },
     "DecisionHistory": {
       "title": "Decision History",
-      "description": "Stored outputs from Decision Intelligence analysis.",
+      "description": "AI-analyzed decision insights and thinking engine history.",
       "type": "object",
       "properties": {
         "userId": { "type": "string" },
@@ -85,14 +128,142 @@
         "output": { "type": "object" },
         "createdAt": { "type": "string", "format": "date-time" }
       },
-      "required": ["userId", "title", "inputType", "inputText", "output", "createdAt"]
+      "required": ["userId", "title", "inputType", "inputText", "output"]
+    },
+    "AIUsageLog": {
+      "title": "AI Usage Log",
+      "description": "Granular individual AI request token and cost metrics.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "plan": { "type": "string" },
+        "featureName": { "type": "string" },
+        "modelUsed": { "type": "string" },
+        "inputTokens": { "type": "number" },
+        "outputTokens": { "type": "number" },
+        "totalTokens": { "type": "number" },
+        "estimatedCost": { "type": "number" },
+        "requestDuration": { "type": "number" },
+        "status": { "type": "string", "enum": ["success", "failure"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "email", "featureName", "modelUsed", "inputTokens", "outputTokens", "totalTokens", "estimatedCost", "requestDuration", "status"]
+    },
+    "UserCostAnalytics": {
+      "title": "User Cost Analytics",
+      "description": "Aggregated AI cost and usage summaries tracked per individual user.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "plan": { "type": "string" },
+        "totalRequests": { "type": "number" },
+        "totalInputTokens": { "type": "number" },
+        "totalOutputTokens": { "type": "number" },
+        "totalTokens": { "type": "number" },
+        "totalEstimatedCost": { "type": "number" },
+        "lastUpdated": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "email", "plan", "totalRequests", "totalInputTokens", "totalOutputTokens", "totalTokens", "totalEstimatedCost"]
+    },
+    "UserAnalytics": {
+      "title": "User Analytics",
+      "description": "Rich extended granular user metrics for backend intelligence.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "plan": { "type": "string" },
+        "displayName": { "type": "string" },
+        "transcriptionMinutesUsed": { "type": "number" },
+        "intelligenceRequestsUsed": { "type": "number" },
+        "totalAIRequests": { "type": "number" },
+        "totalInputTokens": { "type": "number" },
+        "totalOutputTokens": { "type": "number" },
+        "totalTokens": { "type": "number" },
+        "totalAICost": { "type": "number" },
+        "monthlyAICost": { "type": "number" },
+        "lifetimeAICost": { "type": "number" },
+        "subscriptionRevenue": { "type": "number" },
+        "topupRevenue": { "type": "number" },
+        "lifetimeRevenue": { "type": "number" },
+        "revenueMinusCost": { "type": "number" },
+        "lastActiveAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "email", "plan"]
+    },
+    "TeamAnalytics": {
+      "title": "Team Analytics",
+      "description": "Aggregated team-wide metrics and profitability analysis.",
+      "type": "object",
+      "properties": {
+        "teamId": { "type": "string" },
+        "teamName": { "type": "string" },
+        "totalMembers": { "type": "number" },
+        "totalMinutesUsed": { "type": "number" },
+        "totalInputTokens": { "type": "number" },
+        "totalOutputTokens": { "type": "number" },
+        "totalTokens": { "type": "number" },
+        "totalAIRequests": { "type": "number" },
+        "totalAICost": { "type": "number" },
+        "totalRevenue": { "type": "number" },
+        "profitability": { "type": "number" }
+      },
+      "required": ["teamId", "teamName"]
+    },
+    "MonthlyAnalytics": {
+      "title": "Monthly Analytics",
+      "description": "Summarized month-by-month platform statistics.",
+      "type": "object",
+      "properties": {
+        "month": { "type": "string" },
+        "totalUsers": { "type": "number" },
+        "activeUsers": { "type": "number" },
+        "totalMinutes": { "type": "number" },
+        "totalInputTokens": { "type": "number" },
+        "totalOutputTokens": { "type": "number" },
+        "totalTokens": { "type": "number" },
+        "totalAISpend": { "type": "number" },
+        "totalRevenue": { "type": "number" },
+        "profitEstimate": { "type": "number" }
+      },
+      "required": ["month"]
+    },
+    "FeatureAnalytics": {
+      "title": "Feature Analytics",
+      "description": "Separate cost tracking aggregated per distinctive AI feature.",
+      "type": "object",
+      "properties": {
+        "featureName": { "type": "string" },
+        "totalRequests": { "type": "number" },
+        "totalInputTokens": { "type": "number" },
+        "totalOutputTokens": { "type": "number" },
+        "totalTokens": { "type": "number" },
+        "totalAICost": { "type": "number" },
+        "totalResponseTime": { "type": "number" }
+      },
+      "required": ["featureName"]
     }
   },
   "firestore": {
     "/users/{userId}": { "schema": "UserProfile", "description": "User profiles" },
-    "/audioRecords/{recordId}": { "schema": "AudioToTextRecord", "description": "Transcription records" },
-    "/textRecords/{recordId}": { "schema": "TextToAudioRecord", "description": "Speech synthesis records" },
-    "/projects/{projectId}": { "schema": "Project", "description": "Collaboration groups" },
-    "/decisionHistory/{historyId}": { "schema": "DecisionHistory", "description": "Decision intelligence history" }
+    "/projects/{projectId}": { "schema": "Project", "description": "Collaboration projects" },
+    "/recordings/{recordingId}": { "schema": "Recording", "description": "Audio recordings" },
+    "/transcriptions/{transcriptionId}": { "schema": "Transcription", "description": "AI transcriptions" },
+    "/usage/{userId}": { "schema": "Usage", "description": "Usage tracking" },
+    "/subscriptions/{id}": { "schema": "Subscription", "description": "Razorpay subscriptions" },
+    "/projectMembers/{id}": { "schema": "ProjectMember", "description": "Project membership" },
+    "/invites/{id}": { "schema": "Invitation", "description": "Project invitations" },
+    "/userIntegrations/{userId}": { "schema": "UserIntegration", "description": "Third-party integrations" },
+    "/jiraStates/{userId}": { "schema": "JiraState", "description": "Jira OAuth state" },
+    "/healthcheck/{id}": { "schema": "HealthCheck", "description": "System health check" },
+    "/decisionHistory/{id}": { "schema": "DecisionHistory", "description": "Thinking engine history" },
+    "/aiUsageLogs/{id}": { "schema": "AIUsageLog", "description": "Granular AI usage logs" },
+    "/userCostAnalytics/{userId}": { "schema": "UserCostAnalytics", "description": "Aggregated user cost analytics" },
+    "/userAnalytics/{userId}": { "schema": "UserAnalytics", "description": "Aggregated user rich analytics" },
+    "/teamAnalytics/{teamId}": { "schema": "TeamAnalytics", "description": "Aggregated team cost analytics" },
+    "/monthlyAnalytics/{month}": { "schema": "MonthlyAnalytics", "description": "Monthly aggregates analytics document" },
+    "/featureAnalytics/{featureId}": { "schema": "FeatureAnalytics", "description": "Feature usage and latency statistics" }
   }
 }

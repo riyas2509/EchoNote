@@ -31,7 +31,7 @@ const Solutions: React.FC<SolutionsProps> = ({ onLogin, onStartFree, onNavigateT
               Enterprise Grade
             </div>
             <h2 className="text-4xl md:text-5xl font-bold tracking-tight text-brand-primary">Your data isn’t processed. <span className="text-brand-secondary">It’s protected.</span></h2>
-            <p className="text-brand-secondary/60 max-w-2xl mx-auto text-lg">We maintain the highest standards of security and compliance to protect your most sensitive conversations.</p>
+            <p className="text-brand-secondary/60 max-w-2xl mx-auto text-lg">We maintain strong security patterns and data access controls to protect your sensitive conversations.</p>
           </div>
           
           <div className="grid grid-cols-1 md:grid-cols-3 gap-12">
@@ -39,24 +39,24 @@ const Solutions: React.FC<SolutionsProps> = ({ onLogin, onStartFree, onNavigateT
               <div className="w-16 h-16 rounded-2xl bg-brand-primary/5 flex items-center justify-center text-brand-primary">
                 <Shield size={32} />
               </div>
-              <h3 className="text-xl font-bold text-brand-primary">SOC2 Type II compliance</h3>
-              <p className="text-brand-secondary/60 leading-relaxed">Independently audited security controls ensuring your data is handled with the highest level of care.</p>
+              <h3 className="text-xl font-bold text-brand-primary">Project Access Isolation</h3>
+              <p className="text-brand-secondary/60 leading-relaxed">Server-side security rules validate project-level access so that only explicitly assigned members can read transcripts.</p>
             </motion.div>
             
             <motion.div {...fadeIn} transition={{ delay: 0.2 }} className="p-10 rounded-[32px] bg-white border border-brand-divider/10 shadow-sm space-y-6">
               <div className="w-16 h-16 rounded-2xl bg-brand-primary/5 flex items-center justify-center text-brand-primary">
                 <Lock size={32} />
               </div>
-              <h3 className="text-xl font-bold text-brand-primary">End-to-end encryption</h3>
-              <p className="text-brand-secondary/60 leading-relaxed">AES-256 encryption at rest and TLS 1.3 in transit. Your audio never leaves the encrypted tunnel.</p>
+              <h3 className="text-xl font-bold text-brand-primary">Standard Data Encryption</h3>
+              <p className="text-brand-secondary/60 leading-relaxed">AES-256 encryption at rest and TLS 1.3 encryption in transit protect all transcripts and platform communications.</p>
             </motion.div>
             
             <motion.div {...fadeIn} transition={{ delay: 0.4 }} className="p-10 rounded-[32px] bg-white border border-brand-divider/10 shadow-sm space-y-6">
               <div className="w-16 h-16 rounded-2xl bg-brand-primary/5 flex items-center justify-center text-brand-primary">
                 <Globe size={32} />
               </div>
-              <h3 className="text-xl font-bold text-brand-primary">Zero-training policy</h3>
-              <p className="text-brand-secondary/60 leading-relaxed">We never use your data to train our models. Your intelligence remains yours alone.</p>
+              <h3 className="text-xl font-bold text-brand-primary">Zero-training AI policy</h3>
+              <p className="text-brand-secondary/60 leading-relaxed">Transcripts and strategic analyses are processed via secure server-side API queries and never utilized for global model retraining.</p>
             </motion.div>
           </div>
         </section>

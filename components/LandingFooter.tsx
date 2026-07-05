@@ -55,15 +55,31 @@ const LandingFooter: React.FC = () => {
               EchoNote is a premium AI audio intelligence platform designed for enterprise compliance, legal, and financial teams.
             </p>
             <div className="flex items-center space-x-4">
-              <a href="#" className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center hover:bg-white/10 transition-colors">
-                <i className="fa-brands fa-twitter"></i>
-              </a>
-              <a href="#" className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center hover:bg-white/10 transition-colors">
-                <i className="fa-brands fa-linkedin"></i>
-              </a>
-              <a href="#" className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center hover:bg-white/10 transition-colors">
-                <i className="fa-brands fa-github"></i>
-              </a>
+              {[
+                {
+                  name: 'LinkedIn',
+                  icon: 'fa-brands fa-linkedin',
+                  url: 'https://www.linkedin.com/in/riya-shah-335056290/',
+                  label: 'Visit LinkedIn profile'
+                },
+                {
+                  name: 'GitHub',
+                  icon: 'fa-brands fa-github',
+                  url: 'https://github.com/riyas2509',
+                  label: 'Visit GitHub profile'
+                }
+              ].map((social) => (
+                <a 
+                  key={social.name}
+                  href={social.url} 
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  aria-label={social.label}
+                  className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center hover:bg-white/10 transition-colors"
+                >
+                  <i className={social.icon}></i>
+                </a>
+              ))}
             </div>
           </div>
 

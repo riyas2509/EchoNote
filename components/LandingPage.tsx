@@ -16,19 +16,27 @@ import {
   Search,
   MessageSquare,
   Clock,
-  Check
+  Check,
+  Mic,
+  Brain,
+  Sparkles,
+  ListTodo,
+  Volume2,
+  Archive,
+  CreditCard
 } from 'lucide-react';
 import { MainView, AuthStatus } from '../types';
 
 interface LandingPageProps {
   onNavigate: (view: MainView, hash?: string) => void;
   onLogin: () => void;
+  onStartFree?: () => void;
   targetHash?: string | null;
   onHashHandled?: () => void;
   authStatus?: AuthStatus;
 }
 
-const LandingPage: React.FC<LandingPageProps> = ({ onNavigate, onLogin, targetHash, onHashHandled, authStatus }) => {
+const LandingPage: React.FC<LandingPageProps> = ({ onNavigate, onLogin, onStartFree, targetHash, onHashHandled, authStatus }) => {
   const [activeDemoTab, setActiveDemoTab] = useState<'audio' | 'transcript' | 'summary'>('transcript');
   const [billingCycle, setBillingCycle] = useState<'monthly' | 'yearly'>('yearly');
   const isLoggedIn = authStatus === AuthStatus.LOGGED_IN;
@@ -75,34 +83,19 @@ const LandingPage: React.FC<LandingPageProps> = ({ onNavigate, onLogin, targetHa
                 <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-brand-accent opacity-75"></span>
                 <span className="relative inline-flex rounded-full h-2 w-2 bg-brand-accent"></span>
               </span>
-              <span>Enterprise Audio Intelligence</span>
-            </div>
-            
-            <div className="flex items-center gap-3 mb-6">
-              <img 
-                src="/Logo-2.png" 
-                alt="EchoNote"
-                className="h-8 w-8 object-contain opacity-80"
-              />
-              <span className="text-xl font-bold text-brand-primary/80 tracking-tight">
-                EchoNote
-              </span>
+              <span>Enterprise Decision Intelligence</span>
             </div>
             
             <h1 className="text-5xl md:text-7xl font-bold tracking-tight text-brand-primary leading-[1.1]">
-              Stop listening to calls. <span className="text-brand-secondary">Start extracting decisions.</span>
+              Align team dialogue. <span className="text-brand-secondary">Accelerate decisive execution.</span>
             </h1>
-            
-            <p className="text-xl text-brand-secondary/80 max-w-lg leading-relaxed">
-              EchoNote turns hours of raw conversations into structured intelligence — with speaker attribution, instant summaries, and compliance-ready insights in seconds.
-            </p>
             
             <div className="flex flex-col sm:flex-row items-center gap-4 pt-4">
               <button 
-                onClick={isLoggedIn ? () => onNavigate(MainView.APP) : onLogin}
+                onClick={isLoggedIn ? () => onNavigate(MainView.APP) : onStartFree}
                 className="w-full sm:w-auto bg-brand-primary text-white px-10 py-5 rounded-xl font-bold uppercase tracking-widest text-[13px] shadow-2xl hover:shadow-brand-primary/20 hover:-translate-y-1 transition-all flex items-center justify-center space-x-3"
               >
-                <span>{isLoggedIn ? 'Start Free' : 'Start Free'}</span>
+                <span>Start Free</span>
                 <ArrowRight size={18} />
               </button>
               {!isLoggedIn && (
@@ -115,14 +108,18 @@ const LandingPage: React.FC<LandingPageProps> = ({ onNavigate, onLogin, targetHa
               )}
             </div>
             
-            <div className="flex items-center space-x-6 pt-4 text-[14px] text-brand-secondary/60">
+            <div className="flex flex-wrap items-center gap-x-6 gap-y-2 pt-4 text-[14px] text-brand-secondary/60">
               <div className="flex items-center space-x-2">
                 <CheckCircle2 size={16} className="text-emerald-500" />
-                <span>No credit card required</span>
+                <span>Decision Intelligence</span>
               </div>
               <div className="flex items-center space-x-2">
                 <CheckCircle2 size={16} className="text-emerald-500" />
-                <span>Built for compliance-heavy teams</span>
+                <span>Strategic Execution</span>
+              </div>
+              <div className="flex items-center space-x-2">
+                <CheckCircle2 size={16} className="text-emerald-500" />
+                <span>Enterprise Collaboration</span>
               </div>
             </div>
           </motion.div>
@@ -210,26 +207,45 @@ const LandingPage: React.FC<LandingPageProps> = ({ onNavigate, onLogin, targetHa
         </div>
       </section>
 
-      {/* 2. SOCIAL PROOF */}
-      <section className="py-12 border-y border-brand-divider/20 bg-white/50">
+      {/* 2. WHY ECHONOTE */}
+      <section className="py-20 border-y border-brand-divider/20 bg-white/60">
         <div className="max-w-7xl mx-auto px-6">
-          <p className="text-center text-[13px] font-bold uppercase tracking-widest text-brand-secondary/40 mb-10">Trusted by teams at</p>
-          <div className="flex flex-wrap justify-center items-center gap-12 md:gap-24 opacity-40 grayscale hover:grayscale-0 transition-all">
-            <div className="flex items-center space-x-2 text-2xl font-bold text-brand-primary">
-              <i className="fa-solid fa-building-columns"></i>
-              <span>FINCORP</span>
+          <div className="text-center space-y-4 mb-16">
+            <h2 className="text-3xl md:text-4xl font-bold tracking-tight text-brand-primary">Why EchoNote</h2>
+            <p className="text-brand-secondary/70 max-w-2xl mx-auto text-base">
+              Moving beyond transcription. Aligning modern enterprise operations around structured decision models, swift execution paths, and secure team collaboration.
+            </p>
+          </div>
+          
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
+            <div className="p-6 rounded-xl bg-white border border-brand-divider/10 shadow-sm space-y-4">
+              <div className="w-10 h-10 rounded-lg bg-emerald-50 text-emerald-600 flex items-center justify-center font-bold">
+                <i className="fa-solid fa-brain text-xl"></i>
+              </div>
+              <h3 className="font-bold text-lg text-brand-primary">Decision Intelligence</h3>
+              <p className="text-brand-secondary/60 text-sm leading-relaxed">
+                Automatically extract core choices, explicit trade-offs, and risk models directly from natural team dialogue. Turn raw voice into a clear corporate knowledge base.
+              </p>
             </div>
-            <div className="flex items-center space-x-2 text-2xl font-bold text-brand-primary">
-              <i className="fa-solid fa-scale-balanced"></i>
-              <span>LEXIS</span>
+            
+            <div className="p-6 rounded-xl bg-white border border-brand-divider/10 shadow-sm space-y-4">
+              <div className="w-10 h-10 rounded-lg bg-brand-primary/5 text-brand-primary flex items-center justify-center font-bold">
+                <i className="fa-solid fa-list-check text-xl"></i>
+              </div>
+              <h3 className="font-bold text-lg text-brand-primary">Swift Execution</h3>
+              <p className="text-brand-secondary/60 text-sm leading-relaxed">
+                Instantly map tasks, assign clear ownership, and trigger reminders directly from recorded speech. Bridge the gap between meeting decisions and prompt field action.
+              </p>
             </div>
-            <div className="flex items-center space-x-2 text-2xl font-bold text-brand-primary">
-              <i className="fa-solid fa-shield-halved"></i>
-              <span>SECURE</span>
-            </div>
-            <div className="flex items-center space-x-2 text-2xl font-bold text-brand-primary">
-              <i className="fa-solid fa-chart-line"></i>
-              <span>VANTAGE</span>
+            
+            <div className="p-6 rounded-xl bg-white border border-brand-divider/10 shadow-sm space-y-4">
+              <div className="w-10 h-10 rounded-lg bg-amber-50 text-amber-600 flex items-center justify-center font-bold">
+                <i className="fa-solid fa-users-gear text-xl"></i>
+              </div>
+              <h3 className="font-bold text-lg text-brand-primary">Enterprise Collaboration</h3>
+              <p className="text-brand-secondary/60 text-sm leading-relaxed">
+                Seamless real-time shared workspace for cross-functional teams. Synchronize plans, share secure analytics, and audit changes with compliance-heavy confidence.
+              </p>
             </div>
           </div>
         </div>
@@ -409,10 +425,14 @@ const LandingPage: React.FC<LandingPageProps> = ({ onNavigate, onLogin, targetHa
             className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-8"
           >
             {[
-              { icon: <Users />, title: 'Speaker Intelligence', desc: 'Automatically identify and track speakers across conversations.' },
-              { icon: <Search />, title: 'Semantic Search', desc: 'Search meaning, not words, across your entire audio archive.' },
-              { icon: <MessageSquare />, title: 'Smart Summaries', desc: 'Generate structured summaries with decisions and action items.' },
-              { icon: <ShieldCheck />, title: 'Compliance Detection', desc: 'Flag sensitive keywords and regulatory risks instantly.' }
+              { icon: <Mic />, title: 'Live Transcription', desc: 'Stream real-time audio or upload files with millisecond latency, custom speaker diarization, and precision speech-to-text.' },
+              { icon: <Brain />, title: 'Decision Intelligence', desc: 'Instantly parse conversations to extract critical meeting choices, trade-offs, rationale, and definitive outcomes.' },
+              { icon: <Sparkles />, title: 'Strategic Thinking Partner', desc: 'Engage the integrated AI strategic consultant to brainstorm options, evaluate ideas, and stress-test strategic concepts.' },
+              { icon: <ListTodo />, title: 'Execution Tracking', desc: 'Convert collaborative dialogue directly into assigned tasks, clear ownership stakes, and dynamic milestone paths.' },
+              { icon: <Volume2 />, title: 'Speech Synthesis', desc: 'Generate natural audio readouts of key meeting summaries and core decisions with premium neural text-to-speech.' },
+              { icon: <Archive />, title: 'Intelligence Archive', desc: 'Maintain a permanent, structured corporate memory bank with advanced tag filtering, search patterns, and trend analysis.' },
+              { icon: <Users />, title: 'Team Collaboration', desc: 'Work collectively in a shared multi-user environment with workspace activity streams and real-time team synchronization.' },
+              { icon: <CreditCard />, title: 'Flexible Subscriptions', desc: 'Upgrade fluidly between guest, pro, and enterprise tiers with robust usage trackers and dynamic seat management.' }
             ].map((feature, i) => (
               <motion.div 
                 key={i}
@@ -625,7 +645,7 @@ const LandingPage: React.FC<LandingPageProps> = ({ onNavigate, onLogin, targetHa
               </p>
               <div className="pt-4">
                 <button 
-                  onClick={() => onNavigate(MainView.APP)}
+                  onClick={isLoggedIn ? () => onNavigate(MainView.APP) : onStartFree}
                   className="bg-brand-primary text-white px-10 py-5 rounded-xl font-bold uppercase tracking-widest text-[13px] shadow-2xl hover:shadow-brand-primary/20 hover:-translate-y-1 transition-all"
                 >
                   Start Free
@@ -650,9 +670,9 @@ const LandingPage: React.FC<LandingPageProps> = ({ onNavigate, onLogin, targetHa
           
           <div className="grid grid-cols-1 md:grid-cols-3 gap-12">
             {[
-              { icon: <ShieldCheck className="text-emerald-500" />, title: 'End-to-end encryption', desc: 'AES-256, TLS 1.3 encryption for all audio and transcript data at rest and in transit.' },
-              { icon: <Users className="text-brand-accent" />, title: 'Role-based access control', desc: 'Define exactly who can view, edit, or export transcripts with project-based permissions.' },
-              { icon: <BarChart3 className="text-brand-secondary" />, title: 'SOC2 Type II compliance', desc: 'Built-in tools for audit trails, secure sharing, and enterprise-grade data protection.' }
+              { icon: <ShieldCheck className="text-emerald-500" />, title: 'Secured Data Encryption', desc: 'AES-256 at-rest and TLS 1.3 in-transit encryption secures all raw transcripts and audio datasets.' },
+              { icon: <Users className="text-brand-accent" />, title: 'Role-based access control', desc: 'Define exactly who can view, edit, or invite members to recordings using project-level permissions.' },
+              { icon: <BarChart3 className="text-brand-secondary" />, title: 'Database Access Controls', desc: 'Server-side Firestore security rules validate and isolate all project files and real-time logs.' }
             ].map((item, i) => (
               <div key={i} className="space-y-6 p-8 rounded-2xl bg-brand-background border border-brand-divider/10">
                 <div className="w-12 h-12 rounded-xl bg-white flex items-center justify-center shadow-md">
@@ -667,7 +687,7 @@ const LandingPage: React.FC<LandingPageProps> = ({ onNavigate, onLogin, targetHa
           <div className="mt-20 p-12 rounded-3xl bg-brand-primary text-white flex flex-col md:flex-row items-center justify-between gap-8">
             <div className="space-y-2">
               <h4 className="text-2xl font-bold">Ready for Enterprise?</h4>
-              <p className="text-white/60">Learn more about our SOC2 Type II compliance and data residency options.</p>
+              <p className="text-white/60">Learn more about our secure database architecture and team access controls.</p>
             </div>
             <button 
               onClick={() => onNavigate(MainView.SECURITY)}

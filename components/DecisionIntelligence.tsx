@@ -6,7 +6,7 @@ import { AudioToTextRecord, AuthStatus, UserProfile, DecisionIntelligenceResult 
 import { analyzeDecisionIntelligence } from '../services/geminiService';
 import { db, collection, addDoc, serverTimestamp, OperationType, handleFirestoreError, doc, updateDoc, increment } from '../firebase';
 import { PLAN_FEATURES } from '../config/planConfig';
-import UpgradeModal from './UpgradeModal';
+import UnresolvedTopicsDetector from './UnresolvedTopicsDetector';
 
 interface DecisionIntelligenceProps {
   audioHistory: AudioToTextRecord[];
@@ -14,6 +14,9 @@ interface DecisionIntelligenceProps {
   userProfile?: UserProfile;
   addNotification: (notif: any) => void;
   initialInput?: { text: string; type: 'transcript' | 'summary' };
+  checkThinkingLimit: () => boolean;
+  incrementThinkingUsage: () => Promise<void>;
+  onLogActivity?: (projectId: string, actionType: any, description: string) => Promise<void>;
 }
 
 const DecisionIntelligence: React.FC<DecisionIntelligenceProps> = ({
@@ -21,33 +24,52 @@ const DecisionIntelligence: React.FC<DecisionIntelligenceProps> = ({
   authStatus,
   userProfile,
   addNotification,
-  initialInput
+  initialInput,
+  checkThinkingLimit,
+  incrementThinkingUsage,
+  onLogActivity
 }) => {
   const [inputType, setInputType] = useState<'transcript' | 'summary'>(initialInput?.type || 'transcript');
   const [inputText, setInputText] = useState(initialInput?.text || '');
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [result, setResult] = useState<DecisionIntelligenceResult | null>(null);
   const [showTranscriptPicker, setShowTranscriptPicker] = useState(false);
-  const [showUpgradeModal, setShowUpgradeModal] = useState(false);
 
   const handleAnalyze = async () => {
     if (!inputText.trim() || !userProfile) return;
 
-    // Check plan limits
-    const planFeatures = PLAN_FEATURES[userProfile.plan];
-    if (planFeatures.thinkingLimit !== 'unlimited' && userProfile.thinkingUsageCount >= planFeatures.thinkingLimit) {
-      setShowUpgradeModal(true);
+    if (!checkThinkingLimit()) {
+      addNotification({
+        title: 'Thinking Limit Reached',
+        message: 'You have reached your thinking engine limit.',
+        type: 'error'
+      });
       return;
     }
     
     setIsAnalyzing(true);
     try {
-      const data = await analyzeDecisionIntelligence(inputText, inputType);
+      const data = await analyzeDecisionIntelligence(
+        inputText, 
+        inputType, 
+        userProfile.plan,
+        userProfile.uid,
+        userProfile.email
+      );
+      await incrementThinkingUsage();
       setResult(data);
 
       // Save to Decision History
       const title = inputText.split(/\s+/).slice(0, 10).join(' ') + (inputText.split(/\s+/).length > 10 ? '...' : '');
       
+      let decisionProjectId = '';
+      let decisionProjectName = '';
+      const matchingRecord = audioHistory.find(r => r.transcript === inputText || r.unifiedIntelligence?.summary === inputText);
+      if (matchingRecord) {
+        decisionProjectId = matchingRecord.projectId || '';
+        decisionProjectName = matchingRecord.group || '';
+      }
+
       try {
         // Atomic update of usage count and save history
         await Promise.all([
@@ -57,12 +79,20 @@ const DecisionIntelligence: React.FC<DecisionIntelligenceProps> = ({
             inputType,
             inputText,
             output: data,
+            projectId: decisionProjectId,
+            projectName: decisionProjectName,
             createdAt: serverTimestamp()
-          }),
-          updateDoc(doc(db, 'users', userProfile.uid), {
-            thinkingUsageCount: increment(1)
           })
         ]);
+
+        if (onLogActivity) {
+          const uName = userProfile.displayName || userProfile.email.split('@')[0] || 'Someone';
+          await onLogActivity(
+            decisionProjectId || 'general',
+            'generate_decision',
+            `${uName} generated Decision Intelligence for "${title}"`
+          );
+        }
       } catch (saveError) {
         handleFirestoreError(saveError, OperationType.WRITE, 'decisionHistory/users');
       }
@@ -295,6 +325,9 @@ const DecisionIntelligence: React.FC<DecisionIntelligenceProps> = ({
               />
             </div>
 
+            {/* Unresolved Topics Detector Module */}
+            <UnresolvedTopicsDetector unresolvedTopics={result.unresolvedTopics} />
+
             {/* Decision Clarity */}
             <div className="bg-brand-primary/5 border border-brand-primary/10 rounded-2xl p-8 space-y-4">
               <div className="flex items-center space-x-3">
@@ -308,12 +341,6 @@ const DecisionIntelligence: React.FC<DecisionIntelligenceProps> = ({
           </motion.div>
         )}
       </AnimatePresence>
-
-      <UpgradeModal 
-        isOpen={showUpgradeModal}
-        onClose={() => setShowUpgradeModal(false)}
-        reason="You have reached your Thinking Engine limit for this month."
-      />
     </div>
   );
 };

@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
-import { AppWorkflow, AuthStatus, UserProfile } from '../types';
+import { AppWorkflow, AuthStatus, UserProfile, UsageStats } from '../types';
+import { getMinutesUsage, getThinkingUsage, getNextResetDate } from '../lib/usageUtils';
 
 interface HomeViewProps {
   setTab: (tab: AppWorkflow) => void;
@@ -7,12 +8,16 @@ interface HomeViewProps {
   userProfile?: UserProfile;
   onSignInClick?: () => void;
   onAddGroup: (name: string) => void;
+  usageStats?: UsageStats;
 }
 
-const HomeView: React.FC<HomeViewProps> = ({ setTab, authStatus, userProfile, onSignInClick, onAddGroup }) => {
-  const firstName = userProfile?.name?.split(' ')[0] || userProfile?.email?.split('@')[0] || 'User';
+const HomeView: React.FC<HomeViewProps> = ({ setTab, authStatus, userProfile, onSignInClick, onAddGroup, usageStats }) => {
+  const firstName = (userProfile?.displayName || userProfile?.name)?.split(' ')[0] || userProfile?.email?.split('@')[0] || 'User';
   const [isCreating, setIsCreating] = useState(false);
   const [newGroup, setNewGroup] = useState('');
+  
+  const minutesUsage = usageStats ? getMinutesUsage(usageStats) : null;
+  const thinkingUsageRes = usageStats ? getThinkingUsage(usageStats) : null;
 
   const handleCreateGroup = (e: React.FormEvent) => {
     e.preventDefault();
@@ -61,6 +66,54 @@ const HomeView: React.FC<HomeViewProps> = ({ setTab, authStatus, userProfile, on
           </div>
         )}
       </header>
+
+      {authStatus === AuthStatus.LOGGED_IN && usageStats && (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 animate-in fade-in slide-in-from-top-2 duration-500">
+          <div className="bg-white border border-brand-divider/20 rounded-2xl p-6 shadow-sm flex items-center justify-between">
+            <div className="flex items-center gap-4">
+              <div className="w-12 h-12 bg-slate-50 flex items-center justify-center rounded-xl text-brand-primary">
+                <i className="fa-solid fa-clock opacity-40"></i>
+              </div>
+              <div className="text-left">
+                <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Minutes</p>
+                <div className="flex items-baseline gap-2">
+                  <p className="text-[18px] font-bold text-brand-primary">{minutesUsage?.used} / {minutesUsage?.limit}</p>
+                  {minutesUsage?.isExceeded && <span className="text-[9px] text-red-500 font-black uppercase tracking-widest">Limit reached</span>}
+                </div>
+                <p className="text-[9px] text-slate-400 font-bold uppercase tracking-widest mt-1">Refreshes: {getNextResetDate(userProfile?.billingStartDate)}</p>
+              </div>
+            </div>
+            <div className="w-24 h-2 bg-slate-100 rounded-full overflow-hidden">
+               <div 
+                 className="h-full bg-brand-primary transition-all duration-500" 
+                 style={{ width: `${minutesUsage?.percentage}%` }}
+               />
+            </div>
+          </div>
+
+          <div className="bg-white border border-brand-divider/20 rounded-2xl p-6 shadow-sm flex items-center justify-between">
+            <div className="flex items-center gap-4">
+              <div className="w-12 h-12 bg-slate-50 flex items-center justify-center rounded-xl text-brand-primary">
+                <i className="fa-solid fa-brain opacity-40"></i>
+              </div>
+              <div className="text-left">
+                <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Intelligence</p>
+                <div className="flex items-baseline gap-2">
+                  <p className="text-[18px] font-bold text-brand-primary">{thinkingUsageRes?.used} / {thinkingUsageRes?.limit === 'unlimited' ? '∞' : thinkingUsageRes?.limit}</p>
+                  {thinkingUsageRes?.isExceeded && <span className="text-[9px] text-red-500 font-black uppercase tracking-widest">Limit reached</span>}
+                </div>
+                <p className="text-[9px] text-slate-400 font-bold uppercase tracking-widest mt-1">Refreshes: {getNextResetDate(userProfile?.billingStartDate)}</p>
+              </div>
+            </div>
+            <div className="w-24 h-2 bg-slate-100 rounded-full overflow-hidden">
+               <div 
+                 className="h-full bg-brand-primary transition-all duration-500" 
+                 style={{ width: `${thinkingUsageRes?.percentage}%` }}
+               />
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 md:gap-12">
         <button 

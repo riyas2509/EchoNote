@@ -1,8 +1,8 @@
 
 import { GoogleGenAI, Type, Modality, ThinkingLevel } from "@google/genai";
-import { TranscriptSegment, CallSummary, DecisionIntelligenceResult, StrategicAnalysis, UnifiedMeetingIntelligence, UnifiedDecision, UnifiedTask, UnifiedUnresolvedTopic, MeetingInsights, FollowUp, MeetingTopic } from "../types";
+import { SubscriptionTier, TranscriptSegment, CallSummary, DecisionIntelligenceResult, StrategicAnalysis, UnifiedMeetingIntelligence, UnifiedDecision, UnifiedTask, UnifiedUnresolvedTopic, MeetingIntelligence, FollowUp, MeetingTopic } from "../types";
 
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
 export const transcribeAudio = async (
   base64Data: string, 
@@ -10,97 +10,139 @@ export const transcribeAudio = async (
   targetLanguage: 'original' | 'english' = 'english'
 ): Promise<{ transcript: TranscriptSegment[], qualityScore: number, summary: CallSummary }> => {
   
+  let processedBase64 = base64Data;
+  let processedMimeType = mimeType;
+
+  // Detect OPUS or OGG (often used for OPUS) and convert via backend
+  if (mimeType === 'audio/opus' || mimeType === 'audio/ogg' || mimeType.includes('opus')) {
+    console.log(`[GeminiService] Detected OPUS-compatible audio (${mimeType}). Converting via backend...`);
+    try {
+      const baseUrl = import.meta.env.VITE_API_URL || "";
+      const convResponse = await fetch(`${baseUrl}/api/convert-opus`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ base64Audio: base64Data })
+      });
+      
+      if (!convResponse.ok) {
+        const errorData = await convResponse.json();
+        throw new Error(errorData.error || 'Backend audio conversion failed');
+      }
+      
+      const convData = await convResponse.json();
+      processedBase64 = convData.base64Audio;
+      processedMimeType = convData.mimeType;
+      console.log(`[GeminiService] Conversion successful. Proceeding with ${processedMimeType}`);
+    } catch (err) {
+      console.error(`[GeminiService] Audio conversion pipeline failed:`, err);
+      throw new Error(`Audio processing failed: ${err instanceof Error ? err.message : 'Unknown error'}`);
+    }
+  }
+
   const languageInstruction = targetLanguage === 'english' 
     ? "MANDATORY: Translate all spoken content into English. The final transcript and summary MUST be in English, regardless of the input language."
     : "Transcribe in 'Hinglish' (a mix of Hindi and English written in Roman script) if the speakers are using Hindi or a mix of Hindi and English. If they are using other languages, transcribe exactly as spoken. Do not translate to pure English if the original is Hindi/Hinglish.";
 
-  const response = await ai.models.generateContent({
-    model: 'gemini-3-flash-preview',
-    contents: [
-      {
-        parts: [
-          {
-            inlineData: {
-              data: base64Data,
-              mimeType: mimeType,
+  console.log(`[GeminiService] Sending transcription request to Gemini API. MIME: ${processedMimeType}`);
+  
+  try {
+    const response = await ai.models.generateContent({
+      model: 'gemini-3.5-flash',
+      contents: [
+        {
+          parts: [
+            {
+              inlineData: {
+                data: processedBase64,
+                mimeType: processedMimeType,
+              },
             },
-          },
-          {
-            text: `Transcribe this audio and provide a professional summary. ${languageInstruction} 
-            
-            CLEANING:
-            1. Remove filler words (umm, ahh, etc.).
-            2. Remove background noise.
-            3. Merge broken words.
-            4. Maintain speaker order.
-            
-            QUALITY SCORE:
-            Calculate a 'Transcription Quality Score' (0-100) based on:
-            - Audio clarity (30%)
-            - Speaker clarity (40%)
-            - Absence of disfluencies/filler words (30%)
+            {
+              text: `Provide a highly accurate, word-for-word, literal (verbatim) transcription of the entire audio.
+              
+              TRANSCRIPTION REQUIREMENTS:
+              1. This MUST be a true, word-for-word verbatim transcription. Do NOT summarize, condense, paraphrase, or truncate any spoken words in the transcript segments.
+              2. Fully preserve all speaker changes, correct punctuation, and natural paragraph structures.
+              3. Keep disfluencies and spoken text intact to ensure a high-fidelity verbatim record.
+              4. Map the transcript to precise start and end timestamps (in seconds).
+              5. ${languageInstruction}
 
-            SUMMARY RULES:
-            - Keep it concise (Total length should not exceed 8-10 lines).
-            - Do not hallucinate. 
-            - Use a professional corporate tone.
-            
-            Format: JSON with:
-            - 'transcript' (array of {speaker, text, startTime, endTime})
-            - 'qualityScore' (number)
-            - 'summary' (object with mainTopic, keyPoints[], decisions[], actionItems[])`,
-          },
-        ],
-      },
-    ],
-    config: {
-      thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-      responseMimeType: "application/json",
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          transcript: {
-            type: Type.ARRAY,
-            items: {
+              TRANSCRIPTION QUALITY SCORE:
+              Calculate a 'Transcription Quality Score' (0-100) based on:
+              - Audio clarity (30%)
+              - Speaker clarity (40%)
+              - Verbatim fidelity (30%)
+   
+              EXECUTIVE SUMMARY RULES (Kept strictly separate):
+              - Provide a professional, concise executive summary of the discussion under the 'summary' property.
+              - This summary remains completely separate from the transcript and should not shorten or summarize the transcript text itself.
+              
+              Format the output strictly as a JSON object containing:
+              - 'transcript' (array of {speaker, text, startTime, endTime})
+              - 'qualityScore' (number)
+              - 'summary' (object with mainTopic, keyPoints[], decisions[], actionItems[])`,
+            },
+          ],
+        },
+      ],
+      config: {
+        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            transcript: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  speaker: { type: Type.STRING },
+                  text: { type: Type.STRING },
+                  startTime: { type: Type.NUMBER },
+                  endTime: { type: Type.NUMBER },
+                },
+                required: ["speaker", "text", "startTime", "endTime"],
+              },
+            },
+            qualityScore: { 
+              type: Type.NUMBER,
+              description: "A score from 0 to 100 representing the overall transcription quality."
+            },
+            summary: {
               type: Type.OBJECT,
               properties: {
-                speaker: { type: Type.STRING },
-                text: { type: Type.STRING },
-                startTime: { type: Type.NUMBER },
-                endTime: { type: Type.NUMBER },
+                mainTopic: { type: Type.STRING },
+                keyPoints: { type: Type.ARRAY, items: { type: Type.STRING } },
+                decisions: { type: Type.ARRAY, items: { type: Type.STRING } },
+                actionItems: { type: Type.ARRAY, items: { type: Type.STRING } },
               },
-              required: ["speaker", "text", "startTime", "endTime"],
-            },
+              required: ["mainTopic", "keyPoints", "decisions", "actionItems"],
+            }
           },
-          qualityScore: { 
-            type: Type.NUMBER,
-            description: "A score from 0 to 100 representing the overall transcription quality."
-          },
-          summary: {
-            type: Type.OBJECT,
-            properties: {
-              mainTopic: { type: Type.STRING },
-              keyPoints: { type: Type.ARRAY, items: { type: Type.STRING } },
-              decisions: { type: Type.ARRAY, items: { type: Type.STRING } },
-              actionItems: { type: Type.ARRAY, items: { type: Type.STRING } },
-            },
-            required: ["mainTopic", "keyPoints", "decisions", "actionItems"],
-          }
+          required: ["transcript", "qualityScore", "summary"],
         },
-        required: ["transcript", "qualityScore", "summary"],
       },
-    },
-  });
+    });
 
-  const jsonStr = response.text || "{\"transcript\": [], \"qualityScore\": 0, \"summary\": {\"mainTopic\": \"\", \"keyPoints\": [], \"decisions\": [], \"actionItems\": []}}";
-  return JSON.parse(jsonStr);
+    console.log(`[GeminiService] Received response from Gemini API`);
+    const jsonStr = response.text || "{\"transcript\": [], \"qualityScore\": 0, \"summary\": {\"mainTopic\": \"\", \"keyPoints\": [], \"decisions\": [], \"actionItems\": []}}";
+    console.log(`[GeminiService] Raw JSON Response:`, jsonStr.substring(0, 500) + (jsonStr.length > 500 ? '...' : ''));
+    return JSON.parse(jsonStr);
+  } catch (apiError: any) {
+    console.error(`[GeminiService] Gemini API Error:`, apiError);
+    if (apiError.response) {
+      console.error(`[GeminiService] Full API Response Error:`, JSON.stringify(apiError.response, null, 2));
+    }
+    throw apiError;
+  }
 };
 
-export const summarizeTranscript = async (transcript: TranscriptSegment[]): Promise<CallSummary> => {
+export const summarizeTranscript = async (transcript: TranscriptSegment[], tier: SubscriptionTier = 'free'): Promise<CallSummary> => {
   if (transcript.length === 0) {
     return { mainTopic: "No content available", keyPoints: [], decisions: [], actionItems: [] };
   }
 
+  const isAdvanced = tier !== 'guest';
   const transcriptText = transcript.map(s => `${s.speaker}: ${s.text}`).join('\n');
 
   const response = await ai.models.generateContent({
@@ -111,10 +153,13 @@ export const summarizeTranscript = async (transcript: TranscriptSegment[]): Prom
           {
             text: `Based on the following transcript, generate a structured, professional summary. 
             
+            PLAN LEVEL: ${isAdvanced ? 'ADVANCED (Full Insights)' : 'BASIC (Limited Insights)'}
+
             RULES:
-            - Keep it concise (Total length should not exceed 8-10 lines).
+            - Keep it concise (Total length should not exceed ${isAdvanced ? '15-20' : '8-10'} lines).
             - Do not hallucinate. 
             - Use a professional corporate tone.
+            ${!isAdvanced ? '- LIMITATION: Provide only a high-level summary. Focus on the most critical points only.' : ''}
             
             TRANSCRIPT:
             ${transcriptText}`,
@@ -229,10 +274,15 @@ export const pcmToWavUrl = (base64Pcm: string, sampleRate: number = 24000): stri
 
 export const analyzeStrategically = async (
   input: string,
-  inputType: 'transcript' | 'summary'
+  inputType: 'transcript' | 'summary',
+  tier: SubscriptionTier = 'free'
 ): Promise<StrategicAnalysis> => {
+  const isAdvanced = tier !== 'guest';
+  
   const prompt = `
     You are the EchoNote Strategic Intelligence engine. Your goal is to transform the provided ${inputType} into deep, strategic insights that reveal the "thinking" behind the conversation.
+    
+    PLAN LEVEL: ${isAdvanced ? 'ADVANCED (Full Insights)' : 'BASIC (Limited Insights)'}
 
     INPUT (${inputType.toUpperCase()}):
     ${input}
@@ -246,16 +296,24 @@ export const analyzeStrategically = async (
     5. Blind Spots: What are the participants missing or failing to consider?
     6. Strategic Questions: What high-level, critical questions should be asked now?
     7. Recommendations: What specific, strategic advice would you give based on this?
-    8. Alternative Perspectives: What other ways could this situation be interpreted or approached?
+    8. Alternative Perspectives: What other ways could this situation be interpreted or approached? ${isAdvanced ? '(Multiple viewpoints)' : '(Single alternative)'}
     9. Ignored Questions: What important questions were left unasked or unanswered during the conversation?
-    10. Decision Framework: A brief assessment of the framework or logic being used to make decisions.
-    11. Next Steps: Concrete, actionable steps that move the strategy forward.
+    10. Unresolved Topics: ${isAdvanced ? 'Identify topics discussed but no decision made, open-ended discussions, or unanswered questions.' : 'Empty array (Advanced Feature)'}
+       ${isAdvanced ? `
+       - Do NOT include topics that already have decisions.
+       - Avoid trivial or minor points.
+       - Focus on meaningful gaps.
+       - For each, provide: id, topic (title), context (short explanation), reasonUnresolved (why it remains open), and suggestedAction (next step).
+       ` : ''}
+    11. Decision Framework: A brief assessment of the framework or logic being used to make decisions.
+    12. Next Steps: Concrete, actionable steps that move the strategy forward.
 
     RULES:
     - Be critical, analytical, and insightful.
     - Do not just summarize; find the hidden patterns and strategic implications.
     - Use a professional, high-level executive tone.
     - Return ONLY valid JSON.
+    ${!isAdvanced ? '- LIMITATION: Provide only basic insights. Keep responses concise.' : ''}
   `;
 
   const response = await ai.models.generateContent({
@@ -276,13 +334,27 @@ export const analyzeStrategically = async (
           recommendations: { type: Type.ARRAY, items: { type: Type.STRING } },
           alternativePerspectives: { type: Type.ARRAY, items: { type: Type.STRING } },
           ignoredQuestions: { type: Type.ARRAY, items: { type: Type.STRING } },
+          unresolvedTopics: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                id: { type: Type.STRING },
+                topic: { type: Type.STRING },
+                context: { type: Type.STRING },
+                reasonUnresolved: { type: Type.STRING },
+                suggestedAction: { type: Type.STRING },
+              },
+              required: ["id", "topic", "context", "reasonUnresolved", "suggestedAction"],
+            },
+          },
           decisionFramework: { type: Type.STRING },
           nextSteps: { type: Type.ARRAY, items: { type: Type.STRING } },
         },
         required: [
           "coreIntent", "context", "assumptions", "logicalGaps", "blindSpots", 
           "strategicQuestions", "recommendations", "alternativePerspectives", 
-          "ignoredQuestions", "decisionFramework", "nextSteps"
+          "ignoredQuestions", "unresolvedTopics", "decisionFramework", "nextSteps"
         ],
       },
     },
@@ -294,70 +366,52 @@ export const analyzeStrategically = async (
 
 export const analyzeDecisionIntelligence = async (
   input: string,
-  inputType: 'transcript' | 'summary'
+  inputType: 'transcript' | 'summary',
+  tier: SubscriptionTier = 'free',
+  userId?: string,
+  email?: string
 ): Promise<DecisionIntelligenceResult> => {
-  const prompt = `
-    You are the EchoNote Decision Intelligence engine. Your goal is to transform the provided ${inputType} into structured, actionable insights that help users move from conversation to clarity.
-
-    INPUT (${inputType.toUpperCase()}):
-    ${input}
-
-    TASK:
-    Analyze the input and provide a structured JSON response with the following sections:
-    1. Key Decisions: What was actually decided?
-    2. Assumptions: What are the underlying assumptions being made?
-    3. Risks & Gaps: What could go wrong or what information is missing?
-    4. Alternative Perspectives: What other ways could this be looked at?
-    5. Ignored Questions: What important questions were left unasked or unanswered?
-    6. Decision Clarity: A brief assessment of how clear and solid the current direction is.
-    7. Next Actions: Specific, concrete steps to take now.
-
-    RULES:
-    - Be critical and analytical.
-    - Do not just summarize; find the "thinking" behind the words.
-    - Use a professional, high-level executive tone.
-    - Return ONLY valid JSON.
-  `;
-
-  const response = await ai.models.generateContent({
-    model: 'gemini-3-flash-preview',
-    contents: [{ parts: [{ text: prompt }] }],
-    config: {
-      thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-      responseMimeType: "application/json",
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          keyDecisions: { type: Type.ARRAY, items: { type: Type.STRING } },
-          assumptions: { type: Type.ARRAY, items: { type: Type.STRING } },
-          risksAndGaps: { type: Type.ARRAY, items: { type: Type.STRING } },
-          alternativePerspectives: { type: Type.ARRAY, items: { type: Type.STRING } },
-          ignoredQuestions: { type: Type.ARRAY, items: { type: Type.STRING } },
-          decisionClarity: { type: Type.STRING },
-          nextActions: { type: Type.ARRAY, items: { type: Type.STRING } },
-        },
-        required: ["keyDecisions", "assumptions", "risksAndGaps", "alternativePerspectives", "ignoredQuestions", "decisionClarity", "nextActions"],
-      },
+  const baseUrl = import.meta.env.VITE_API_URL || "";
+  const response = await fetch(`${baseUrl}/api/ai/decision-intelligence`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
     },
+    body: JSON.stringify({
+      input,
+      inputType,
+      tier,
+      userId,
+      email,
+      plan: tier
+    })
   });
 
-  const jsonStr = response.text || "{}";
-  return JSON.parse(jsonStr);
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    throw new Error(errorData.error || "Decision Intelligence analysis failed");
+  }
+
+  return response.json();
 };
 
-export const processUnifiedMeetingIntelligence = async (transcript: string): Promise<UnifiedMeetingIntelligence> => {
+export const processUnifiedMeetingIntelligence = async (transcript: string, tier: SubscriptionTier = 'free'): Promise<UnifiedMeetingIntelligence> => {
+  const isAdvanced = tier !== 'guest';
+  
   const prompt = `
     You are the EchoNote Decision Intelligence workspace engine. 
     Your task is to transform a raw meeting transcript into a unified, interconnected intelligence output.
+    
+    PLAN LEVEL: ${isAdvanced ? 'ADVANCED (Full Insights)' : 'BASIC (Limited Insights)'}
 
     INPUT (TRANSCRIPT):
     ${transcript}
 
     OUTPUT (STRICT UNIFIED JSON SCHEMA):
     1. title: A concise, professional title.
-    2. summary: 5-7 critical bullet points.
+    2. summary: ${isAdvanced ? '5-7' : '2-3'} critical bullet points.
     3. topics: Categorized discussion points.
-    4. keyInsights: High-level strategic takeaways.
+    4. keyInsights: ${isAdvanced ? 'High-level strategic takeaways' : 'Basic observations'}.
     5. decisions: Array of UnifiedDecision objects.
        - id: Unique ID (e.g., "dec-1").
        - title: Short title.
@@ -373,24 +427,67 @@ export const processUnifiedMeetingIntelligence = async (transcript: string): Pro
        - deadline: Optional deadline.
        - priority: High/Medium/Low.
        - relatedDecisionId: ID of the decision that triggered this task (if any).
-    7. unresolvedTopics: Array of UnifiedUnresolvedTopic objects.
+    7. unresolved_topics: Array of objects.
        - id: Unique ID (e.g., "unres-1").
-       - topic: Name of the issue.
-       - reasonUnresolved: Why it remains open.
-       - suggestedActions: List of specific recommendations.
-    8. insights: MeetingInsights object.
+       - topic: Topic title.
+       - context: Short explanation.
+       - reasonUnresolved: Why it remains open (e.g., no decision made, open-ended discussion, unanswered question).
+       - suggestedAction: A specific recommendation for the next step.
+    8. execution_tracker: ExecutionTracker object.
+       - totalTasks: Total number of tasks.
+       - completedTasks: Number of completed tasks (Do NOT assume completion unless specified).
+       - pendingTasks: Number of pending tasks.
+       - overdueTasks: Number of overdue tasks (based on current date if deadline passed).
+       - completionRate: Percentage of completed tasks.
+       - delayRate: Percentage of overdue tasks.
+       - tasks: Array of objects.
+         - id: Unique ID.
+         - description: Task description.
+         - assignee: Assigned person.
+         - status: Status (Completed / Pending / Overdue).
+       - keyInsights: Array of concise, meaningful insights (e.g., "Low execution rate", "High delays").
+    9. meetingIntelligence: MeetingIntelligence object.
        - productivityScore (0-100)
        - productivityExplanation
-       - decisionEffectivenessScore (0-100)
-       - decisionEffectivenessExplanation
+       - clarityScore (0-100)
+       - clarityExplanation
        - actionabilityScore (0-100)
        - actionabilityExplanation
-       - strengths (array)
-       - weaknesses (array)
-    9. followUp: FollowUp object.
+       - effectivenessSummary
+       - keyStrengths (array)
+       - keyWeaknesses (array)
+    10. strategicAnalysis: StrategicAnalysis object.
+       - coreIntent
+       - context
+       - assumptions (array)
+       - logicalGaps (array)
+       - blindSpots (array)
+       - strategicQuestions (array)
+       - recommendations (array)
+       - alternativePerspectives (array)
+       - ignoredQuestions (array)
+       - unresolvedTopics (array of objects with id, topic, context, reasonUnresolved, suggestedAction)
+       - decisionFramework
+       - nextSteps (array)
+    11. followUp: FollowUp object.
        - email (draft)
        - nextMeetingAgenda (array)
        - keyPendingItems (array)
+    12. calendar_reminders: SmartReminderSystem object.
+       - reminders: Array of objects.
+         - id: Unique ID.
+         - title: Reminder title.
+         - description: Detailed description.
+         - suggestedDateTime: ISO 8601 string.
+         - priority: "High" | "Medium" | "Low".
+         - group: "Immediate" | "Upcoming" | "Long-term".
+         - calendarEventFormat: Object.
+           - title: Event title.
+           - description: Event description.
+           - location: Optional location.
+           - startTime: ISO 8601 string.
+           - endTime: ISO 8601 string.
+       - summary: A brief summary of the reminder strategy.
 
     CRITICAL RULES:
     - Decisions ↔ Related Tasks: Link them using IDs.
@@ -399,6 +496,10 @@ export const processUnifiedMeetingIntelligence = async (transcript: string): Pro
     - NO DUPLICATE ENTRIES: Do not repeat information across sections.
     - CONSISTENT IDs: Use the same IDs for cross-referencing.
     - CLEAN HIERARCHY: The output must be a single, valid JSON object.
+    - Unresolved Topics Detector: Identify topics discussed but no decision made, open-ended discussions, and questions that were not answered. Do NOT include topics that already have decisions. Avoid trivial or minor points. Focus on meaningful gaps.
+    - Execution Tracker: Generate metrics based on extracted tasks. Do NOT assume completion unless specified. Keep insights concise and meaningful.
+    - Smart Reminder System: Generate reminders for tasks and decisions requiring follow-up. Do NOT create reminders for completed tasks. Prioritize critical tasks and unresolved topics. Group reminders into: Immediate (within 24 hrs), Upcoming (within 3–7 days), Long-term. Use the current date/time as a reference: ${new Date().toISOString()}.
+    ${!isAdvanced ? '- LIMITATION: Provide only basic extraction of decisions and tasks. Keep summaries very short.' : ''}
   `;
 
   const response = await ai.models.generateContent({
@@ -455,32 +556,91 @@ export const processUnifiedMeetingIntelligence = async (transcript: string): Pro
               required: ["id", "description", "assignee", "priority"],
             },
           },
-          unresolvedTopics: {
+          unresolved_topics: {
             type: Type.ARRAY,
             items: {
               type: Type.OBJECT,
               properties: {
                 id: { type: Type.STRING },
                 topic: { type: Type.STRING },
+                context: { type: Type.STRING },
                 reasonUnresolved: { type: Type.STRING },
-                suggestedActions: { type: Type.ARRAY, items: { type: Type.STRING } },
+                suggestedAction: { type: Type.STRING },
               },
-              required: ["id", "topic", "reasonUnresolved", "suggestedActions"],
+              required: ["id", "topic", "context", "reasonUnresolved", "suggestedAction"],
             },
           },
-          insights: {
+          execution_tracker: {
+            type: Type.OBJECT,
+            properties: {
+              totalTasks: { type: Type.NUMBER },
+              completedTasks: { type: Type.NUMBER },
+              pendingTasks: { type: Type.NUMBER },
+              overdueTasks: { type: Type.NUMBER },
+              completionRate: { type: Type.NUMBER },
+              delayRate: { type: Type.NUMBER },
+              tasks: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    id: { type: Type.STRING },
+                    description: { type: Type.STRING },
+                    assignee: { type: Type.STRING },
+                    status: { type: Type.STRING, enum: ["Completed", "Pending", "Overdue"] },
+                  },
+                  required: ["id", "description", "assignee", "status"],
+                },
+              },
+              keyInsights: { type: Type.ARRAY, items: { type: Type.STRING } },
+            },
+            required: ["totalTasks", "completedTasks", "pendingTasks", "overdueTasks", "completionRate", "delayRate", "tasks", "keyInsights"],
+          },
+          meetingIntelligence: {
             type: Type.OBJECT,
             properties: {
               productivityScore: { type: Type.NUMBER },
               productivityExplanation: { type: Type.STRING },
-              decisionEffectivenessScore: { type: Type.NUMBER },
-              decisionEffectivenessExplanation: { type: Type.STRING },
+              clarityScore: { type: Type.NUMBER },
+              clarityExplanation: { type: Type.STRING },
               actionabilityScore: { type: Type.NUMBER },
               actionabilityExplanation: { type: Type.STRING },
-              strengths: { type: Type.ARRAY, items: { type: Type.STRING } },
-              weaknesses: { type: Type.ARRAY, items: { type: Type.STRING } },
+              effectivenessSummary: { type: Type.STRING },
+              keyStrengths: { type: Type.ARRAY, items: { type: Type.STRING } },
+              keyWeaknesses: { type: Type.ARRAY, items: { type: Type.STRING } },
             },
-            required: ["productivityScore", "productivityExplanation", "decisionEffectivenessScore", "decisionEffectivenessExplanation", "actionabilityScore", "actionabilityExplanation", "strengths", "weaknesses"],
+            required: ["productivityScore", "productivityExplanation", "clarityScore", "clarityExplanation", "actionabilityScore", "actionabilityExplanation", "effectivenessSummary", "keyStrengths", "keyWeaknesses"],
+          },
+          strategicAnalysis: {
+            type: Type.OBJECT,
+            properties: {
+              coreIntent: { type: Type.STRING },
+              context: { type: Type.STRING },
+              assumptions: { type: Type.ARRAY, items: { type: Type.STRING } },
+              logicalGaps: { type: Type.ARRAY, items: { type: Type.STRING } },
+              blindSpots: { type: Type.ARRAY, items: { type: Type.STRING } },
+              strategicQuestions: { type: Type.ARRAY, items: { type: Type.STRING } },
+              recommendations: { type: Type.ARRAY, items: { type: Type.STRING } },
+              alternativePerspectives: { type: Type.ARRAY, items: { type: Type.STRING } },
+              ignoredQuestions: { type: Type.ARRAY, items: { type: Type.STRING } },
+              unresolvedTopics: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    id: { type: Type.STRING },
+                    topic: { type: Type.STRING },
+                    context: { type: Type.STRING },
+                    reasonUnresolved: { type: Type.STRING },
+                    suggestedAction: { type: Type.STRING },
+                  },
+                  required: ["id", "topic", "context", "reasonUnresolved", "suggestedAction"],
+                },
+              },
+              decisionFramework: { type: Type.STRING },
+              nextSteps: { type: Type.ARRAY, items: { type: Type.STRING } },
+            },
+            required: ["coreIntent", "context", "assumptions", "logicalGaps", "blindSpots", "strategicQuestions", "recommendations", "alternativePerspectives", "ignoredQuestions", "unresolvedTopics", "decisionFramework", "nextSteps"],
           },
           followUp: {
             type: Type.OBJECT,
@@ -491,12 +651,53 @@ export const processUnifiedMeetingIntelligence = async (transcript: string): Pro
             },
             required: ["email", "nextMeetingAgenda", "keyPendingItems"],
           },
+          calendar_reminders: {
+            type: Type.OBJECT,
+            properties: {
+              reminders: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    id: { type: Type.STRING },
+                    title: { type: Type.STRING },
+                    description: { type: Type.STRING },
+                    suggestedDateTime: { type: Type.STRING },
+                    priority: { type: Type.STRING, enum: ["High", "Medium", "Low"] },
+                    group: { type: Type.STRING, enum: ["Immediate", "Upcoming", "Long-term"] },
+                    calendarEventFormat: {
+                      type: Type.OBJECT,
+                      properties: {
+                        title: { type: Type.STRING },
+                        description: { type: Type.STRING },
+                        location: { type: Type.STRING },
+                        startTime: { type: Type.STRING },
+                        endTime: { type: Type.STRING },
+                      },
+                      required: ["title", "description", "startTime", "endTime"],
+                    },
+                  },
+                  required: ["id", "title", "description", "suggestedDateTime", "priority", "group", "calendarEventFormat"],
+                },
+              },
+              summary: { type: Type.STRING },
+            },
+            required: ["reminders", "summary"],
+          },
         },
-        required: ["title", "summary", "topics", "keyInsights", "decisions", "tasks", "unresolvedTopics", "insights", "followUp"],
+        required: ["title", "summary", "topics", "keyInsights", "decisions", "tasks", "unresolved_topics", "execution_tracker", "meetingIntelligence", "strategicAnalysis", "followUp", "calendar_reminders"],
       },
     },
   });
 
   const jsonStr = response.text || "{}";
-  return JSON.parse(jsonStr);
+  const rawData = JSON.parse(jsonStr);
+  
+  // Map snake_case to camelCase for the interface
+  return {
+    ...rawData,
+    unresolvedTopics: rawData.unresolved_topics,
+    executionTracker: rawData.execution_tracker,
+    calendarReminders: rawData.calendar_reminders
+  };
 };

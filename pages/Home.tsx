@@ -52,13 +52,23 @@ const Home: React.FC<HomeProps> = ({ onLogin, onStartFree, onNavigateToDemo, aut
             </p>
             
             <div className="flex flex-col sm:flex-row items-center gap-4 pt-4">
-              <Link 
-                to={isLoggedIn ? "/app" : "/auth"}
-                className="w-full sm:w-auto bg-brand-primary text-white px-10 py-5 rounded-xl font-bold uppercase tracking-widest text-[13px] shadow-2xl hover:shadow-brand-primary/20 hover:-translate-y-1 transition-all flex items-center justify-center space-x-3"
-              >
-                <span>{isLoggedIn ? 'Dashboard' : 'Start Free'}</span>
-                <ArrowRight size={18} />
-              </Link>
+              {isLoggedIn ? (
+                <Link 
+                  to="/app"
+                  className="w-full sm:w-auto bg-brand-primary text-white px-10 py-5 rounded-xl font-bold uppercase tracking-widest text-[13px] shadow-2xl hover:shadow-brand-primary/20 hover:-translate-y-1 transition-all flex items-center justify-center space-x-3"
+                >
+                  <span>Dashboard</span>
+                  <ArrowRight size={18} />
+                </Link>
+              ) : (
+                <button 
+                  onClick={onStartFree}
+                  className="w-full sm:w-auto bg-brand-primary text-white px-10 py-5 rounded-xl font-bold uppercase tracking-widest text-[13px] shadow-2xl hover:shadow-brand-primary/20 hover:-translate-y-1 transition-all flex items-center justify-center space-x-3"
+                >
+                  <span>Start Free</span>
+                  <ArrowRight size={18} />
+                </button>
+              )}
               {!isLoggedIn && (
                 <button 
                   onClick={onStartFree}
@@ -349,12 +359,21 @@ const Home: React.FC<HomeProps> = ({ onLogin, onStartFree, onNavigateToDemo, aut
                 EchoNote isn't just a convenience tool. It's a strategic asset that frees your highest-value employees from clerical work, allowing them to focus on analysis and decision-making.
               </p>
               <div className="pt-4">
-                <Link 
-                  to={isLoggedIn ? "/app" : "/auth"}
-                  className="bg-brand-primary text-white px-10 py-5 rounded-xl font-bold uppercase tracking-widest text-[13px] shadow-2xl hover:shadow-brand-primary/20 hover:-translate-y-1 transition-all inline-block"
-                >
-                  {isLoggedIn ? 'Dashboard' : 'Start Free'}
-                </Link>
+                {isLoggedIn ? (
+                  <Link 
+                    to="/app"
+                    className="bg-brand-primary text-white px-10 py-5 rounded-xl font-bold uppercase tracking-widest text-[13px] shadow-2xl hover:shadow-brand-primary/20 hover:-translate-y-1 transition-all inline-block"
+                  >
+                    Dashboard
+                  </Link>
+                ) : (
+                  <button 
+                    onClick={onStartFree}
+                    className="bg-brand-primary text-white px-10 py-5 rounded-xl font-bold uppercase tracking-widest text-[13px] shadow-2xl hover:shadow-brand-primary/20 hover:-translate-y-1 transition-all inline-block"
+                  >
+                    Start Free
+                  </button>
+                )}
               </div>
             </motion.div>
           </div>
