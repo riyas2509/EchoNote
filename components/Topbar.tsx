@@ -1,6 +1,7 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
 import { UsageStats, UserProfile, AuthStatus, AppWorkflow } from '../types';
+import { formatRefreshDate } from '../lib/usageUtils';
 
 interface TopbarProps {
   usageStats: UsageStats;
@@ -14,12 +15,11 @@ interface TopbarProps {
   showSearch?: boolean;
   selectedProjectName?: string | null;
   onToggleSidebar?: () => void;
-  lastRefreshed?: Date | null;
 }
 
 const Topbar: React.FC<TopbarProps> = ({ 
   usageStats, userProfile, authStatus, onLogout, onOpenSettings, onOpenUpgrade, searchQuery, onSearchChange, showSearch = true,
-  selectedProjectName, onToggleSidebar, lastRefreshed
+  selectedProjectName, onToggleSidebar
 }) => {
   const isFreePlan = (userProfile?.plan || usageStats.plan) === 'free';
 
@@ -80,14 +80,11 @@ const Topbar: React.FC<TopbarProps> = ({
           </span>
         </div>
 
-        {lastRefreshed && (
+        {userProfile?.nextRefreshDate && (
           <div className="hidden md:flex flex-col text-right leading-tight pr-4 md:pr-5 border-r border-brand-divider/10 text-[10px] uppercase font-bold text-slate-400">
-            <span className="text-[9px] opacity-65 font-bold">Last refreshed:</span>
+            <span className="text-[9px] opacity-65 font-bold">Refreshes On</span>
             <span className="text-slate-700 font-extrabold mt-0.5 tracking-wider">
-              {lastRefreshed.toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' })}
-            </span>
-            <span className="text-slate-400 font-semibold tracking-widest normal-case">
-              {lastRefreshed.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })}
+              {formatRefreshDate(userProfile.nextRefreshDate)}
             </span>
           </div>
         )}

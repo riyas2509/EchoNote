@@ -3,7 +3,7 @@ import React, { createContext, useContext, useEffect, useState } from 'react';
 import { auth, onAuthStateChanged, User, db, doc, getDoc, getDocFromServer, setDoc, onSnapshot, updateDoc } from '../firebase';
 import { UserProfile } from '../types';
 import { PLAN_FEATURES } from '../config/planConfig';
-import { shouldReset, getResetMilestone } from '../lib/usageUtils';
+import { shouldResetUsage, getAdvancedRefreshDate, migrateLegacyUserFields, calculateNextRefreshDate } from '../lib/usageUtils';
 
 interface FirebaseContextType {
   user: User | null;
@@ -56,8 +56,8 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         const userDoc = await getDocFromServer(userDocRef);
         if (!userDoc.exists()) {
           const now = new Date();
-          const renewalDate = new Date(now);
-          renewalDate.setDate(renewalDate.getDate() + 30);
+          const nowStr = now.toISOString();
+          const nextRefresh = calculateNextRefreshDate(nowStr, 'monthly', 'free', nowStr);
 
           const displayName = user.displayName || user.email?.split('@')[0] || 'User';
 
@@ -73,25 +73,55 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             minutesUsed: 0,
             thinkingUsed: 0,
             extraMinutes: 0,
-            billingStartDate: now.toISOString(),
-            lastResetDate: now.toISOString(),
-            planExpiresAt: renewalDate.toISOString(),
-            createdAt: now.toISOString()
+            billingStartDate: nowStr,
+            lastResetDate: nowStr,
+            planExpiresAt: nextRefresh.toISOString(),
+            createdAt: nowStr,
+            subscriptionStartDate: nowStr,
+            billingCycle: 'monthly',
+            nextRefreshDate: nextRefresh.toISOString(),
+            lastUsageResetDate: nowStr
           };
           await setDoc(userDocRef, newProfile);
         } else {
           // SYNC CHECK: If Firestore profile is missing displayName but Firebase Auth has it
-          const currentData = userDoc.data() as UserProfile;
+          let currentData = userDoc.data() as UserProfile;
           
+          // Migration of legacy user fields
+          if (!currentData.subscriptionStartDate || !currentData.nextRefreshDate || !currentData.billingCycle || !currentData.lastUsageResetDate) {
+            console.log("🔄 Migrating legacy user fields in setupProfile...");
+            const migratedFields = migrateLegacyUserFields(currentData);
+            const updateObj = {
+              ...migratedFields,
+              billingStartDate: migratedFields.subscriptionStartDate,
+              lastResetDate: migratedFields.lastUsageResetDate
+            };
+            await updateDoc(userDocRef, updateObj);
+            currentData = {
+              ...currentData,
+              ...updateObj
+            };
+          }
+
           // Check for usage reset
-          if (shouldReset(currentData.billingStartDate, currentData.lastResetDate)) {
+          if (shouldResetUsage(currentData.nextRefreshDate)) {
             console.log("♻️ Billing cycle reset triggered...");
-            const milestone = getResetMilestone(currentData.billingStartDate);
+            const advancedNextRefresh = getAdvancedRefreshDate(currentData.nextRefreshDate, currentData.billingCycle, currentData.plan);
             await updateDoc(userDocRef, {
               minutesUsed: 0,
               thinkingUsed: 0,
-              lastResetDate: milestone.toISOString()
+              nextRefreshDate: advancedNextRefresh.toISOString(),
+              lastUsageResetDate: currentData.nextRefreshDate,
+              lastResetDate: currentData.nextRefreshDate
             });
+            currentData = {
+              ...currentData,
+              minutesUsed: 0,
+              thinkingUsed: 0,
+              nextRefreshDate: advancedNextRefresh.toISOString(),
+              lastUsageResetDate: currentData.nextRefreshDate,
+              lastResetDate: currentData.nextRefreshDate
+            };
           }
 
           if (!currentData.billingStartDate) {
@@ -124,16 +154,47 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             const data = docSnap.data() as UserProfile;
             console.log("🔥 Firestore user data sync:", data);
             
+            // Check if fields are missing
+            if (!data.subscriptionStartDate || !data.nextRefreshDate || !data.billingCycle || !data.lastUsageResetDate) {
+              console.log("🔄 Live migrating legacy user fields...");
+              const migratedFields = migrateLegacyUserFields(data);
+              await updateDoc(userDocRef, {
+                ...migratedFields,
+                billingStartDate: migratedFields.subscriptionStartDate,
+                lastResetDate: migratedFields.lastUsageResetDate
+              });
+              return;
+            }
+
+            // Check if usage reset is needed
+            if (shouldResetUsage(data.nextRefreshDate)) {
+              console.log("♻️ Live billing cycle reset triggered...");
+              const advancedNextRefresh = getAdvancedRefreshDate(data.nextRefreshDate, data.billingCycle, data.plan);
+              await updateDoc(userDocRef, {
+                minutesUsed: 0,
+                thinkingUsed: 0,
+                nextRefreshDate: advancedNextRefresh.toISOString(),
+                lastUsageResetDate: data.nextRefreshDate,
+                lastResetDate: data.nextRefreshDate
+              });
+              return;
+            }
+
             // CHECK FOR EXPIRY
             if (data.plan !== 'free' && data.plan !== 'guest' && data.planExpiresAt) {
               const expiry = new Date(data.planExpiresAt);
               if (expiry < new Date()) {
                 console.log("⚠️ Plan expired, downgrading to free...");
+                const nowStr = new Date().toISOString();
+                const nextRefreshFree = calculateNextRefreshDate(nowStr, 'monthly', 'free', data.createdAt || nowStr);
                 await updateDoc(userDocRef, {
                   plan: 'free',
-                  // Optionally keep minutesUsed or reset as per biz logic
+                  billingCycle: 'monthly',
+                  subscriptionStartDate: data.createdAt || nowStr,
+                  nextRefreshDate: nextRefreshFree.toISOString(),
+                  planExpiresAt: nextRefreshFree.toISOString()
                 });
-                return; // Let the next snapshot trigger update state
+                return;
               }
             }
 

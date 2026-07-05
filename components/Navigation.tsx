@@ -6,7 +6,7 @@ import { Crown } from 'lucide-react';
 import { AppWorkflow, AuthStatus, UserProfile, AppNotification, UsageStats, Project, CollaborationRole, OrgRole } from '../types';
 import { PLAN_FEATURES } from '../config/planConfig';
 import { db, collection, query, where, getDocs, onSnapshot } from '../firebase';
-import { getMinutesUsage, getThinkingUsage, getNextResetDate } from '../lib/usageUtils';
+import { getMinutesUsage, getThinkingUsage, formatRefreshDate } from '../lib/usageUtils';
 
 interface NavigationProps {
   currentTab: AppWorkflow;
@@ -32,14 +32,13 @@ interface NavigationProps {
   setIsCollapsed: (collapsed: boolean) => void;
   isOpen: boolean;
   setIsOpen: (open: boolean) => void;
-  lastRefreshed?: Date | null;
   userOrgRole?: OrgRole;
 }
 
 const Navigation: React.FC<NavigationProps> = ({ 
   currentTab, setTab, groups, projects, onSelectGroup, onRenameGroup, onDeleteGroup, onInviteToProject, selectedGroupFilter, authStatus, userProfile, onSignInClick, onAddGroup, onOpenSettings,
   notifications, onMarkNotificationRead, onClearNotifications, onOpenUpgrade, usageStats,
-  isCollapsed, setIsCollapsed, isOpen, setIsOpen, lastRefreshed, userOrgRole
+  isCollapsed, setIsCollapsed, isOpen, setIsOpen, userOrgRole
 }) => {
   const isGuestMode = usageStats.mode === 'guest';
   const minutesUsage = getMinutesUsage(usageStats);
@@ -535,21 +534,12 @@ const Navigation: React.FC<NavigationProps> = ({
                 </button>
               )}
               
-              <div className="text-[10px] text-white/30 font-bold uppercase tracking-widest text-center">
-                Refreshes on: {getNextResetDate(userProfile?.billingStartDate)}
-              </div>
-
-              {lastRefreshed && (
-                <div className="pt-3 border-t border-white/5 mt-3 text-center text-[10px] text-white/30 font-bold uppercase tracking-widest leading-[1.4]">
-                  <div className="opacity-50 text-[9px]">Last refreshed:</div>
-                  <div className="text-white/60 font-extrabold mt-0.5">
-                    {lastRefreshed.toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' })}
-                  </div>
-                  <div className="text-white/40 font-medium normal-case">
-                    {lastRefreshed.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })}
-                  </div>
+              <div className="pt-2 text-center text-[10px] text-white/30 font-bold uppercase tracking-widest leading-[1.4]">
+                <div className="opacity-50 text-[9px]">Refreshes On</div>
+                <div className="text-white/60 font-extrabold mt-0.5">
+                  {formatRefreshDate(userProfile?.nextRefreshDate)}
                 </div>
-              )}
+              </div>
             </div>
           </div>
         ) : (

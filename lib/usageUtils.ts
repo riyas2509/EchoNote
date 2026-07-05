@@ -79,18 +79,138 @@ export function getThinkingUsage(user: UserProfile | UsageStats): CalculatedThin
   };
 }
 
+export function safeParseDate(val: any): Date {
+  if (!val) return new Date();
+  if (val instanceof Date) {
+    return isNaN(val.getTime()) ? new Date() : val;
+  }
+  // If it's a Firestore Timestamp (has toDate function)
+  if (typeof val === 'object' && typeof val.toDate === 'function') {
+    try {
+      const d = val.toDate();
+      return isNaN(d.getTime()) ? new Date() : d;
+    } catch {
+      return new Date();
+    }
+  }
+  // If it's a Firestore Timestamp serialized object or similar structure with seconds
+  if (typeof val === 'object' && val.seconds !== undefined && val.seconds !== null) {
+    const d = new Date(Number(val.seconds) * 1000);
+    return isNaN(d.getTime()) ? new Date() : d;
+  }
+  // Try direct parsing
+  try {
+    const d = new Date(val);
+    if (isNaN(d.getTime())) {
+      return new Date();
+    }
+    return d;
+  } catch {
+    return new Date();
+  }
+}
+
+export function calculateNextRefreshDate(
+  subscriptionStartDateRaw: any,
+  billingCycle: 'monthly' | 'yearly' | undefined,
+  plan: string | undefined,
+  createdAtRaw?: any
+): Date {
+  const planName = plan || 'free';
+  const cycle = planName === 'free' ? 'monthly' : (billingCycle || 'monthly');
+  
+  // Base date is accountCreationDate (createdAtRaw) if Free, otherwise subscriptionStartDate
+  const baseDateVal = planName === 'free' ? (createdAtRaw || subscriptionStartDateRaw) : subscriptionStartDateRaw;
+  const baseDate = safeParseDate(baseDateVal);
+
+  const nextRefresh = new Date(baseDate);
+  if (cycle === 'yearly') {
+    nextRefresh.setFullYear(nextRefresh.getFullYear() + 1);
+  } else {
+    nextRefresh.setMonth(nextRefresh.getMonth() + 1);
+  }
+  return nextRefresh;
+}
+
+export function shouldResetUsage(nextRefreshDateRaw: any): boolean {
+  if (!nextRefreshDateRaw) return false;
+  const now = new Date();
+  const nextRefresh = safeParseDate(nextRefreshDateRaw);
+  return now >= nextRefresh;
+}
+
+export function getAdvancedRefreshDate(
+  currentNextRefreshDateRaw: any,
+  billingCycle: 'monthly' | 'yearly' | undefined,
+  plan: string | undefined
+): Date {
+  const planName = plan || 'free';
+  const cycle = planName === 'free' ? 'monthly' : (billingCycle || 'monthly');
+  const next = safeParseDate(currentNextRefreshDateRaw);
+  const now = new Date();
+  
+  // Advance by 1 month or 1 year until next is strictly in the future relative to now
+  let safetyCounter = 0;
+  while (next <= now && safetyCounter < 1000) {
+    safetyCounter++;
+    if (cycle === 'yearly') {
+      next.setFullYear(next.getFullYear() + 1);
+    } else {
+      next.setMonth(next.getMonth() + 1);
+    }
+  }
+  return next;
+}
+
+export function migrateLegacyUserFields(user: any): {
+  subscriptionStartDate: string;
+  billingCycle: 'monthly' | 'yearly';
+  nextRefreshDate: string;
+  lastUsageResetDate: string;
+} {
+  const now = new Date();
+  const createdAtVal = user.createdAt || user.billingStartDate || user.createdAtRaw || now.toISOString();
+  const createdAt = safeParseDate(createdAtVal).toISOString();
+  
+  const planName = user.plan || 'free';
+  const subscriptionStartDateVal = planName === 'free' ? createdAtVal : (user.billingStartDate || createdAtVal);
+  const subscriptionStartDate = safeParseDate(subscriptionStartDateVal).toISOString();
+  const billingCycle = user.billingCycle || 'monthly';
+  
+  let nextRefresh = calculateNextRefreshDate(subscriptionStartDate, billingCycle, planName, createdAt);
+  
+  // If the calculated nextRefresh is already in the past, advance it to future
+  if (nextRefresh <= now) {
+    nextRefresh = getAdvancedRefreshDate(nextRefresh, billingCycle, planName);
+  }
+  
+  const lastUsageResetVal = user.lastResetDate || subscriptionStartDateVal;
+  const lastUsageResetDate = safeParseDate(lastUsageResetVal).toISOString();
+
+  return {
+    subscriptionStartDate,
+    billingCycle,
+    nextRefreshDate: nextRefresh.toISOString(),
+    lastUsageResetDate
+  };
+}
+
+export function formatRefreshDate(nextRefreshDateRaw: any): string {
+  if (!nextRefreshDateRaw) return 'N/A';
+  const d = safeParseDate(nextRefreshDateRaw);
+  return d.toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' });
+}
+
 export function getResetMilestone(billingStartDateRaw: string | undefined): Date {
   if (!billingStartDateRaw) return new Date();
   
   const now = new Date();
   const start = new Date(billingStartDateRaw);
 
-  // Calculate how many full months have passed since the start date
   const monthsPassed =
     (now.getFullYear() - start.getFullYear()) * 12 +
     (now.getMonth() - start.getMonth());
 
-  // Calculate the reset date for the CURRENT month period
   const milestone = new Date(start);
   milestone.setMonth(start.getMonth() + monthsPassed);
 
@@ -103,7 +223,6 @@ export function shouldReset(billingStartDateRaw: string | undefined, lastResetDa
   const now = new Date();
   const milestone = getResetMilestone(billingStartDateRaw);
 
-  // If we have reached the milestone date AND we haven't reset since that milestone
   return now >= milestone && (!lastResetDateRaw || new Date(lastResetDateRaw) < milestone);
 }
 
@@ -113,8 +232,6 @@ export function getNextResetDate(billingStartDateRaw: string | undefined): strin
   const now = new Date();
   const milestone = getResetMilestone(billingStartDateRaw);
   
-  // If we haven't reached the milestone yet, the milestone IS the next reset date
-  // If we HAVE passed the milestone, the NEXT reset is one month after the milestone
   const nextReset = new Date(milestone);
   if (now >= milestone) {
     nextReset.setMonth(nextReset.getMonth() + 1);

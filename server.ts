@@ -446,6 +446,14 @@ async function startServer() {
           });
         } else {
           const now = new Date();
+          const subscriptionStartDate = now.toISOString();
+          const nextRefreshDate = new Date(subscriptionStartDate);
+          if (billingCycle === 'yearly') {
+            nextRefreshDate.setFullYear(nextRefreshDate.getFullYear() + 1);
+          } else {
+            nextRefreshDate.setMonth(nextRefreshDate.getMonth() + 1);
+          }
+
           const expiryDate = new Date(now);
           if (billingCycle === 'yearly') {
             expiryDate.setFullYear(expiryDate.getFullYear() + 1);
@@ -456,10 +464,10 @@ async function startServer() {
           await db.collection("users").doc(userId).update({
             plan: planId || "pro",
             billingCycle: billingCycle || "monthly",
-            minutesUsed: 0,
-            thinkingUsed: 0,
-            billingStartDate: now.toISOString(),
-            lastResetDate: now.toISOString(),
+            subscriptionStartDate: subscriptionStartDate,
+            nextRefreshDate: nextRefreshDate.toISOString(),
+            // For backwards compatibility:
+            billingStartDate: subscriptionStartDate,
             planExpiresAt: expiryDate.toISOString(),
             lastPaymentDate: FieldValue.serverTimestamp()
           });

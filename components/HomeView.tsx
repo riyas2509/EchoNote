@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { AppWorkflow, AuthStatus, UserProfile, UsageStats } from '../types';
-import { getMinutesUsage, getThinkingUsage, getNextResetDate } from '../lib/usageUtils';
+import { getMinutesUsage, getThinkingUsage, formatRefreshDate } from '../lib/usageUtils';
 
 interface HomeViewProps {
   setTab: (tab: AppWorkflow) => void;
@@ -80,7 +80,7 @@ const HomeView: React.FC<HomeViewProps> = ({ setTab, authStatus, userProfile, on
                   <p className="text-[18px] font-bold text-brand-primary">{minutesUsage?.used} / {minutesUsage?.limit}</p>
                   {minutesUsage?.isExceeded && <span className="text-[9px] text-red-500 font-black uppercase tracking-widest">Limit reached</span>}
                 </div>
-                <p className="text-[9px] text-slate-400 font-bold uppercase tracking-widest mt-1">Refreshes: {getNextResetDate(userProfile?.billingStartDate)}</p>
+                <p className="text-[9px] text-slate-400 font-bold uppercase tracking-widest mt-1">Refreshes On: {formatRefreshDate(userProfile?.nextRefreshDate)}</p>
               </div>
             </div>
             <div className="w-24 h-2 bg-slate-100 rounded-full overflow-hidden">
@@ -102,7 +102,7 @@ const HomeView: React.FC<HomeViewProps> = ({ setTab, authStatus, userProfile, on
                   <p className="text-[18px] font-bold text-brand-primary">{thinkingUsageRes?.used} / {thinkingUsageRes?.limit === 'unlimited' ? '∞' : thinkingUsageRes?.limit}</p>
                   {thinkingUsageRes?.isExceeded && <span className="text-[9px] text-red-500 font-black uppercase tracking-widest">Limit reached</span>}
                 </div>
-                <p className="text-[9px] text-slate-400 font-bold uppercase tracking-widest mt-1">Refreshes: {getNextResetDate(userProfile?.billingStartDate)}</p>
+                <p className="text-[9px] text-slate-400 font-bold uppercase tracking-widest mt-1">Refreshes On: {formatRefreshDate(userProfile?.nextRefreshDate)}</p>
               </div>
             </div>
             <div className="w-24 h-2 bg-slate-100 rounded-full overflow-hidden">

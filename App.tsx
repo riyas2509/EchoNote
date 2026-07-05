@@ -34,7 +34,7 @@ import { useFirebase } from './components/FirebaseProvider';
 import { Toaster } from 'sonner';
 import { auth, db, collection, query, where, getDocs, onSnapshot, doc, setDoc, updateDoc, deleteDoc, orderBy, handleFirestoreError, OperationType, serverTimestamp, getDoc, increment, addDoc } from './firebase';
 import { summarizeTranscript, analyzeDecisionIntelligence, analyzeStrategically } from './services/geminiService';
-import { getMinutesUsage, getThinkingUsage, getNextResetDate } from './lib/usageUtils';
+import { getMinutesUsage, getThinkingUsage, formatRefreshDate } from './lib/usageUtils';
 
 const ScrollToTop = () => {
   const { pathname } = useLocation();
@@ -191,7 +191,7 @@ const App: React.FC = () => {
         thinkingLimit: tUsage.limit,
         plan: tier,
         mode: tier === 'guest' ? 'guest' : 'free',
-        renewalDate: getNextResetDate(userProfile.billingStartDate),
+        renewalDate: formatRefreshDate(userProfile.nextRefreshDate),
         minutesPerFileLimit: features.minutesPerFileLimit
       });
 
@@ -314,26 +314,11 @@ const App: React.FC = () => {
   const [orgTeams, setOrgTeams] = useState<Team[]>([]);
   const [userOrgRole, setUserOrgRole] = useState<OrgRole>('viewer');
 
-  // Last Refreshed State and automated triggers for:
-  // - usage updates (usageString)
-  // - subscription updates (subscriptionString)
-  // - analytics updates (historyString, manualAnalyticsTrigger)
-  // - profile updates (profileString)
-  const [lastRefreshed, setLastRefreshed] = useState<Date>(() => new Date());
   const [manualAnalyticsTrigger, setManualAnalyticsTrigger] = useState(0);
 
   const handleAnalyticsUpdate = useCallback(() => {
     setManualAnalyticsTrigger(prev => prev + 1);
   }, []);
-
-  const profileString = userProfile ? `${userProfile.displayName || ''}-${userProfile.email || ''}-${userProfile.photoURL || userProfile.avatarUrl || ''}` : '';
-  const subscriptionString = userProfile?.plan || 'free';
-  const usageString = `${usageStats.usedMinutes}-${usageStats.aiRequestCount}-${usageStats.extraMinutes || 0}`;
-  const historyString = `${audioHistory.length}-${textHistory.length}`;
-
-  useEffect(() => {
-    setLastRefreshed(new Date());
-  }, [profileString, subscriptionString, usageString, historyString, manualAnalyticsTrigger]);
   // Real-time Firestore listeners
   useEffect(() => {
     if (authStatus === AuthStatus.LOGGED_IN && user) {
@@ -1509,7 +1494,6 @@ const App: React.FC = () => {
           setIsCollapsed={setIsCollapsed}
           isOpen={isSidebarOpen}
           setIsOpen={setIsSidebarOpen}
-          lastRefreshed={lastRefreshed}
           userOrgRole={userOrgRole}
         />
         
@@ -1526,7 +1510,6 @@ const App: React.FC = () => {
             showSearch={currentTab === AppWorkflow.HISTORY}
             selectedProjectName={selectedGroupFilter}
             onToggleSidebar={() => setIsSidebarOpen(!isSidebarOpen)}
-            lastRefreshed={lastRefreshed}
           />
           
           <div className="w-full max-w-screen-xl mx-auto px-4 py-6 md:px-8 md:py-12 lg:px-16 lg:py-20 pb-48">

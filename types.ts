@@ -109,6 +109,10 @@ export interface UserProfile {
   lastResetDate?: string; // ISO string
   planExpiresAt: string; // ISO string
   createdAt: string;
+  subscriptionStartDate?: string; // ISO string
+  billingCycle?: 'monthly' | 'yearly';
+  nextRefreshDate?: string; // ISO string
+  lastUsageResetDate?: string; // ISO string
 }
 
 export interface Subscription {
