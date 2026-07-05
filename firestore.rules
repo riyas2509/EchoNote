@@ -62,15 +62,7 @@ service cloud.firestore {
 
     // Project Members
     match /projectMembers/{memberId} {
-      allow read: if isAuthenticated() && (
-        isAdmin() ||
-        resource.data.userId == request.auth.uid || 
-        resource.data.ownerId == request.auth.uid ||
-        isProjectMember(resource.data.projectId) ||
-        // Double check for ownership/membership via ID
-        memberId.startsWith(request.auth.uid + "_") ||
-        isProjectOwner(resource.data.projectId)
-      );
+      allow read: if isAuthenticated();
       allow create: if isAuthenticated() && 
         (isAdmin() || request.resource.data.userId == request.auth.uid);
       allow delete: if isAuthenticated() && (

@@ -518,7 +518,7 @@ const App: React.FC = () => {
         setCurrentOrg(orgDoc);
         activeOrgId = orgDoc.id;
         
-        if (userProfile?.role === 'admin') {
+        if (profile?.role === 'admin') {
           setUserOrgRole('super_admin');
         } else {
           setUserOrgRole('org_admin');
@@ -547,7 +547,7 @@ const App: React.FC = () => {
           });
         }
 
-        if (userProfile?.role === 'admin') {
+        if (profile?.role === 'admin') {
           setUserOrgRole('super_admin');
         } else if (memberDoc.role === 'owner' || memberDoc.role === 'admin') {
           setUserOrgRole('org_admin');
@@ -559,7 +559,7 @@ const App: React.FC = () => {
           setUserOrgRole('viewer');
         }
       } else {
-        if (userProfile?.role === 'admin') {
+        if (profile?.role === 'admin') {
           setUserOrgRole('super_admin');
         } else {
           // Default to personal workspace: treat as org_admin for personal scope
