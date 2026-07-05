@@ -53,15 +53,17 @@ service cloud.firestore {
     // Projects
     match /projects/{projectId} {
       allow read: if isAuthenticated() && (
+        isAdmin() ||
         resource.data.userId == request.auth.uid || 
         isProjectMember(projectId)
       );
-      allow write: if isAuthenticated() && (resource == null || resource.data.userId == request.auth.uid);
+      allow write: if isAuthenticated() && (isAdmin() || resource == null || resource.data.userId == request.auth.uid);
     }
 
     // Project Members
     match /projectMembers/{memberId} {
       allow read: if isAuthenticated() && (
+        isAdmin() ||
         resource.data.userId == request.auth.uid || 
         resource.data.ownerId == request.auth.uid ||
         isProjectMember(resource.data.projectId) ||
@@ -70,8 +72,9 @@ service cloud.firestore {
         isProjectOwner(resource.data.projectId)
       );
       allow create: if isAuthenticated() && 
-        request.resource.data.userId == request.auth.uid;
+        (isAdmin() || request.resource.data.userId == request.auth.uid);
       allow delete: if isAuthenticated() && (
+        isAdmin() ||
         resource.data.userId == request.auth.uid || 
         isProjectOwner(resource.data.projectId)
       );
@@ -86,14 +89,14 @@ service cloud.firestore {
     
     // Recordings
     match /recordings/{recordingId} {
-       allow read: if isProjectMember(resource.data.group) || isProjectMember(resource.data.projectId) || isOwner(resource.data.userId);
-       allow write: if isAuthenticated() && (resource == null || isProjectMember(request.resource.data.projectId) || isOwner(request.resource.data.userId));
+       allow read: if isAdmin() || isProjectMember(resource.data.group) || isProjectMember(resource.data.projectId) || isOwner(resource.data.userId);
+       allow write: if isAuthenticated() && (isAdmin() || resource == null || isProjectMember(request.resource.data.projectId) || isOwner(request.resource.data.userId));
     }
     
     // Transcriptions
     match /transcriptions/{transcriptionId} {
-       allow read: if isProjectMember(resource.data.group) || isProjectMember(resource.data.projectId) || isOwner(resource.data.userId);
-       allow write: if isAuthenticated() && (resource == null || isProjectMember(request.resource.data.projectId) || isOwner(request.resource.data.userId));
+       allow read: if isAdmin() || isProjectMember(resource.data.group) || isProjectMember(resource.data.projectId) || isOwner(resource.data.userId);
+       allow write: if isAuthenticated() && (isAdmin() || resource == null || isProjectMember(request.resource.data.projectId) || isOwner(request.resource.data.userId));
     }
     
     // Usage

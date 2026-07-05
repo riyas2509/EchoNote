@@ -367,8 +367,10 @@ const App: React.FC = () => {
         handleFirestoreError(error, OperationType.LIST, 'transcriptions', false);
       });
 
-      // Fetch ALL projects to support cross-project permission queries
-      const allProjectsQuery = query(collection(db, 'projects'));
+      // Fetch projects based on permissions (super_admins see all, standard/org users see their own)
+      const allProjectsQuery = (userOrgRole === 'super_admin')
+        ? query(collection(db, 'projects'))
+        : query(collection(db, 'projects'), where('userId', '==', user.uid));
       
       // Fetch projects the user IS A MEMBER OF
       const sharedProjectsQuery = query(
@@ -522,6 +524,8 @@ const App: React.FC = () => {
           setUserOrgRole('org_admin');
         }
       }
+    }, (error) => {
+      handleFirestoreError(error, OperationType.LIST, 'organizations', false);
     });
 
     const unsubscribeMember = onSnapshot(memberQuery, (snapshot) => {
@@ -538,6 +542,8 @@ const App: React.FC = () => {
             if (orgSnap.exists()) {
               setCurrentOrg(orgSnap.data());
             }
+          }, (error) => {
+            handleFirestoreError(error, OperationType.GET, 'organizations', false);
           });
         }
 
@@ -560,6 +566,8 @@ const App: React.FC = () => {
           setUserOrgRole('org_admin');
         }
       }
+    }, (error) => {
+      handleFirestoreError(error, OperationType.LIST, 'orgMembers', false);
     });
 
     // 3. Listen to teams when organization ID is known
@@ -571,6 +579,8 @@ const App: React.FC = () => {
         if (isUnsubscribed) return;
         const teamList = snapshot.docs.map(doc => doc.data() as Team);
         setOrgTeams(teamList);
+      }, (error) => {
+        handleFirestoreError(error, OperationType.LIST, 'teams', false);
       });
     };
 
