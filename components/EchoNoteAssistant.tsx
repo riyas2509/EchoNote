@@ -1,6 +1,6 @@
 
 import React, { useState, useRef, useEffect } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion, AnimatePresence } from 'motion/react';
 import { MessageCircle, X, Send, Minus, Maximize2, Sparkles, Layout, FileText, Brain, CheckSquare, BarChart2 } from 'lucide-react';
 import { GoogleGenAI, Type } from "@google/genai";
 

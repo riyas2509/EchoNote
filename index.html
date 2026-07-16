@@ -14,16 +14,18 @@
         extend: {
           colors: {
             brand: {
-              primary: '#112250',
-              secondary: '#3C507D',
-              accent: '#EAC435',
-              background: '#F8FAFC',
-              divider: '#E2E8F0',
+              primary: '#5DA9FF',     // Azure Blue (Primary Action)
+              secondary: '#D8F2FF',   // Ice Blue (Secondary Surface)
+              accent: '#D7B6FF',      // Lavender (AI Intelligence Accent)
+              success: '#68E3B7',     // Mint Green (Success)
+              background: '#F4F5F7',  // Cloud Gray (Primary Neutral)
+              divider: '#E2E8F0',     // Premium Light Gray Divider
             },
             echo: {
-              brand: '#112250',
-              muted: '#3C507D',
-              accent: '#EAC435',
+              brand: '#5DA9FF',       // Azure Blue
+              muted: '#D8F2FF',       // Ice Blue
+              accent: '#D7B6FF',      // Lavender
+              success: '#68E3B7',     // Mint Green
               divider: '#E2E8F0',
             }
           },
@@ -51,13 +53,175 @@
   @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
 
   :root {
-    --primary: #112250;
-    --secondary: #3C507D;
-    --accent: #EAC435;
-    --background: #F8FAFC;
-    --text-primary: #0f172a;
-    --text-secondary: #64748b;
+    --primary: #5DA9FF;       /* Azure Blue */
+    --secondary: #D8F2FF;     /* Ice Blue */
+    --accent: #D7B6FF;        /* Lavender */
+    --success: #68E3B7;       /* Mint Green */
+    --background: #F4F5F7;    /* Cloud Gray */
+    --text-primary: #0f172a;  /* Dark Charcoal for accessible text */
+    --text-secondary: #475569;/* Slate Gray */
     --divider: #E2E8F0;
+  }
+
+  /* Enforce accessible dark text for primary/secondary text classes */
+  .text-brand-primary, .text-echo-brand, [class*="text-brand-primary"], [class*="text-echo-brand"] {
+    color: #0F172A !important;
+  }
+  .text-brand-secondary, .text-echo-muted, [class*="text-brand-secondary"], [class*="text-echo-muted"] {
+    color: #475569 !important;
+  }
+  .text-brand-accent, .text-echo-accent {
+    color: #5DA9FF !important; /* Azure Blue for active elements/links */
+  }
+
+  /* Accent highlights */
+  .text-yellow-500, .text-yellow-600, .text-yellow-400 {
+    color: #5DA9FF !important; /* Interactive Azure Blue */
+  }
+
+  /* Premium Buttons */
+  .bg-brand-primary, .bg-echo-brand {
+    background-color: #5DA9FF !important; /* Azure Blue */
+  }
+  .bg-brand-primary.text-white, .bg-echo-brand.text-white {
+    color: #0F172A !important; /* Premium dark text on azure button */
+    font-weight: 600 !important;
+  }
+  .bg-brand-primary .text-white, .bg-echo-brand .text-white {
+    color: #0F172A !important;
+  }
+  .hover\:bg-brand-primary:hover, .hover\:bg-echo-brand:hover {
+    background-color: #4396F5 !important; /* Darker Azure Blue for hover */
+  }
+
+  /* Fix all camouflaged text & icons on primary/secondary buttons */
+  .bg-brand-primary.text-brand-accent,
+  .bg-brand-primary .text-brand-accent,
+  .hover\:bg-brand-primary:hover .hover\:text-brand-accent,
+  .hover\:bg-brand-primary:hover .text-brand-accent,
+  .bg-brand-primary .hover\:text-brand-accent:hover,
+  .bg-brand-primary i,
+  .bg-brand-primary span {
+    color: #0F172A !important;
+  }
+  .bg-brand-secondary.text-white,
+  .bg-brand-secondary .text-white,
+  .bg-brand-secondary i,
+  .bg-brand-secondary span {
+    color: #0F172A !important;
+  }
+
+  /* Ice Blue Hover & Selected States */
+  .bg-brand-secondary, .bg-echo-muted {
+    background-color: #D8F2FF !important; /* Ice Blue */
+  }
+  .hover\:bg-brand-secondary:hover {
+    background-color: #C0E9FF !important; /* Slightly darker Ice Blue for hover */
+  }
+
+  /* Mint Green Success Alerts / Completed States */
+  .bg-emerald-500, .bg-emerald-600, .bg-green-500, .bg-green-600 {
+    background-color: #68E3B7 !important; /* Mint Green */
+  }
+  .text-emerald-500, .text-emerald-600, .text-green-500, .text-green-600 {
+    color: #107C57 !important; /* Readable forest mint green */
+  }
+  .bg-emerald-50, .bg-emerald-100\/10, .bg-green-50 {
+    background-color: rgba(104, 227, 183, 0.12) !important; /* Soft Mint green */
+  }
+  .border-emerald-100, .border-green-100 {
+    border-color: rgba(104, 227, 183, 0.25) !important;
+  }
+
+  /* Lavender AI / Strategic Indicators */
+  .bg-purple-500, .bg-purple-600, .bg-indigo-500, .bg-indigo-600 {
+    background-color: #D7B6FF !important; /* Lavender */
+  }
+  .text-purple-500, .text-purple-600, .text-indigo-500, .text-indigo-600 {
+    color: #6B21A8 !important; /* Deep accessible purple */
+  }
+  .bg-purple-50, .bg-indigo-50, .bg-purple-50\/50 {
+    background-color: rgba(215, 182, 255, 0.15) !important; /* Soft lavender */
+  }
+  .border-purple-100, .border-indigo-100 {
+    border-color: rgba(215, 182, 255, 0.25) !important;
+  }
+
+  /* Bookmarks (originally text-amber-400 or yellow) */
+  .text-amber-400, .text-yellow-400, .fa-bookmark {
+    color: #D7B6FF !important; /* Lavender for bookmarks as per palette! */
+  }
+
+  /* Navigation Sidebar Styles */
+  nav.bg-\[\#1B2A4E\] {
+    background-color: #F4F5F7 !important; /* Cloud Gray Panel */
+    border-right: 1px solid #E2E8F0 !important;
+    box-shadow: none !important;
+  }
+  nav.bg-\[\#1B2A4E\] * {
+    color: #0F172A !important; /* Default dark text */
+  }
+  nav.bg-\[\#1B2A4E\] .text-white\/30, nav.bg-\[\#1B2A4E\] .text-white\/40 {
+    color: #64748B !important; /* Medium slate text */
+  }
+  nav.bg-\[\#1B2A4E\] .text-white\/60, nav.bg-\[\#1B2A4E\] .text-white\/70 {
+    color: #334155 !important; /* Dark Slate text */
+  }
+  nav.bg-\[\#1B2A4E\] .bg-brand-secondary {
+    background-color: #5DA9FF !important; /* Azure Blue for active menu item */
+    color: #0F172A !important;
+  }
+  nav.bg-\[\#1B2A4E\] .bg-brand-secondary i {
+    color: #0F172A !important;
+  }
+  nav.bg-\[\#1B2A4E\] .hover\:bg-brand-secondary:hover {
+    background-color: #D8F2FF !important; /* Ice Blue for hover */
+    color: #0F172A !important;
+  }
+  nav.bg-\[\#1B2A4E\] .bg-white\/5 {
+    background-color: rgba(93, 169, 255, 0.08) !important; /* Soft Azure Hover */
+  }
+  nav.bg-\[\#1B2A4E\] .bg-white\/10 {
+    background-color: rgba(93, 169, 255, 0.15) !important;
+  }
+  nav.bg-\[\#1B2A4E\] .hover\:bg-white\/10:hover {
+    background-color: rgba(93, 169, 255, 0.12) !important;
+  }
+  nav.bg-\[\#1B2A4E\] .bg-white\/5.space-y-6 {
+    background-color: #FFFFFF !important; /* White panel in sidebar */
+    border: 1px solid #E2E8F0 !important;
+    box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.05) !important;
+  }
+  nav.bg-\[\#1B2A4E\] .bg-white\/5.rounded-full {
+    background-color: #E2E8F0 !important; /* Gray track for progress bars */
+  }
+  nav.bg-\[\#1B2A4E\] .bg-yellow-400 {
+    background-color: #5DA9FF !important; /* Transcription bar -> Azure Blue */
+  }
+  nav.bg-\[\#1B2A4E\] .bg-purple-500 {
+    background-color: #D7B6FF !important; /* Thinking Engine bar -> Lavender */
+  }
+  nav.bg-\[\#1B2A4E\] .text-yellow-400 {
+    color: #5DA9FF !important;
+  }
+  nav.bg-\[\#1B2A4E\] .text-purple-400 {
+    color: #9061F9 !important; /* Accessible Lavender text */
+  }
+
+  /* CollaborationDashboard and Topbar dark blue card overrides */
+  .bg-\[\#1B2A4E\]:not(nav) {
+    background-color: #D8F2FF !important; /* Ice Blue (Secondary Surface) for Info containers */
+    color: #0F172A !important;
+    border: 1px solid rgba(93, 169, 255, 0.2) !important;
+  }
+  .bg-\[\#1B2A4E\]:not(nav) * {
+    color: #0F172A !important;
+  }
+
+  /* JoinPage & Topbar button/avatar overrides */
+  .bg-\[\#1A234E\], .bg-\[\#1A234E\]:not(nav) {
+    background-color: #5DA9FF !important; /* Azure Blue */
+    color: #0F172A !important;
   }
 
   .custom-scrollbar::-webkit-scrollbar {

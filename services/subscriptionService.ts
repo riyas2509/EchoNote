@@ -1,5 +1,6 @@
 
 import { toast } from 'sonner';
+import { db, doc, updateDoc, increment, serverTimestamp } from '../firebase';
 
 const getApiUrl = (path: string) => {
   const baseUrl = import.meta.env.VITE_API_URL || "";
@@ -42,6 +43,36 @@ export const handleUpgrade = async (userId: string, email: string, displayName: 
         });
         const result = await verifyResp.json();
         if (result.success) {
+          try {
+            const now = new Date();
+            const subscriptionStartDate = now.toISOString();
+            const nextRefreshDate = new Date(subscriptionStartDate);
+            if (billingCycle === 'yearly') {
+              nextRefreshDate.setFullYear(nextRefreshDate.getFullYear() + 1);
+            } else {
+              nextRefreshDate.setMonth(nextRefreshDate.getMonth() + 1);
+            }
+
+            const expiryDate = new Date(now);
+            if (billingCycle === 'yearly') {
+              expiryDate.setFullYear(expiryDate.getFullYear() + 1);
+            } else {
+              expiryDate.setMonth(expiryDate.getMonth() + 1);
+            }
+
+            await updateDoc(doc(db, "users", userId), {
+              plan: planId || "pro",
+              billingCycle: billingCycle || "monthly",
+              subscriptionStartDate: subscriptionStartDate,
+              nextRefreshDate: nextRefreshDate.toISOString(),
+              billingStartDate: subscriptionStartDate,
+              planExpiresAt: expiryDate.toISOString(),
+              lastPaymentDate: serverTimestamp()
+            });
+          } catch (dbErr: any) {
+            console.error("⚠️ Client-side Firestore user plan update failed:", dbErr);
+          }
+
           toast.success(`Welcome to EchoNote ${planId.charAt(0).toUpperCase() + planId.slice(1)}!`);
           window.location.reload(); // Refresh to update profile
         } else {
@@ -56,6 +87,18 @@ export const handleUpgrade = async (userId: string, email: string, displayName: 
         color: "#1B2A4E"
       }
     };
+
+    if (order.isDemo || (order.id && order.id.startsWith("order_mock_"))) {
+      toast.info("Simulating Razorpay Payment (Demo/Sandbox Mode)...");
+      setTimeout(async () => {
+        await options.handler({
+          razorpay_order_id: order.id,
+          razorpay_payment_id: "pay_mock_" + Math.random().toString(36).substring(2, 10),
+          razorpay_signature: "sig_mock_" + Math.random().toString(36).substring(2, 10),
+        });
+      }, 1500);
+      return;
+    }
 
     const rzp = new (window as any).Razorpay(options);
     rzp.open();
@@ -105,6 +148,15 @@ export const handleTopup = async (userId: string, email: string, displayName: st
         });
         const result = await verifyResp.json();
         if (result.success) {
+          try {
+            await updateDoc(doc(db, "users", userId), {
+              extraMinutes: increment(minutes || 0),
+              lastPaymentDate: serverTimestamp()
+            });
+          } catch (dbErr: any) {
+            console.error("⚠️ Client-side Firestore user extraMinutes update failed:", dbErr);
+          }
+
           toast.success(`Successfully added ${minutes} minutes!`);
           window.location.reload(); 
         } else {
@@ -119,6 +171,18 @@ export const handleTopup = async (userId: string, email: string, displayName: st
         color: "#1B2A4E"
       }
     };
+
+    if (order.isDemo || (order.id && order.id.startsWith("order_mock_"))) {
+      toast.info("Simulating Razorpay Payment (Demo/Sandbox Mode)...");
+      setTimeout(async () => {
+        await options.handler({
+          razorpay_order_id: order.id,
+          razorpay_payment_id: "pay_mock_" + Math.random().toString(36).substring(2, 10),
+          razorpay_signature: "sig_mock_" + Math.random().toString(36).substring(2, 10),
+        });
+      }, 1500);
+      return;
+    }
 
     const rzp = new (window as any).Razorpay(options);
     rzp.open();

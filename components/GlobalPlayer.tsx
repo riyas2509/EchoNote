@@ -43,7 +43,7 @@ const GlobalPlayer: React.FC<GlobalPlayerProps> = ({
       <div className="max-w-6xl mx-auto px-4 md:px-6 py-3 md:py-4 flex flex-col md:flex-row items-center gap-3 md:gap-6">
         {/* Asset Info */}
         <div className="flex items-center space-x-3 md:space-x-4 w-full md:w-64 shrink-0">
-          <Link to="/" className="h-8 w-8 md:h-10 md:w-10 bg-brand-primary rounded-lg flex items-center justify-center shrink-0 shadow-md overflow-hidden border border-white/10 hover:opacity-80 transition-opacity">
+          <Link to="/" className="h-8 w-8 md:h-10 md:w-10 bg-[#1B2A4E] bg-white/10 p-1 rounded-lg flex items-center justify-center shrink-0 shadow-md overflow-hidden border border-white/10 hover:opacity-80 transition-opacity">
             <img 
               src="/Logo-2.png" 
               alt="EchoNote" 
@@ -84,7 +84,7 @@ const GlobalPlayer: React.FC<GlobalPlayerProps> = ({
             
             <button 
               onClick={onPlayPause}
-              className="w-10 h-10 md:w-12 md:h-12 bg-brand-primary text-brand-accent rounded-full flex items-center justify-center hover:scale-105 active:scale-95 transition-all shadow-lg"
+              className="w-10 h-10 md:w-12 md:h-12 bg-brand-primary text-[#0F172A] rounded-full flex items-center justify-center hover:scale-105 active:scale-95 transition-all shadow-lg"
             >
               <i className={`fa-solid ${status === 'playing' ? 'fa-pause' : 'fa-play'} ${status !== 'playing' ? 'ml-1' : ''} text-sm md:text-base`}></i>
             </button>

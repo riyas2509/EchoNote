@@ -16,6 +16,14 @@ import {
 import { Recording, Transcript, Usage } from '../types';
 import { processAudioTranscription } from './aiService';
 
+export const uploadAudioToStorage = async (file: File | Blob, userId: string, recordId: string, fileName?: string): Promise<string> => {
+  const actualFileName = fileName || (file instanceof File ? file.name : `live_recording_${Date.now()}.webm`);
+  const storagePath = `recordings/${userId}/${recordId}/${actualFileName}`;
+  const storageRef = ref(storage, storagePath);
+  const uploadTask = await uploadBytesResumable(storageRef, file);
+  return await getDownloadURL(uploadTask.ref);
+};
+
 export const uploadAndProcessRecording = async (
   file: File,
   projectId: string,

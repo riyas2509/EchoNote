@@ -100,7 +100,7 @@ const Topbar: React.FC<TopbarProps> = ({
           </div>
           
           <div className="relative group">
-            <div className="w-9 h-9 md:w-11 md:h-11 bg-[#1A234E] text-white flex items-center justify-center rounded-xl font-black text-[14px] md:text-[16px] shadow-lg shadow-[#1A234E]/20 cursor-pointer overflow-hidden transform hover:scale-105 transition-transform">
+            <div className="w-9 h-9 md:w-11 md:h-11 bg-brand-primary text-slate-900 flex items-center justify-center rounded-xl font-black text-[14px] md:text-[16px] shadow-lg shadow-brand-primary/20 cursor-pointer overflow-hidden transform hover:scale-105 transition-transform">
               {authStatus === AuthStatus.LOGGED_IN && (userProfile?.photoURL || userProfile?.avatarUrl) ? (
                 <img 
                   src={userProfile.photoURL || userProfile.avatarUrl} 

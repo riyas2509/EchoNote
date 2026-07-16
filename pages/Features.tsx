@@ -70,8 +70,11 @@ const Features: React.FC<FeaturesProps> = ({ onLogin, onStartFree, onNavigateToD
               transition={{ delay: index * 0.1 }}
               className="p-10 rounded-[32px] bg-white border border-brand-divider/10 shadow-sm hover:shadow-xl hover:-translate-y-2 transition-all group"
             >
-              <div className="w-14 h-14 rounded-2xl bg-brand-primary/5 flex items-center justify-center mb-8 group-hover:bg-brand-primary group-hover:text-white transition-colors">
-                {React.cloneElement(feature.icon as React.ReactElement, { size: 28 })}
+              <div className="w-14 h-14 rounded-2xl bg-brand-primary/5 flex items-center justify-center mb-8 group-hover:bg-brand-primary transition-colors duration-300">
+                {React.cloneElement(feature.icon as React.ReactElement, { 
+                  size: 28,
+                  className: "text-[#5DA9FF] group-hover:text-white transition-colors duration-300"
+                })}
               </div>
               <h3 className="text-xl font-bold text-brand-primary mb-4">{feature.title}</h3>
               <p className="text-brand-secondary/60 leading-relaxed">{feature.description}</p>

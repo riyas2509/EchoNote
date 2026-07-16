@@ -1,6 +1,6 @@
 
 import React from 'react';
-import { motion } from 'framer-motion';
+import { motion } from 'motion/react';
 import { ShieldCheck, Lock, Users, BarChart3, Globe, Zap, Check } from 'lucide-react';
 
 const SecurityPage: React.FC = () => {

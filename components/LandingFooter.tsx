@@ -33,7 +33,7 @@ const LandingFooter: React.FC = () => {
   ];
 
   return (
-    <footer className="bg-brand-primary text-white pt-24 pb-12 border-t border-white/10">
+    <footer className="bg-slate-950 text-slate-300 pt-24 pb-12 border-t border-slate-900">
       <div className="max-w-7xl mx-auto px-6">
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-12 mb-20">
           {/* Brand Info */}
@@ -43,18 +43,18 @@ const LandingFooter: React.FC = () => {
               className="flex items-center gap-3 mb-4 cursor-pointer group w-fit"
             >
               <img 
-                src="/Logo-1.jpg" 
+                src="/Logo-2.png" 
                 alt="EchoNote"
                 className="h-10 w-auto object-contain"
               />
-              <span className="text-white font-semibold text-lg">
+              <span className="text-white font-semibold text-lg hover:text-blue-400 transition-colors">
                 EchoNote
               </span>
             </Link>
-            <p className="text-white/60 max-w-sm text-[15px] leading-relaxed">
+            <p className="text-slate-400 max-w-sm text-[14px] leading-relaxed">
               EchoNote is a premium AI audio intelligence platform designed for enterprise compliance, legal, and financial teams.
             </p>
-            <div className="flex items-center space-x-4">
+            <div className="flex items-center space-x-3">
               {[
                 {
                   name: 'LinkedIn',
@@ -75,7 +75,7 @@ const LandingFooter: React.FC = () => {
                   target="_blank"
                   rel="noopener noreferrer"
                   aria-label={social.label}
-                  className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center hover:bg-white/10 transition-colors"
+                  className="w-10 h-10 rounded-full bg-slate-900 border border-slate-800/80 flex items-center justify-center text-slate-400 hover:text-white hover:bg-slate-800 transition-all"
                 >
                   <i className={social.icon}></i>
                 </a>
@@ -86,13 +86,13 @@ const LandingFooter: React.FC = () => {
           {/* Link Columns */}
           {footerLinks.map((column) => (
             <div key={column.title} className="space-y-6">
-              <h4 className="text-[14px] font-bold uppercase tracking-widest text-white/40">{column.title}</h4>
+              <h4 className="text-[11px] font-bold uppercase tracking-widest text-slate-500">{column.title}</h4>
               <ul className="space-y-4">
                 {column.links.map((link) => (
                   <li key={link.name}>
                     <Link
                       to={link.path}
-                      className="text-[15px] text-white/60 hover:text-white transition-colors"
+                      className="text-[14px] text-slate-400 hover:text-white transition-colors"
                     >
                       {link.name}
                     </Link>
@@ -103,9 +103,9 @@ const LandingFooter: React.FC = () => {
           ))}
         </div>
 
-        <hr className="border-white/10 mb-12" />
+        <hr className="border-slate-900 mb-12" />
 
-        <div className="flex flex-col md:flex-row items-center justify-between gap-6 text-[14px] text-white/40">
+        <div className="flex flex-col md:flex-row items-center justify-between gap-6 text-[13px] text-slate-500">
           <p>© {currentYear} EchoNote Inc. All rights reserved.</p>
           <div className="flex items-center space-x-8">
             <Link to="/privacy" className="hover:text-white transition-colors">Privacy</Link>

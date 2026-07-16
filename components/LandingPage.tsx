@@ -439,8 +439,8 @@ const LandingPage: React.FC<LandingPageProps> = ({ onNavigate, onLogin, onStartF
                 variants={fadeIn}
                 className="p-8 rounded-2xl bg-white border border-brand-divider/20 hover:shadow-2xl hover:-translate-y-2 transition-all group"
               >
-                <div className="w-14 h-14 rounded-xl bg-brand-primary/5 flex items-center justify-center text-brand-primary mb-6 group-hover:bg-brand-primary group-hover:text-white transition-colors">
-                  {feature.icon}
+                <div className="w-14 h-14 rounded-xl bg-brand-primary/5 flex items-center justify-center text-[#5DA9FF] mb-6 group-hover:bg-brand-primary group-hover:text-white transition-all duration-300">
+                  {React.cloneElement(feature.icon as React.ReactElement, { size: 24 })}
                 </div>
                 <h3 className="text-lg font-bold text-brand-primary mb-4">{feature.title}</h3>
                 <p className="text-brand-secondary/60 text-sm leading-relaxed">{feature.desc}</p>
@@ -845,7 +845,7 @@ const LandingPage: React.FC<LandingPageProps> = ({ onNavigate, onLogin, onStartF
                   <ul className="space-y-4 pt-6 border-t border-brand-divider/10 flex-1">
                     {plan.features.map((feature, j) => (
                       <li key={j} className="flex items-start space-x-3 text-[12px] font-medium">
-                        <Check size={14} className={`mt-0.5 ${plan.popular ? 'text-brand-accent' : 'text-emerald-500'}`} />
+                        <Check size={14} className={`mt-0.5 ${plan.popular ? '!text-[#D7B6FF]' : 'text-emerald-500'}`} />
                         <span>{feature}</span>
                       </li>
                     ))}

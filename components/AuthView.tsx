@@ -472,8 +472,31 @@ const AuthView: React.FC<AuthViewProps> = ({
           });
           const result = await verifyResp.json();
           if (result.success) {
+            try {
+              const now = new Date();
+              const subscriptionStartDate = now.toISOString();
+              const nextRefreshDate = new Date(subscriptionStartDate);
+              nextRefreshDate.setMonth(nextRefreshDate.getMonth() + 1);
+
+              const expiryDate = new Date(now);
+              expiryDate.setMonth(expiryDate.getMonth() + 1);
+
+              await updateDoc(doc(db, "users", userProfile.uid), {
+                plan: "pro",
+                billingCycle: "monthly",
+                subscriptionStartDate: subscriptionStartDate,
+                nextRefreshDate: nextRefreshDate.toISOString(),
+                billingStartDate: subscriptionStartDate,
+                planExpiresAt: expiryDate.toISOString(),
+                lastPaymentDate: serverTimestamp()
+              });
+            } catch (dbErr: any) {
+              console.error("⚠️ Client-side AuthView user plan update failed:", dbErr);
+            }
+
             toast.success("Welcome to EchoNote Pro!");
             onCloseSettings?.();
+            window.location.reload();
           } else {
             toast.error("Payment verification failed.");
           }
@@ -483,9 +506,21 @@ const AuthView: React.FC<AuthViewProps> = ({
           name: userProfile.displayName || ""
         },
         theme: {
-          color: "#112250"
+          color: "#5DA9FF"
         }
       };
+
+      if (order.isDemo || (order.id && order.id.startsWith("order_mock_"))) {
+        toast.info("Simulating Razorpay Payment (Demo/Sandbox Mode)...");
+        setTimeout(async () => {
+          await options.handler({
+            razorpay_order_id: order.id,
+            razorpay_payment_id: "pay_mock_" + Math.random().toString(36).substring(2, 10),
+            razorpay_signature: "sig_mock_" + Math.random().toString(36).substring(2, 10),
+          });
+        }, 1500);
+        return;
+      }
 
       const rzp = new (window as any).Razorpay(options);
       rzp.open();
@@ -769,26 +804,26 @@ const AuthView: React.FC<AuthViewProps> = ({
         className="max-w-4xl w-full bg-white rounded-3xl shadow-xl border border-slate-100 overflow-hidden grid grid-cols-1 md:grid-cols-12 min-h-[580px]"
       >
         {/* Left Column: Premium Enterprise Branding */}
-        <div className="md:col-span-5 bg-gradient-to-br from-[#112250] to-[#25417e] p-8 text-white flex flex-col justify-between relative overflow-hidden">
-          {/* Subtle cosmic grid background effect */}
-          <div className="absolute inset-0 opacity-10 bg-[linear-gradient(to_right,#808080_1px,transparent_1px),linear-gradient(to_bottom,#808080_1px,transparent_1px)] bg-[size:24px_24px]" />
+        <div className="md:col-span-5 bg-brand-secondary p-8 text-slate-800 flex flex-col justify-between relative overflow-hidden border-r border-slate-100">
+          {/* Subtle grid background effect */}
+          <div className="absolute inset-0 opacity-20 bg-[linear-gradient(to_right,#5DA9FF_1px,transparent_1px),linear-gradient(to_bottom,#5DA9FF_1px,transparent_1px)] bg-[size:24px_24px]" />
           
           <div className="relative z-10 space-y-8">
             <div className="flex items-center gap-2 cursor-pointer" onClick={onBackToHome}>
-              <div className="w-9 h-9 bg-white/10 rounded-xl flex items-center justify-center border border-white/10">
-                <Sparkle className="w-5 h-5 text-brand-accent" />
+              <div className="w-9 h-9 bg-brand-primary/10 rounded-xl flex items-center justify-center border border-brand-primary/20">
+                <Sparkle className="w-5 h-5 text-brand-primary" />
               </div>
-              <span className="text-lg font-bold tracking-tight">EchoNote</span>
+              <span className="text-lg font-bold tracking-tight text-slate-900">EchoNote</span>
             </div>
 
             <div className="space-y-4">
-              <span className="inline-flex items-center gap-1.5 px-3 py-1 bg-white/10 rounded-full text-[10px] font-bold uppercase tracking-widest border border-white/5">
-                <ShieldCheck className="w-3.5 h-3.5 text-brand-accent" /> Enterprise Ready
+              <span className="inline-flex items-center gap-1.5 px-3 py-1 bg-brand-primary/10 rounded-full text-[10px] font-bold uppercase tracking-widest border border-brand-primary/20 text-brand-primary">
+                <ShieldCheck className="w-3.5 h-3.5 text-brand-primary" /> Enterprise Ready
               </span>
-              <h2 className="text-2xl font-semibold leading-tight tracking-tight lg:text-3xl">
+              <h2 className="text-2xl font-semibold leading-tight tracking-tight lg:text-3xl text-slate-900">
                 The Secure Audio Intelligence Workspace.
               </h2>
-              <p className="text-sm text-slate-300 leading-relaxed">
+              <p className="text-sm text-slate-600 leading-relaxed">
                 Connect voice recordings to auto-generated transcripts, action-items, and strategic AI intelligence seamlessly.
               </p>
             </div>
@@ -797,27 +832,27 @@ const AuthView: React.FC<AuthViewProps> = ({
           <div className="relative z-10 space-y-4 pt-12">
             <div className="space-y-3.5">
               <div className="flex items-start gap-3">
-                <div className="w-5 h-5 rounded-full bg-white/10 flex items-center justify-center mt-0.5">
-                  <CheckCircle className="w-3 h-3 text-brand-accent" />
+                <div className="w-5 h-5 rounded-full bg-brand-primary/10 flex items-center justify-center mt-0.5">
+                  <CheckCircle className="w-3 h-3 text-brand-primary" />
                 </div>
-                <div className="text-xs text-slate-300">
-                  <span className="font-semibold text-white block">SAML 2.0 & OpenID Connect</span>
+                <div className="text-xs text-slate-600">
+                  <span className="font-semibold text-slate-900 block">SAML 2.0 & OpenID Connect</span>
                   Provision users directly with Azure or Google Workspace.
                 </div>
               </div>
               
               <div className="flex items-start gap-3">
-                <div className="w-5 h-5 rounded-full bg-white/10 flex items-center justify-center mt-0.5">
-                  <CheckCircle className="w-3 h-3 text-brand-accent" />
+                <div className="w-5 h-5 rounded-full bg-brand-primary/10 flex items-center justify-center mt-0.5">
+                  <CheckCircle className="w-3 h-3 text-brand-primary" />
                 </div>
-                <div className="text-xs text-slate-300">
-                  <span className="font-semibold text-white block">Auditable Data Workspaces</span>
+                <div className="text-xs text-slate-600">
+                  <span className="font-semibold text-slate-900 block">Auditable Data Workspaces</span>
                   Enterprise role mapping, guest sandboxing, and secure sharing.
                 </div>
               </div>
             </div>
 
-            <div className="pt-6 border-t border-white/10 flex items-center justify-between text-[11px] text-slate-400">
+            <div className="pt-6 border-t border-slate-200 flex items-center justify-between text-[11px] text-slate-500 font-medium">
               <span>Compliance: ISO 27001</span>
               <span>Data Residency: In-Region</span>
             </div>

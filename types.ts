@@ -199,6 +199,7 @@ export interface AudioToTextRecord {
   group: string; 
   projectId?: string;
   deletedAt?: string; // ISO string when moved to trash
+  _file?: Blob | File;
 }
 
 export interface TextToAudioRecord {

@@ -426,6 +426,14 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
   };
 
   const handlePlayFull = (id: string, title: string, url: string) => {
+    if (!url) {
+      addNotification({
+        title: 'Playback Error',
+        message: 'No audio source is available for this recording.',
+        type: 'error'
+      });
+      return;
+    }
     if (activePlaybackId === id && activePlaybackSegIdx === undefined && playbackStatus === 'playing') {
       onPause();
     } else {
@@ -434,10 +442,18 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
   };
 
   const handlePlaySegment = (item: AudioToTextRecord, seg: TranscriptSegment, idx: number) => {
+    if (!item.originalAudioUrl) {
+      addNotification({
+        title: 'Playback Error',
+        message: 'No audio source is available for this recording segment.',
+        type: 'error'
+      });
+      return;
+    }
     if (activePlaybackId === item.id && activePlaybackSegIdx === idx && playbackStatus === 'playing') {
       onPause();
     } else {
-      onPlay({ id: item.id, title: item.fileName, url: item.originalAudioUrl!, segmentIndex: idx }, seg.startTime, seg.endTime);
+      onPlay({ id: item.id, title: item.fileName, url: item.originalAudioUrl, segmentIndex: idx }, seg.startTime, seg.endTime);
     }
   };
 
@@ -1338,7 +1354,7 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
                   </div>
                   <button 
                     onClick={() => handlePlaySegment(b.fullRecord, b.fullRecord.transcript[b.segmentIndex], b.segmentIndex)}
-                    className="w-8 h-8 rounded-full bg-brand-primary text-brand-accent flex items-center justify-center shadow-md hover:scale-110 transition-all"
+                    className="w-8 h-8 rounded-full bg-brand-primary text-[#0F172A] flex items-center justify-center shadow-md hover:scale-110 transition-all"
                   >
                     <i className={`fa-solid ${activePlaybackId === b.recordId && activePlaybackSegIdx === b.segmentIndex && playbackStatus === 'playing' ? 'fa-pause' : 'fa-play'} text-[10px]`}></i>
                   </button>
@@ -1516,7 +1532,7 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
                              {activeTab !== 'trash' && (
                                <button 
                                  onClick={() => handlePlayFull(item.id, item.fileName, item.originalAudioUrl!)} 
-                                 className={`flex-1 py-3.5 rounded-lg font-black uppercase tracking-widest text-[9px] transition-all shadow-lg ${activePlaybackId === item.id && activePlaybackSegIdx === undefined && playbackStatus === 'playing' ? 'bg-brand-secondary text-white shadow-brand-secondary/20' : 'bg-brand-primary text-brand-accent shadow-brand-primary/20'}`}
+                                 className={`flex-1 py-3.5 rounded-lg font-black uppercase tracking-widest text-[9px] transition-all shadow-lg ${activePlaybackId === item.id && activePlaybackSegIdx === undefined && playbackStatus === 'playing' ? 'bg-brand-secondary text-[#0F172A] shadow-brand-secondary/20' : 'bg-brand-primary text-[#0F172A] shadow-brand-primary/20'}`}
                                >
                                   <i className={`fa-solid ${activePlaybackId === item.id && activePlaybackSegIdx === undefined && playbackStatus === 'playing' ? 'fa-pause' : 'fa-play'} mr-2`}></i>
                                   {activePlaybackId === item.id && activePlaybackSegIdx === undefined && playbackStatus === 'playing' ? 'Pause' : 'Replay Asset'}
@@ -1557,7 +1573,7 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
                                 )}
                                 <button 
                                   onClick={() => setExpandedRecordId(expandedRecordId === item.id ? null : item.id)}
-                                  className={`p-3.5 rounded-lg transition-all shadow-sm ${expandedRecordId === item.id ? 'bg-brand-primary text-brand-accent' : 'bg-brand-background text-brand-primary hover:bg-brand-divider/10'}`}
+                                  className={`p-3.5 rounded-lg transition-all shadow-sm ${expandedRecordId === item.id ? 'bg-brand-primary text-[#0F172A]' : 'bg-brand-background text-brand-primary hover:bg-brand-divider/10'}`}
                                   title="Expand Intelligence"
                                 >
                                   <i className={`fa-solid ${expandedRecordId === item.id ? 'fa-compress' : 'fa-expand'} text-xs`}></i>
@@ -2101,7 +2117,7 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
                               <h4 className="text-[11px] font-medium text-slate-400 tracking-widest uppercase">Full intelligence transcript</h4>
                               <button 
                                 onClick={() => setIsConversationMode(!isConversationMode)}
-                                className={`px-3 py-1.5 rounded-lg text-[10px] font-bold tracking-widest uppercase transition-all border ${isConversationMode ? 'bg-brand-primary text-brand-accent border-brand-primary shadow-md' : 'bg-white text-brand-primary border-brand-divider/20 hover:border-brand-primary/40'}`}
+                                className={`px-3 py-1.5 rounded-lg text-[10px] font-bold tracking-widest uppercase transition-all border ${isConversationMode ? 'bg-brand-primary text-[#0F172A] border-brand-primary shadow-md' : 'bg-white text-brand-primary border-brand-divider/20 hover:border-brand-primary/40'}`}
                               >
                                 <i className={`fa-solid ${isConversationMode ? 'fa-table-columns' : 'fa-comments'} mr-2`}></i>
                                 {isConversationMode ? 'Grid View' : 'Conversation View'}
@@ -2145,7 +2161,7 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
                                         </button>
                                         <button 
                                           onClick={() => handlePlaySegment(item, seg, sIdx)}
-                                          className={`w-7 h-7 rounded-lg flex items-center justify-center transition-all ${isActive ? 'bg-brand-secondary text-white' : 'bg-brand-primary/10 text-brand-primary hover:bg-brand-primary hover:text-brand-accent'}`}
+                                          className={`w-7 h-7 rounded-lg flex items-center justify-center transition-all ${isActive ? 'bg-brand-secondary text-[#0F172A]' : 'bg-brand-primary/10 text-brand-primary hover:bg-brand-primary hover:text-[#0F172A]'}`}
                                         >
                                           <i className={`fa-solid ${isActive ? 'fa-pause' : 'fa-play'} text-[11px]`}></i>
                                         </button>
@@ -2255,12 +2271,12 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
                              </button>
                              <button 
                                onClick={() => handlePlayFull(item.id, `Synthesis Result`, item.audioUrl)} 
-                               className={`px-8 py-3.5 rounded-lg font-medium uppercase tracking-widest text-[11px] transition-all shadow-lg ${activePlaybackId === item.id && playbackStatus === 'playing' ? 'bg-brand-secondary text-white shadow-brand-secondary/20' : 'bg-brand-primary text-brand-accent shadow-brand-primary/20'}`}
+                               className={`px-8 py-3.5 rounded-lg font-medium uppercase tracking-widest text-[11px] transition-all shadow-lg ${activePlaybackId === item.id && playbackStatus === 'playing' ? 'bg-brand-secondary text-[#0F172A] shadow-brand-secondary/20' : 'bg-brand-primary text-[#0F172A] shadow-brand-primary/20'}`}
                              >
                                <i className={`fa-solid ${activePlaybackId === item.id && playbackStatus === 'playing' ? 'fa-pause' : 'fa-play'} mr-2`}></i>
                                <span>Replay</span>
                              </button>
-                             <button onClick={() => setDownloadingAsset({ id: item.id, name: `Synthesis_${item.id}`, url: item.audioUrl, type: 'audio' })} className="p-4 bg-brand-background text-brand-primary rounded-lg hover:bg-brand-primary hover:text-brand-accent transition-all shadow-sm"><i className="fa-solid fa-download text-xs"></i></button>
+                             <button onClick={() => setDownloadingAsset({ id: item.id, name: `Synthesis_${item.id}`, url: item.audioUrl, type: 'audio' })} className="p-4 bg-brand-background text-brand-primary rounded-lg hover:bg-brand-primary hover:text-[#0F172A] transition-all shadow-sm"><i className="fa-solid fa-download text-xs"></i></button>
                            </>
                          )}
                          <button 

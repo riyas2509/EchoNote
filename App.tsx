@@ -602,23 +602,32 @@ const App: React.FC = () => {
   const [duration, setDuration] = useState(0);
   const [playbackSpeed, setPlaybackSpeed] = useState(1);
 
-  useEffect(() => {
-    audioRef.current = new Audio();
+  const initAudio = () => {
+    if (audioRef.current) return audioRef.current;
+    const audio = new Audio();
     
-    const audio = audioRef.current;
     const updateTime = () => setCurrentTime(audio.currentTime);
     const updateDuration = () => setDuration(audio.duration);
     const handleEnded = () => setPlaybackStatus('stopped');
+    const handleError = (e: any) => {
+      console.warn("Audio playback error (handled gracefully):", e);
+    };
 
     audio.addEventListener('timeupdate', updateTime);
     audio.addEventListener('loadedmetadata', updateDuration);
     audio.addEventListener('ended', handleEnded);
+    audio.addEventListener('error', handleError);
 
+    audioRef.current = audio;
+    return audio;
+  };
+
+  useEffect(() => {
     return () => {
-      audio.removeEventListener('timeupdate', updateTime);
-      audio.removeEventListener('loadedmetadata', updateDuration);
-      audio.removeEventListener('ended', handleEnded);
-      audio.pause();
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current = null;
+      }
     };
   }, []);
 
@@ -639,17 +648,22 @@ const App: React.FC = () => {
       }
     };
     segmentListenerRef.current = checkEnd;
-    audioRef.current?.addEventListener('timeupdate', checkEnd);
+    const audio = initAudio();
+    audio.addEventListener('timeupdate', checkEnd);
   };
 
   const handleGlobalPlay = (metadata: PlaybackMetadata, startTime: number = 0, endTime?: number) => {
-    if (!audioRef.current) return;
+    const audio = initAudio();
+    if (!audio || !metadata || !metadata.url) {
+      console.warn("Skipping play: No audio element or invalid metadata URL", metadata);
+      return;
+    }
     
     const isSameSource = playbackMetadata?.url === metadata.url;
     const isSameSegment = metadata.segmentIndex === playbackMetadata?.segmentIndex;
     
     if (isSameSource && playbackStatus === 'paused' && isSameSegment) {
-      audioRef.current.play();
+      audio.play().catch(console.error);
       setPlaybackStatus('playing');
       if (endTime !== undefined) {
         setupSegmentListener(endTime);
@@ -658,17 +672,17 @@ const App: React.FC = () => {
     }
 
     // New playback or different segment
-    audioRef.current.pause();
+    audio.pause();
     clearSegmentListener();
     
-    audioRef.current.src = metadata.url;
-    audioRef.current.currentTime = startTime;
+    audio.src = metadata.url;
+    audio.currentTime = startTime;
     
     setPlaybackMetadata(metadata);
     setPlaybackStatus('playing');
 
     // Trigger play after src update
-    audioRef.current.play().catch(console.error);
+    audio.play().catch(console.error);
 
     if (endTime !== undefined) {
       setupSegmentListener(endTime);
@@ -1121,7 +1135,24 @@ const App: React.FC = () => {
     }
 
     try {
-      const response = await fetch('/api/invite-member', {
+      // Generate unique token on client and write to Firestore directly (authenticated user)
+      const inviteToken = crypto.randomUUID();
+      const inviteData = {
+        id: inviteToken,
+        email,
+        role,
+        projectId: project.id,
+        projectName: project.name,
+        invitedBy: user.email || "Someone",
+        ownerId: project.userId || null,
+        status: "pending",
+        createdAt: serverTimestamp()
+      };
+
+      await setDoc(doc(db, "invites", inviteToken), inviteData);
+
+      const baseUrl = import.meta.env.VITE_API_URL || "";
+      const response = await fetch(`${baseUrl}/api/invite-member`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1130,7 +1161,8 @@ const App: React.FC = () => {
           projectId: project.id,
           projectName: project.name,
           invitedBy: user.email,
-          ownerId: project.userId
+          ownerId: project.userId,
+          inviteToken // pass the client-generated token
         })
       });
 
@@ -1139,7 +1171,7 @@ const App: React.FC = () => {
         throw new Error(data.error || 'Failed to send invitation');
       }
 
-      const inviteData = await response.json();
+      const inviteResult = await response.json();
       
       addToast('Success', `Invitation sent to ${email}`, 'success');
       
@@ -1617,9 +1649,9 @@ const App: React.FC = () => {
                 onClick={handleBackToHome}
               >
                 <img 
-                  src="/Logo-1.jpg" 
+                  src="/Logo-2.png" 
                   alt="EchoNote" 
-                  className="h-12 w-auto object-contain"
+                  className="h-10 w-auto object-contain"
                 />
                 <span className="text-xl font-bold text-[#1B2A4E] tracking-tight">
                   EchoNote

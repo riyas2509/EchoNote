@@ -5,6 +5,7 @@ import MeetingIntelligenceView from './MeetingIntelligenceView';
 import ExecutionTrackerView from './ExecutionTrackerView';
 import SmartReminderView from './SmartReminderView';
 import { transcribeAudio, summarizeTranscript, analyzeStrategically, processUnifiedMeetingIntelligence } from '../services/geminiService';
+import { uploadAudioToStorage } from '../services/recordingService';
 import { PLAN_FEATURES } from '../config/planConfig';
 import { getMinutesUsage, getThinkingUsage } from '../lib/usageUtils';
 import { executeDownload, generateTranscriptBlob } from '../services/downloadService';
@@ -364,6 +365,7 @@ const AudioToTextView: React.FC<AudioToTextViewProps> = ({
       fileName: `Live Recording - ${new Date().toLocaleTimeString()}`,
       sourceType: 'live',
       originalAudioUrl: audioUrl,
+      _file: audioBlob,
       transcript: [],
       status: 'processing',
       processingStep: 'Validating stream...',
@@ -678,6 +680,16 @@ const AudioToTextView: React.FC<AudioToTextViewProps> = ({
     setModuleSelectionModal(null);
 
     try {
+      let finalAudioUrl = record.originalAudioUrl;
+      if (authStatus === AuthStatus.LOGGED_IN && (record as any)._file) {
+        try {
+          setter(prev => prev.map(r => r.id === id ? { ...r, status: 'processing', processingStep: "Uploading audio track to secure cloud storage..." } : r));
+          finalAudioUrl = await uploadAudioToStorage((record as any)._file, userProfile?.uid || 'unknown', id, record.fileName);
+        } catch (uploadError) {
+          console.error("Firebase Storage upload failed, falling back to local Blob:", uploadError);
+        }
+      }
+
       let unifiedIntelligence;
       if (finalSelectedModules.length > 0 && checkThinkingLimit()) {
         try {
@@ -698,6 +710,7 @@ const AudioToTextView: React.FC<AudioToTextViewProps> = ({
 
       const finalRecord: AudioToTextRecord = {
         ...record,
+        originalAudioUrl: finalAudioUrl,
         status: 'completed',
         transcript,
         summary: finalSelectedModules.includes('summary') ? summary : undefined,
@@ -1355,14 +1368,14 @@ const AudioToTextView: React.FC<AudioToTextViewProps> = ({
                     <>
                       <button 
                         onClick={() => handlePlayContent(item)} 
-                        className={`px-6 py-3 rounded-lg font-black text-[10px] transition-all shadow-md ${activePlaybackId === item.id && activePlaybackSegIdx === undefined && playbackStatus === 'playing' ? 'bg-brand-primary text-brand-accent' : 'bg-brand-primary text-white shadow-brand-primary/10'}`}
+                        className={`px-6 py-3 rounded-lg font-black text-[10px] transition-all shadow-md ${activePlaybackId === item.id && activePlaybackSegIdx === undefined && playbackStatus === 'playing' ? 'bg-brand-secondary text-[#0F172A]' : 'bg-brand-primary text-white shadow-brand-primary/10'}`}
                       >
                         <i className={`fa-solid ${activePlaybackId === item.id && activePlaybackSegIdx === undefined && playbackStatus === 'playing' ? 'fa-pause' : 'fa-play'} mr-2`}></i>
                         Play content
                       </button>
                       <div className="flex gap-2">
-                        <button onClick={() => triggerDownload(item.id, item.fileName, item.originalAudioUrl!, 'audio')} className="p-3 rounded-lg bg-brand-background text-brand-primary hover:bg-brand-primary hover:text-brand-accent transition-all shadow-sm" title="Download Audio Asset"><i className="fa-solid fa-file-audio"></i></button>
-                        <button onClick={() => triggerDownload(item.id, item.fileName, '', 'transcript')} className="p-3 rounded-lg bg-brand-background text-brand-primary hover:bg-brand-primary hover:text-brand-accent transition-all shadow-sm" title="Download Transcript Intelligence"><i className="fa-solid fa-file-lines"></i></button>
+                        <button onClick={() => triggerDownload(item.id, item.fileName, item.originalAudioUrl!, 'audio')} className="p-3 rounded-lg bg-brand-background text-brand-primary hover:bg-brand-primary hover:text-[#0F172A] transition-all shadow-sm" title="Download Audio Asset"><i className="fa-solid fa-file-audio"></i></button>
+                        <button onClick={() => triggerDownload(item.id, item.fileName, '', 'transcript')} className="p-3 rounded-lg bg-brand-background text-brand-primary hover:bg-brand-primary hover:text-[#0F172A] transition-all shadow-sm" title="Download Transcript Intelligence"><i className="fa-solid fa-file-lines"></i></button>
                         {authStatus === AuthStatus.LOGGED_IN && (() => {
                           const project = projects.find(p => p.name === item.group);
                           const isOwner = project?.ownerEmail === userProfile?.email;
@@ -1371,7 +1384,7 @@ const AudioToTextView: React.FC<AudioToTextViewProps> = ({
                           return (
                             <button 
                               onClick={() => setProjectToManage(project || null)}
-                              className="p-3 rounded-lg bg-brand-background text-brand-primary hover:bg-brand-primary hover:text-brand-accent transition-all shadow-sm" 
+                              className="p-3 rounded-lg bg-brand-background text-brand-primary hover:bg-brand-primary hover:text-[#0F172A] transition-all shadow-sm" 
                               title="Manage Collaboration"
                             >
                               <i className="fa-solid fa-user-plus"></i>

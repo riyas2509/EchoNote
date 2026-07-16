@@ -3,6 +3,7 @@ import { useSearchParams, useNavigate } from 'react-router-dom';
 import { useFirebase } from '../components/FirebaseProvider';
 import { motion, AnimatePresence } from 'motion/react';
 import { ArrowRight, UserPlus, CheckCircle2, AlertCircle, Loader2, Folder, Shield, XCircle, Clock, Home, X } from 'lucide-react';
+import { db, doc, getDoc, setDoc, updateDoc, serverTimestamp, collection, addDoc } from '../firebase';
 
 interface InviteDetails {
   id: string;
@@ -37,15 +38,26 @@ const JoinPage: React.FC = () => {
 
     const fetchInvite = async () => {
       try {
-        const response = await fetch(`/api/invite-details/${token}`);
-        if (!response.ok) {
-          const data = await response.json();
-          throw new Error(data.error || 'Failed to load invitation');
+        // Fetch invite details directly from client Firestore SDK (read rule is allow read: if true)
+        const inviteDoc = await getDoc(doc(db, 'invites', token));
+        if (inviteDoc.exists()) {
+          setInvite(inviteDoc.data() as InviteDetails);
+        } else {
+          throw new Error('Invitation not found');
         }
-        const data = await response.json();
-        setInvite(data);
       } catch (err: any) {
-        setError(err.message);
+        console.warn('Direct client Firestore fetch failed, trying fallback API:', err.message);
+        try {
+          const response = await fetch(`/api/invite-details/${token}`);
+          if (!response.ok) {
+            const data = await response.json();
+            throw new Error(data.error || 'Failed to load invitation');
+          }
+          const data = await response.json();
+          setInvite(data);
+        } catch (apiErr: any) {
+          setError(apiErr.message);
+        }
       } finally {
         setLoading(false);
       }
@@ -66,6 +78,38 @@ const JoinPage: React.FC = () => {
 
     setJoining(true);
     try {
+      // 1. Create project member record directly in Firestore from client
+      const memberId = `${user.uid}_${invite.projectId}`;
+      await setDoc(doc(db, "projectMembers", memberId), {
+        userId: user.uid,
+        email: user.email,
+        displayName: user.displayName || user.email?.split('@')[0] || 'User',
+        projectId: invite.projectId,
+        ownerId: invite.ownerId || null,
+        projectName: invite.projectName,
+        role: invite.role,
+        joinedAt: serverTimestamp()
+      });
+
+      // 2. Update invite status to accepted directly in Firestore from client
+      await updateDoc(doc(db, "invites", invite.id), {
+        status: "accepted",
+        acceptedAt: serverTimestamp(),
+        acceptedBy: user.uid
+      });
+
+      // 3. Log join project activity directly in Firestore from client
+      await addDoc(collection(db, "projectActivities"), {
+        projectId: invite.projectId,
+        userId: user.uid,
+        userEmail: user.email,
+        userName: user.displayName || user.email?.split('@')[0] || 'User',
+        actionType: "join_project",
+        description: `${user.displayName || user.email?.split('@')[0] || 'User'} joined project "${invite.projectName}"`,
+        createdAt: serverTimestamp()
+      });
+
+      // 4. Trigger server API (ignoring server-side write failures because client already did it)
       const response = await fetch('/api/invite-accept', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -76,11 +120,6 @@ const JoinPage: React.FC = () => {
           userDisplayName: user.displayName || user.email?.split('@')[0] || 'User'
         })
       });
-
-      if (!response.ok) {
-        const data = await response.json();
-        throw new Error(data.error || 'Failed to join project');
-      }
 
       setSuccess(true);
       setTimeout(() => {
@@ -99,7 +138,26 @@ const JoinPage: React.FC = () => {
 
     setDeclining(true);
     try {
-      const response = await fetch('/api/invite-decline', {
+      // 1. Update invite status directly from client
+      await updateDoc(doc(db, "invites", invite.id), {
+        status: "rejected",
+        rejectedAt: serverTimestamp(),
+        rejectedBy: user?.uid || null
+      });
+
+      // 2. Log activity directly from client
+      await addDoc(collection(db, "projectActivities"), {
+        projectId: invite.projectId,
+        userId: user?.uid || 'unknown',
+        userEmail: invite.email,
+        userName: invite.email.split('@')[0],
+        actionType: "decline_invite",
+        description: `${invite.email.split('@')[0]} declined invitation to join "${invite.projectName}"`,
+        createdAt: serverTimestamp()
+      });
+
+      // 3. Trigger server API for background tracking (ignoring failure because client wrote first)
+      await fetch('/api/invite-decline', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -107,11 +165,6 @@ const JoinPage: React.FC = () => {
           userId: user?.uid || null
         })
       });
-
-      if (!response.ok) {
-        const data = await response.json();
-        throw new Error(data.error || 'Failed to decline invitation');
-      }
 
       setSuccess('declined');
       setTimeout(() => {
@@ -274,7 +327,7 @@ const JoinPage: React.FC = () => {
                 <button 
                   onClick={handleJoin}
                   disabled={joining || declining}
-                  className="w-full group flex items-center justify-center gap-3 py-4 bg-[#1A234E] text-white rounded-xl font-black uppercase tracking-widest text-[13px] shadow-xl shadow-brand-primary/20 hover:scale-[1.02] active:scale-[0.98] transition-all disabled:opacity-50 disabled:scale-100"
+                  className="w-full group flex items-center justify-center gap-3 py-4 bg-brand-primary text-slate-900 rounded-xl font-black uppercase tracking-widest text-[13px] shadow-xl shadow-brand-primary/20 hover:scale-[1.02] active:scale-[0.98] transition-all disabled:opacity-50 disabled:scale-100"
                 >
                   {joining ? (
                     <>

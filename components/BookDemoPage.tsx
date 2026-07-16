@@ -1,6 +1,6 @@
 
 import React, { useState } from 'react';
-import { motion } from 'framer-motion';
+import { motion } from 'motion/react';
 import { CheckCircle2, ArrowRight, Calendar, Clock, Users, ShieldCheck } from 'lucide-react';
 
 const BookDemoPage: React.FC = () => {

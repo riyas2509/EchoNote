@@ -451,7 +451,7 @@ const Navigation: React.FC<NavigationProps> = ({
 
         {/* Usage Meter */}
         {!isCollapsed ? (
-          <div className="mx-4 mb-4 p-5 rounded-[1.5rem] bg-white/5 border border-white/10 space-y-6">
+          <div className="mx-4 mb-4 p-5 rounded-[1.5rem] bg-white/10 border border-white/10 space-y-6">
             {isGuestMode && (
               <div className="flex items-center space-x-2 px-4 py-2 bg-black/40 border border-white/5 rounded-xl">
                 <div className="w-1.5 h-1.5 bg-[#00D1FF] rounded-full shadow-[0_0_8px_rgba(0,209,255,0.6)]" />

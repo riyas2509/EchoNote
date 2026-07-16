@@ -104,18 +104,15 @@ const PricingPage: React.FC = () => {
   };
 
   return (
-    <div className="min-h-screen bg-brand-background flex flex-col">
-      <LandingNavbar onLogin={() => navigate('/auth')} onStartFree={() => navigate('/app')} authStatus={user ? AuthStatus.LOGGED_IN : AuthStatus.GUEST} onGoToDashboard={() => navigate('/app')} />
-      
-      <main className="flex-1 py-24 px-6">
-        <div className="max-w-7xl mx-auto text-center space-y-12">
-          {/* Header */}
-          <div className="space-y-4 max-w-2xl mx-auto">
-            <h1 className="text-4xl md:text-6xl font-black text-brand-primary tracking-tight">Simple, Transparent Pricing</h1>
-            <p className="text-lg text-slate-500 font-medium leading-relaxed">
-              Choose the plan that fits your intelligence needs. All plans include our core AI transcription engine.
-            </p>
-          </div>
+    <main className="flex-1 py-24 px-6">
+      <div className="max-w-7xl mx-auto text-center space-y-12">
+        {/* Header */}
+        <div className="space-y-4 max-w-2xl mx-auto">
+          <h1 className="text-4xl md:text-6xl font-black text-brand-primary tracking-tight">Simple, Transparent Pricing</h1>
+          <p className="text-lg text-slate-500 font-medium leading-relaxed">
+            Choose the plan that fits your intelligence needs. All plans include our core AI transcription engine.
+          </p>
+        </div>
 
           {/* Billing Switch */}
           <div className="flex items-center justify-center gap-4">
@@ -155,7 +152,10 @@ const PricingPage: React.FC = () => {
 
                 <div className="mb-8 flex items-center gap-3">
                   <div className={`p-3 rounded-2xl ${plan.highlighted ? 'bg-white/10 shadow-inner' : 'bg-brand-background'}`}>
-                    {plan.icon}
+                    {plan.highlighted 
+                      ? React.cloneElement(plan.icon as React.ReactElement, { className: '!text-[#D7B6FF]' })
+                      : plan.icon
+                    }
                   </div>
                   <h3 className="text-xl font-bold uppercase tracking-widest">{plan.name}</h3>
                 </div>
@@ -175,7 +175,7 @@ const PricingPage: React.FC = () => {
                 <div className="space-y-4 mb-10 flex-1">
                   {plan.features.map((feature, i) => (
                     <div key={i} className="flex items-start gap-3">
-                      <div className={`shrink-0 mt-1 ${plan.highlighted ? 'text-echo-accent' : 'text-brand-primary'}`}>
+                      <div className={`shrink-0 mt-1 ${plan.highlighted ? '!text-[#D7B6FF]' : 'text-brand-primary'}`}>
                         <Check size={14} />
                       </div>
                       <span className={`text-[13px] font-semibold text-left leading-tight ${plan.highlighted ? 'text-white/90' : 'text-slate-600'}`}>
@@ -255,10 +255,7 @@ const PricingPage: React.FC = () => {
             </div>
           </div>
         </div>
-      </main>
-
-      <LandingFooter />
-    </div>
+    </main>
   );
 };
 

@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { NavLink, Link } from 'react-router-dom';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion, AnimatePresence } from 'motion/react';
 import { Menu, X } from 'lucide-react';
 import { AuthStatus } from '../types';
 
@@ -47,9 +47,9 @@ const LandingNavbar: React.FC<LandingNavbarProps> = ({ onLogin, onStartFree, onG
           className="flex items-center gap-3 cursor-pointer group"
         >
           <img 
-            src="/Logo-1.jpg" 
+            src="/Logo-2.png" 
             alt="EchoNote"
-            className="h-12 w-auto object-contain"
+            className="h-10 w-auto object-contain"
           />
           <span className="text-xl font-bold text-[#1B2A4E] tracking-tight">
             EchoNote

@@ -2,6 +2,7 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
 import { motion } from 'motion/react';
+import { ArrowRight } from 'lucide-react';
 import { AuthStatus } from '../types';
 
 interface CTASectionProps {
@@ -24,47 +25,49 @@ const CTASection: React.FC<CTASectionProps> = ({ onLogin, onStartFree, onNavigat
 
   return (
     <section className="py-32 px-6">
-      <div className="max-w-5xl mx-auto rounded-[40px] bg-brand-primary text-white p-12 md:p-24 text-center relative overflow-hidden">
+      <div className="max-w-5xl mx-auto rounded-[32px] bg-slate-900 text-white p-12 md:p-20 text-center relative overflow-hidden border border-slate-800">
         {/* Decorative background */}
-        <div className="absolute top-0 left-0 w-full h-full opacity-10 pointer-events-none">
-          <div className="absolute -top-24 -left-24 w-96 h-96 bg-brand-accent rounded-full blur-[120px]"></div>
-          <div className="absolute -bottom-24 -right-24 w-96 h-96 bg-brand-secondary rounded-full blur-[120px]"></div>
+        <div className="absolute top-0 left-0 w-full h-full opacity-15 pointer-events-none">
+          <div className="absolute -top-24 -left-24 w-96 h-96 bg-blue-500 rounded-full blur-[120px]"></div>
+          <div className="absolute -bottom-24 -right-24 w-96 h-96 bg-purple-500 rounded-full blur-[120px]"></div>
         </div>
         
-        <motion.div {...fadeIn} className="relative z-10 space-y-10">
-          <h2 className="text-4xl md:text-6xl font-bold tracking-tight leading-tight">
+        <motion.div {...fadeIn} className="relative z-10 space-y-8 max-w-2xl mx-auto">
+          <h2 className="text-3xl md:text-5xl font-extrabold tracking-tight leading-tight text-white">
             Stop listening. <br />
-            Start understanding.
+            <span className="text-blue-400">Start understanding.</span>
           </h2>
-          <p className="text-white/60 text-lg max-w-xl mx-auto">
+          <p className="text-slate-400 text-base md:text-lg max-w-xl mx-auto leading-relaxed">
             Join the leading enterprise teams transforming their audio data into structured intelligence today.
           </p>
-          <div className="flex flex-col sm:flex-row items-center justify-center gap-6 pt-4">
+          <div className="flex flex-col sm:flex-row items-center justify-center gap-4 pt-4">
             {isLoggedIn ? (
-              <Link 
-                to="/app"
-                className="w-full sm:w-auto bg-brand-accent text-brand-primary px-12 py-6 rounded-2xl font-bold uppercase tracking-widest text-[14px] shadow-2xl hover:shadow-brand-accent/20 hover:-translate-y-1 transition-all text-center"
+              <button 
+                onClick={onGoToDashboard}
+                className="w-full sm:w-auto bg-brand-primary text-slate-900 px-8 py-3.5 rounded-xl font-bold uppercase tracking-wider text-[11px] shadow-md hover:bg-blue-400 hover:scale-[1.02] active:scale-[0.98] transition-all text-center flex items-center justify-center space-x-2"
               >
-                Dashboard
-              </Link>
+                <span>DASHBOARD</span>
+                <ArrowRight size={14} />
+              </button>
             ) : (
               <button 
                 onClick={onStartFree}
-                className="w-full sm:w-auto bg-brand-accent text-brand-primary px-12 py-6 rounded-2xl font-bold uppercase tracking-widest text-[14px] shadow-2xl hover:shadow-brand-accent/20 hover:-translate-y-1 transition-all text-center"
+                className="w-full sm:w-auto bg-brand-primary text-slate-900 px-8 py-3.5 rounded-xl font-bold uppercase tracking-wider text-[11px] shadow-md hover:bg-blue-400 hover:scale-[1.02] active:scale-[0.98] transition-all text-center flex items-center justify-center space-x-2"
               >
-                Start Free
+                <span>START FREE</span>
+                <ArrowRight size={14} />
               </button>
             )}
             {!isLoggedIn && (
               <button 
                 onClick={onStartFree}
-                className="w-full sm:w-auto bg-white/10 text-white border border-white/20 px-12 py-6 rounded-2xl font-bold uppercase tracking-widest text-[14px] hover:bg-white/20 transition-all text-center"
+                className="w-full sm:w-auto bg-slate-800 text-white border border-slate-700 hover:bg-slate-700 hover:scale-[1.02] active:scale-[0.98] px-8 py-3.5 rounded-xl font-bold uppercase tracking-wider text-[11px] transition-all text-center flex items-center justify-center"
               >
                 Upload Your First Call
               </button>
             )}
           </div>
-          <p className="text-white/40 text-[13px] font-medium">No credit card required • Built for compliance-heavy teams</p>
+          <p className="text-slate-500 text-[11px] font-bold uppercase tracking-widest pt-2">No credit card required • Built for compliance-heavy teams</p>
         </motion.div>
       </div>
     </section>

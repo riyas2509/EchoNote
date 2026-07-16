@@ -1,6 +1,7 @@
 
 import React, { useState, useEffect } from 'react';
-import { synthesizeSpeech, pcmToWavUrl } from '../services/geminiService';
+import { synthesizeSpeech, pcmToWavUrl, audioToBlobUrl, audioToBlob } from '../services/geminiService';
+import { uploadAudioToStorage } from '../services/recordingService';
 import { executeDownload } from '../services/downloadService';
 import { TextToAudioRecord, AuthStatus, VoiceGender, PlaybackMetadata, PlaybackStatus, AppNotification, Project, UserProfile, OrgRole } from '../types';
 
@@ -221,6 +222,14 @@ const TextToAudioView: React.FC<TextToAudioViewProps> = ({
   };
 
   const handlePlayAudio = (item: TextToAudioRecord) => {
+    if (!item.audioUrl) {
+      addNotification({
+        title: 'Playback Error',
+        message: 'No audio source is available for this synthesis.',
+        type: 'error'
+      });
+      return;
+    }
     if (activePlaybackId === item.id && playbackStatus === 'playing') {
       onPause();
     } else {
@@ -291,11 +300,23 @@ const TextToAudioView: React.FC<TextToAudioViewProps> = ({
       const generationPromises = validScripts.map(async (script) => {
         try {
           const targetGender = script.gender || 'male';
-          const rawBase64 = await synthesizeSpeech(script.text, targetGender);
-          const url = pcmToWavUrl(rawBase64);
+          const synthResult = await synthesizeSpeech(script.text, targetGender);
+          
+          const blob = audioToBlob(synthResult.data, synthResult.mimeType);
+          let url = URL.createObjectURL(blob);
+          const recordId = Math.random().toString(36).substr(2, 9);
+
+          if (authStatus === AuthStatus.LOGGED_IN) {
+            try {
+              const fileName = `synthesis_${recordId}.mp3`;
+              url = await uploadAudioToStorage(blob, userProfile?.uid || 'unknown', recordId, fileName);
+            } catch (storageError) {
+              console.error("Firebase Storage TTS upload failed, falling back to local Blob:", storageError);
+            }
+          }
 
           const record = {
-            id: Math.random().toString(36).substr(2, 9),
+            id: recordId,
             date: new Date().toLocaleString(),
             textPreview: script.text.length > 80 ? script.text.substring(0, 77) + '...' : script.text,
             fullText: script.text,
@@ -504,7 +525,7 @@ const TextToAudioView: React.FC<TextToAudioViewProps> = ({
           <button
             onClick={handleGenerateAll}
             disabled={isProcessing || scripts.some(s => !s.text.trim() || (authStatus !== AuthStatus.GUEST && !s.gender))}
-            className={`flex items-center justify-center gap-4 px-16 py-6 rounded-xl font-bold uppercase tracking-[0.2em] text-[11px] transition-all shadow-2xl active:scale-95 ${isProcessing || scripts.some(s => !s.text.trim() || (authStatus !== AuthStatus.GUEST && !s.gender)) ? 'bg-slate-200 text-slate-400 cursor-not-allowed' : 'bg-brand-primary text-brand-accent shadow-brand-primary/20 hover:brightness-110 hover:scale-[1.02]'}`}>
+            className={`flex items-center justify-center gap-4 px-16 py-6 rounded-xl font-bold uppercase tracking-[0.2em] text-[11px] transition-all shadow-2xl active:scale-95 ${isProcessing || scripts.some(s => !s.text.trim() || (authStatus !== AuthStatus.GUEST && !s.gender)) ? 'bg-slate-200 text-slate-400 cursor-not-allowed' : 'bg-brand-primary text-[#0F172A] shadow-brand-primary/20 hover:brightness-110 hover:scale-[1.02]'}`}>
             {isProcessing ? <i className="fa-solid fa-circle-notch animate-spin text-lg" /> : <i className="fa-solid fa-waveform text-lg" />}
             {isProcessing ? 'Synthesizing Intelligence...' : `Initialize ${scripts.length > 1 ? `Batch (${scripts.length})` : 'Synthesis Module'}`}
           </button>
@@ -568,7 +589,7 @@ const TextToAudioView: React.FC<TextToAudioViewProps> = ({
                   <div className="flex items-center space-x-3 shrink-0">
                     <button 
                       onClick={() => handlePlayAudio(item)}
-                      className={`flex items-center space-x-2 px-6 py-3 rounded-lg font-medium text-[11px] tracking-widest transition-all shadow-md ${activePlaybackId === item.id && playbackStatus === 'playing' ? 'bg-brand-primary text-brand-accent' : 'bg-brand-primary text-white shadow-brand-primary/10'}`}
+                      className={`flex items-center space-x-2 px-6 py-3 rounded-lg font-medium text-[11px] tracking-widest transition-all shadow-md ${activePlaybackId === item.id && playbackStatus === 'playing' ? 'bg-brand-secondary text-[#0F172A]' : 'bg-brand-primary text-[#0F172A] shadow-brand-primary/10'}`}
                     >
                       <i className={`fa-solid ${activePlaybackId === item.id && playbackStatus === 'playing' ? 'fa-pause' : 'fa-play'}`}></i>
                       <span>{activePlaybackId === item.id && playbackStatus === 'playing' ? 'Pause' : 'Play'}</span>

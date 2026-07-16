@@ -592,7 +592,7 @@ export const CollaborationDashboard: React.FC<CollaborationDashboardProps> = ({
                         <p className="font-extrabold text-sm text-slate-900">
                           {activeProject.ownerEmail === userProfile?.email ? 'You' : activeProject.ownerEmail?.split('@')[0]}
                         </p>
-                        <span className="px-2 py-0.5 bg-[#1B2A4E] text-white text-[9px] font-black uppercase rounded tracking-wider">Owner</span>
+                        <span className="px-2 py-0.5 bg-brand-secondary text-slate-800 border border-brand-primary/20 text-[9px] font-black uppercase rounded tracking-wider">Owner</span>
                       </div>
                       <p className="text-xs text-slate-500 font-medium">{activeProject.ownerEmail}</p>
                     </div>
@@ -632,7 +632,7 @@ export const CollaborationDashboard: React.FC<CollaborationDashboardProps> = ({
                                 {member.email === userProfile?.email ? 'You' : member.displayName || member.email?.split('@')[0]}
                               </p>
                               <span className={`px-2 py-0.5 text-[9px] font-black uppercase rounded tracking-wider ${
-                                member.role === 'owner' ? 'bg-[#1B2A4E] text-white' :
+                                member.role === 'owner' ? 'bg-brand-secondary text-slate-800 border border-brand-primary/20' :
                                 member.role === 'editor' ? 'bg-blue-100 text-blue-800' :
                                 'bg-slate-100 text-slate-700'
                               }`}>
@@ -710,7 +710,7 @@ export const CollaborationDashboard: React.FC<CollaborationDashboardProps> = ({
                     <button 
                       type="submit"
                       disabled={isInviting || !inviteEmail.trim()}
-                      className="bg-[#1B2A4E] text-white hover:bg-[#253965] font-black uppercase text-xs tracking-widest px-6 py-3.5 rounded-xl transition-all shadow-md active:scale-95 disabled:opacity-50 inline-flex items-center justify-center gap-2"
+                      className="bg-brand-primary text-slate-900 hover:bg-[#4396F5] font-black uppercase text-xs tracking-widest px-6 py-3.5 rounded-xl transition-all shadow-md active:scale-95 disabled:opacity-50 inline-flex items-center justify-center gap-2"
                     >
                       <UserPlus className="w-4 h-4" />
                       <span>{isInviting ? 'Inviting...' : 'Send Invite'}</span>
@@ -847,19 +847,19 @@ export const CollaborationDashboard: React.FC<CollaborationDashboardProps> = ({
             </div>
 
             {/* Permission Guidelines Info Card */}
-            <div className="bg-[#1B2A4E] text-white rounded-2xl p-6 space-y-4 shadow-xl shadow-slate-900/10">
+            <div className="bg-brand-secondary text-slate-800 rounded-2xl p-6 space-y-4 border border-[#bce4ff] shadow-sm">
               <div className="flex items-center gap-2">
-                <ShieldAlert className="text-echo-accent w-5 h-5 shrink-0" />
-                <h3 className="font-extrabold text-sm uppercase tracking-wider">Security & Guidelines</h3>
+                <ShieldAlert className="text-brand-primary w-5 h-5 shrink-0" />
+                <h3 className="font-extrabold text-sm uppercase tracking-wider text-slate-900">Security & Guidelines</h3>
               </div>
-              <div className="space-y-3 text-xs text-white/80 leading-relaxed font-medium">
+              <div className="space-y-3 text-xs text-slate-600 leading-relaxed font-medium">
                 <p>
                   EchoNote enforces strict permission policies for workspace projects:
                 </p>
-                <ul className="space-y-2 list-disc list-inside text-white/70">
-                  <li><strong className="text-white">Project Owners</strong> have complete administrative control, full telemetry visibility, and can invite/remove members.</li>
-                  <li><strong className="text-white">Members (Editors)</strong> can upload/transcribe files, bookmark notes, and view their own telemetry only.</li>
-                  <li><strong className="text-white">Viewers</strong> have secure read-only access to transcripts and general project analytics.</li>
+                <ul className="space-y-2 list-disc list-inside text-slate-600">
+                  <li><strong className="text-slate-900">Project Owners</strong> have complete administrative control, full telemetry visibility, and can invite/remove members.</li>
+                  <li><strong className="text-slate-900">Members (Editors)</strong> can upload/transcribe files, bookmark notes, and view their own telemetry only.</li>
+                  <li><strong className="text-slate-900">Viewers</strong> have secure read-only access to transcripts and general project analytics.</li>
                 </ul>
               </div>
             </div>

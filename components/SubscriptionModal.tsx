@@ -181,7 +181,10 @@ const SubscriptionModal: React.FC<SubscriptionModalProps> = ({ isOpen, onClose, 
 
                         <div className="mb-6 flex items-center gap-3">
                           <div className={`p-2 rounded-xl ${plan.highlighted ? 'bg-white/10' : 'bg-brand-background'}`}>
-                            {plan.icon}
+                            {plan.highlighted 
+                              ? React.cloneElement(plan.icon as React.ReactElement, { className: '!text-[#D7B6FF]' })
+                              : plan.icon
+                            }
                           </div>
                           <h3 className="text-sm font-black uppercase tracking-[0.15em]">{plan.name}</h3>
                         </div>
@@ -201,7 +204,7 @@ const SubscriptionModal: React.FC<SubscriptionModalProps> = ({ isOpen, onClose, 
                         <div className="space-y-3 mb-8 flex-1">
                           {plan.features.map((feature, i) => (
                             <div key={i} className="flex items-start gap-2">
-                              <div className={`shrink-0 mt-0.5 ${plan.highlighted ? 'text-echo-accent' : 'text-brand-primary'}`}>
+                              <div className={`shrink-0 mt-0.5 ${plan.highlighted ? '!text-[#D7B6FF]' : 'text-brand-primary'}`}>
                                 <Check size={12} />
                               </div>
                               <span className={`text-[11px] font-semibold text-left leading-tight ${plan.highlighted ? 'text-white/90' : 'text-slate-600'}`}>
