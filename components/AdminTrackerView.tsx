@@ -154,14 +154,18 @@ export const AdminTrackerView: React.FC<AdminTrackerViewProps> = ({ userProfile,
   const fetchData = async () => {
     setRefreshing(true);
     setErrorStatus(null);
+    let firestoreLoaded = false;
     try {
-      // 1. Fetch userCostAnalytics
+      // 1. Try fetching from Firestore collections
       const uCostSnap = await getDocs(collection(db, 'userCostAnalytics'));
       const uCostList: UserCostAnalytic[] = [];
       uCostSnap.forEach((doc) => {
         uCostList.push({ id: doc.id, ...doc.data() } as UserCostAnalytic);
       });
-      setUserCostAnalytics(uCostList);
+      if (uCostList.length > 0) {
+        setUserCostAnalytics(uCostList);
+        firestoreLoaded = true;
+      }
 
       // 2. Fetch rich userAnalytics
       const uRichSnap = await getDocs(collection(db, 'userAnalytics'));
@@ -169,7 +173,7 @@ export const AdminTrackerView: React.FC<AdminTrackerViewProps> = ({ userProfile,
       uRichSnap.forEach((doc) => {
         uRichList.push({ id: doc.id, ...doc.data() } as UserAnalytic);
       });
-      setUserAnalytics(uRichList);
+      if (uRichList.length > 0) setUserAnalytics(uRichList);
 
       // 3. Fetch teamAnalytics
       const teamSnap = await getDocs(collection(db, 'teamAnalytics'));
@@ -177,7 +181,7 @@ export const AdminTrackerView: React.FC<AdminTrackerViewProps> = ({ userProfile,
       teamSnap.forEach((doc) => {
         teamList.push({ id: doc.id, ...doc.data() } as TeamAnalytic);
       });
-      setTeamAnalytics(teamList);
+      if (teamList.length > 0) setTeamAnalytics(teamList);
 
       // 4. Fetch monthlyAnalytics
       const monthSnap = await getDocs(collection(db, 'monthlyAnalytics'));
@@ -185,7 +189,7 @@ export const AdminTrackerView: React.FC<AdminTrackerViewProps> = ({ userProfile,
       monthSnap.forEach((doc) => {
         monthList.push({ id: doc.id, ...doc.data() } as MonthlyAnalytic);
       });
-      setMonthlyAnalytics(monthList.sort((a, b) => b.month.localeCompare(a.month)));
+      if (monthList.length > 0) setMonthlyAnalytics(monthList.sort((a, b) => b.month.localeCompare(a.month)));
 
       // 5. Fetch featureAnalytics
       const featSnap = await getDocs(collection(db, 'featureAnalytics'));
@@ -193,7 +197,7 @@ export const AdminTrackerView: React.FC<AdminTrackerViewProps> = ({ userProfile,
       featSnap.forEach((doc) => {
         featList.push({ id: doc.id, ...doc.data() } as FeatureAnalytic);
       });
-      setFeatureAnalytics(featList);
+      if (featList.length > 0) setFeatureAnalytics(featList);
 
       // 6. Fetch recent logs
       const logsSnap = await getDocs(query(collection(db, 'aiUsageLogs'), orderBy('timestamp', 'desc'), limit(150)));
@@ -201,19 +205,46 @@ export const AdminTrackerView: React.FC<AdminTrackerViewProps> = ({ userProfile,
       logsSnap.forEach((doc) => {
         logsList.push({ id: doc.id, ...doc.data() } as AIUsageLog);
       });
-      setLogs(logsList);
+      if (logsList.length > 0) setLogs(logsList);
 
       if (onAnalyticsUpdate) {
         onAnalyticsUpdate();
       }
 
     } catch (err: any) {
-      console.error("Error loading secure backend analytics:", err);
-      setErrorStatus(err.message || "Failed to load secure database tables. Verify you have administrator role.");
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
+      console.warn("Direct Firestore analytics query notice, falling back to server API:", err);
     }
+
+    // Fallback or augment with server-side aggregated telemetry if Firestore is empty/restricted
+    if (!firestoreLoaded) {
+      try {
+        const [overviewRes, logsRes] = await Promise.all([
+          fetch('/api/admin/analytics/overview'),
+          fetch('/api/admin/analytics/logs?limit=150')
+        ]);
+        if (overviewRes.ok) {
+          const overviewJson = await overviewRes.json();
+          if (overviewJson.data) {
+            if (overviewJson.data.userCostAnalytics?.length) setUserCostAnalytics(overviewJson.data.userCostAnalytics);
+            if (overviewJson.data.userAnalytics?.length) setUserAnalytics(overviewJson.data.userAnalytics);
+            if (overviewJson.data.teamAnalytics?.length) setTeamAnalytics(overviewJson.data.teamAnalytics);
+            if (overviewJson.data.monthlyAnalytics?.length) setMonthlyAnalytics(overviewJson.data.monthlyAnalytics);
+            if (overviewJson.data.featureAnalytics?.length) setFeatureAnalytics(overviewJson.data.featureAnalytics);
+          }
+        }
+        if (logsRes.ok) {
+          const logsJson = await logsRes.json();
+          if (logsJson.logs?.length) {
+            setLogs(logsJson.logs);
+          }
+        }
+      } catch (apiErr: any) {
+        console.error("Error fetching analytics from server API:", apiErr);
+      }
+    }
+
+    setLoading(false);
+    setRefreshing(false);
   };
 
   useEffect(() => {

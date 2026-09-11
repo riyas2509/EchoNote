@@ -1,10 +1,11 @@
 
 import React, { useState, useMemo, useEffect, useRef } from 'react';
-import { AudioToTextRecord, TextToAudioRecord, TranscriptSegment, ReadStatus, CollaborationRole, PlaybackMetadata, PlaybackStatus, Bookmark, AuthStatus, UserProfile, Project, UsageStats, StrategicAnalysis, UnifiedMeetingIntelligence, ExecutionTracker, OrgRole } from '../types';
+import { AudioToTextRecord, TextToAudioRecord, TranscriptSegment, ReadStatus, CollaborationRole, PlaybackMetadata, PlaybackStatus, Bookmark, AuthStatus, UserProfile, Project, UsageStats, StrategicAnalysis, UnifiedMeetingIntelligence, ExecutionTracker, OrgRole, ProductEventName } from '../types';
 import { executeDownload, generateTranscriptBlob } from '../services/downloadService';
 import { analyzeStrategically, processUnifiedMeetingIntelligence } from '../services/geminiService';
 import { PLAN_FEATURES } from '../config/planConfig';
 import { db, collection, query, where, getDocs, onSnapshot } from '../firebase';
+import { trackProductEvent, trackDecisionRetrieved } from '../services/productAnalyticsService';
 import MeetingIntelligenceView from './MeetingIntelligenceView';
 import ExecutionTrackerView from './ExecutionTrackerView';
 import SmartReminderView from './SmartReminderView';
@@ -96,6 +97,41 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
   const [isAnalyzing, setIsAnalyzing] = useState<string | null>(null);
   const [expandedTextIds, setExpandedTextIds] = useState<Set<string>>(new Set());
   const isGuest = usageStats.mode === 'guest';
+  const searchDebounceRef = useRef<any>(null);
+
+  // Track History Archive Viewed
+  useEffect(() => {
+    trackProductEvent({
+      eventName: ProductEventName.HISTORY_VIEWED,
+      userId: userProfile?.uid,
+      plan: usageStats.plan,
+      entityType: 'history',
+      source: 'history_dashboard'
+    });
+  }, [userProfile?.uid]);
+
+  // Track Archive Search
+  useEffect(() => {
+    if (!searchQuery?.trim()) return;
+    if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+
+    searchDebounceRef.current = setTimeout(() => {
+      trackProductEvent({
+        eventName: ProductEventName.DECISION_SEARCHED,
+        userId: userProfile?.uid,
+        plan: usageStats.plan,
+        entityType: 'search',
+        source: 'history_dashboard',
+        metadata: {
+          searchQueryLength: searchQuery.trim().length
+        }
+      });
+    }, 600);
+
+    return () => {
+      if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+    };
+  }, [searchQuery, userProfile?.uid]);
 
   // Sync projectFilter with filterGroup prop
   useEffect(() => {
@@ -116,10 +152,10 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
       </div>
       <div className="space-y-1">
         <h4 className="text-sm font-bold text-purple-900">
-          {isGuest ? "Not Available in Guest Mode" : "Thinking Engine Limit Reached"}
+          {isGuest ? "Not Available in Guest Mode" : "AI Requests Limit Reached"}
         </h4>
         <p className="text-xs text-purple-700">
-          {isGuest ? "Please log in to access the Thinking Engine." : "You have reached your thinking engine limit for this month."}
+          {isGuest ? "Please log in to access AI Requests." : "You have reached your AI Requests limit for this month."}
         </p>
       </div>
     </div>
@@ -614,8 +650,17 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
   const toggleStrategicAnalysis = (id: string) => {
     setExpandedStrategicAnalysisIds(prev => {
       const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+        // NORTH STAR: Verified Decision Retrieval from organizational memory
+        trackDecisionRetrieved({
+          userId: userProfile?.uid,
+          entityId: id,
+          source: 'history_dashboard'
+        });
+      }
       return next;
     });
   };
@@ -623,8 +668,17 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
   const toggleIntelligence = (id: string) => {
     setExpandedIntelligenceIds(prev => {
       const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+        // NORTH STAR: Verified Decision Retrieval from organizational memory
+        trackDecisionRetrieved({
+          userId: userProfile?.uid,
+          entityId: id,
+          source: 'history_dashboard'
+        });
+      }
       return next;
     });
   };
@@ -670,8 +724,8 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
 
     if (!checkThinkingLimit()) {
       addNotification({
-        title: 'Thinking Limit Reached',
-        message: 'You have reached your Thinking Engine limit for this month.',
+        title: 'AI Requests Limit Reached',
+        message: 'You have reached your AI Requests limit for this month.',
         type: 'error'
       });
       return;
@@ -724,8 +778,8 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
 
     if (!checkThinkingLimit()) {
       addNotification({
-        title: 'Thinking Limit Reached',
-        message: 'You have reached your Thinking Engine limit for this month.',
+        title: 'AI Requests Limit Reached',
+        message: 'You have reached your AI Requests limit for this month.',
         type: 'error'
       });
       return;

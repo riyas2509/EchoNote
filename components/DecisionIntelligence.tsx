@@ -2,11 +2,13 @@
 import React, { useState } from 'react';
 import { Brain, Sparkles, Copy, RotateCcw, FileText, Lightbulb, AlertTriangle, HelpCircle, CheckCircle, ArrowRight, ChevronDown, Lock } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { AudioToTextRecord, AuthStatus, UserProfile, DecisionIntelligenceResult } from '../types';
+import { AudioToTextRecord, AuthStatus, UserProfile, DecisionIntelligenceResult, ProductEventName } from '../types';
 import { analyzeDecisionIntelligence } from '../services/geminiService';
 import { db, collection, addDoc, serverTimestamp, OperationType, handleFirestoreError, doc, updateDoc, increment } from '../firebase';
 import { PLAN_FEATURES } from '../config/planConfig';
 import UnresolvedTopicsDetector from './UnresolvedTopicsDetector';
+import { logAction } from '../services/auditService';
+import { trackProductEvent, trackDecisionSaved } from '../services/productAnalyticsService';
 
 interface DecisionIntelligenceProps {
   audioHistory: AudioToTextRecord[];
@@ -17,6 +19,8 @@ interface DecisionIntelligenceProps {
   checkThinkingLimit: () => boolean;
   incrementThinkingUsage: () => Promise<void>;
   onLogActivity?: (projectId: string, actionType: any, description: string) => Promise<void>;
+  orgId?: string;
+  orgName?: string;
 }
 
 const DecisionIntelligence: React.FC<DecisionIntelligenceProps> = ({
@@ -27,7 +31,9 @@ const DecisionIntelligence: React.FC<DecisionIntelligenceProps> = ({
   initialInput,
   checkThinkingLimit,
   incrementThinkingUsage,
-  onLogActivity
+  onLogActivity,
+  orgId,
+  orgName
 }) => {
   const [inputType, setInputType] = useState<'transcript' | 'summary'>(initialInput?.type || 'transcript');
   const [inputText, setInputText] = useState(initialInput?.text || '');
@@ -48,6 +54,15 @@ const DecisionIntelligence: React.FC<DecisionIntelligenceProps> = ({
     }
     
     setIsAnalyzing(true);
+    trackProductEvent({
+      eventName: ProductEventName.INTELLIGENCE_ANALYSIS_STARTED,
+      userId: userProfile.uid,
+      organizationId: orgId,
+      plan: userProfile.plan,
+      entityType: 'decision',
+      source: inputType
+    });
+
     try {
       const data = await analyzeDecisionIntelligence(
         inputText, 
@@ -58,6 +73,28 @@ const DecisionIntelligence: React.FC<DecisionIntelligenceProps> = ({
       );
       await incrementThinkingUsage();
       setResult(data);
+
+      trackProductEvent({
+        eventName: ProductEventName.INTELLIGENCE_ANALYSIS_COMPLETED,
+        userId: userProfile.uid,
+        organizationId: orgId,
+        plan: userProfile.plan,
+        entityType: 'decision',
+        source: inputType,
+        metadata: {
+          decisionCount: data.keyDecisions?.length || 0,
+          actionCount: data.nextActions?.length || 0
+        }
+      });
+
+      trackProductEvent({
+        eventName: ProductEventName.DECISION_VIEWED,
+        userId: userProfile.uid,
+        organizationId: orgId,
+        plan: userProfile.plan,
+        entityType: 'decision',
+        source: inputType
+      });
 
       // Save to Decision History
       const title = inputText.split(/\s+/).slice(0, 10).join(' ') + (inputText.split(/\s+/).length > 10 ? '...' : '');
@@ -72,18 +109,24 @@ const DecisionIntelligence: React.FC<DecisionIntelligenceProps> = ({
 
       try {
         // Atomic update of usage count and save history
-        await Promise.all([
-          addDoc(collection(db, 'decisionHistory'), {
-            userId: userProfile.uid,
-            title,
-            inputType,
-            inputText,
-            output: data,
-            projectId: decisionProjectId,
-            projectName: decisionProjectName,
-            createdAt: serverTimestamp()
-          })
-        ]);
+        const docRef = await addDoc(collection(db, 'decisionHistory'), {
+          userId: userProfile.uid,
+          title,
+          inputType,
+          inputText,
+          output: data,
+          projectId: decisionProjectId,
+          projectName: decisionProjectName,
+          createdAt: serverTimestamp()
+        });
+
+        trackDecisionSaved({
+          userId: userProfile.uid,
+          organizationId: orgId,
+          entityId: docRef.id,
+          source: inputType,
+          decisionCount: data.keyDecisions?.length || 1
+        });
 
         if (onLogActivity) {
           const uName = userProfile.displayName || userProfile.email.split('@')[0] || 'Someone';
@@ -92,6 +135,16 @@ const DecisionIntelligence: React.FC<DecisionIntelligenceProps> = ({
             'generate_decision',
             `${uName} generated Decision Intelligence for "${title}"`
           );
+        }
+
+        if (orgId) {
+          await logAction(orgId, {
+            action: 'Decision Intelligence Generated',
+            actor: userProfile?.email || 'Someone',
+            project: decisionProjectName || 'Global',
+            details: `Generated strategic analysis/decision for "${title}" using type "${inputType}".`,
+            organizationName: orgName
+          });
         }
       } catch (saveError) {
         handleFirestoreError(saveError, OperationType.WRITE, 'decisionHistory/users');

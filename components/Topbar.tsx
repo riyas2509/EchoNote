@@ -67,16 +67,21 @@ const Topbar: React.FC<TopbarProps> = ({
 
       <div className="flex items-center space-x-3 md:space-x-6">
         <div 
-          onClick={isFreePlan ? onOpenUpgrade : undefined}
-          className={`hidden md:flex items-center space-x-2 px-4 py-2 rounded-lg shadow-sm border transition-all ${
-            isFreePlan 
-              ? 'bg-[#F3F4FB] text-[#4F5B93] border-[#E8EAF3] cursor-pointer hover:bg-brand-background hover:scale-105 active:scale-95' 
-              : 'bg-emerald-50 text-emerald-700 border-emerald-100'
-          }`}
+          onClick={onOpenUpgrade}
+          className="hidden md:flex items-center space-x-2 px-4 py-2 rounded-lg shadow-sm border cursor-pointer transition-all hover:scale-105 active:scale-95 bg-[#F3F4FB] text-[#4F5B93] border-[#E8EAF3] hover:bg-brand-background"
         >
-          <i className={`fa-solid ${isFreePlan ? 'fa-crown' : 'fa-check-circle'} text-[10px]`}></i>
+          <i className="fa-solid fa-crown text-[10px]"></i>
           <span className="text-[11px] font-black uppercase tracking-[0.15em]">
-            {usageStats.plan === 'guest' ? 'GUEST' : (isFreePlan ? 'Upgrade' : 'Pro')}
+            {(() => {
+              const plan = (userProfile?.plan || usageStats.plan || 'free').toLowerCase();
+              if (plan === 'pro' || plan === 'team') {
+                return 'Manage Plan';
+              } else if (plan === 'enterprise') {
+                return 'Manage Enterprise';
+              } else {
+                return 'Upgrade';
+              }
+            })()}
           </span>
         </div>
 

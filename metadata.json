@@ -1,7 +1,10 @@
 {
   "name": "EchoNote",
-  "description": "EchoNote is a premium AI audio intelligence platform featuring advanced multi-speaker transcription, natural conversation replay, and high-fidelity text-to-speech synthesis.",
+  "description": "EchoNote turns important conversations into searchable decisions, context, ownership, and follow-through, giving teams a persistent organizational memory.",
   "requestFramePermissions": [
     "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
   ]
 } 

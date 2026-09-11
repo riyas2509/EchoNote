@@ -4,6 +4,7 @@ import { useFirebase } from '../components/FirebaseProvider';
 import { motion, AnimatePresence } from 'motion/react';
 import { ArrowRight, UserPlus, CheckCircle2, AlertCircle, Loader2, Folder, Shield, XCircle, Clock, Home, X } from 'lucide-react';
 import { db, doc, getDoc, setDoc, updateDoc, serverTimestamp, collection, addDoc } from '../firebase';
+import { apiFetch } from '../lib/apiClient';
 
 interface InviteDetails {
   id: string;
@@ -48,7 +49,7 @@ const JoinPage: React.FC = () => {
       } catch (err: any) {
         console.warn('Direct client Firestore fetch failed, trying fallback API:', err.message);
         try {
-          const response = await fetch(`/api/invite-details/${token}`);
+          const response = await apiFetch(`/api/invite-details/${token}`);
           if (!response.ok) {
             const data = await response.json();
             throw new Error(data.error || 'Failed to load invitation');
@@ -110,13 +111,11 @@ const JoinPage: React.FC = () => {
       });
 
       // 4. Trigger server API (ignoring server-side write failures because client already did it)
-      const response = await fetch('/api/invite-accept', {
+      const response = await apiFetch('/api/invite-accept', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           token: invite.id,
-          userId: user.uid,
-          userEmail: user.email,
           userDisplayName: user.displayName || user.email?.split('@')[0] || 'User'
         })
       });
@@ -157,12 +156,11 @@ const JoinPage: React.FC = () => {
       });
 
       // 3. Trigger server API for background tracking (ignoring failure because client wrote first)
-      await fetch('/api/invite-decline', {
+      await apiFetch('/api/invite-decline', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          token: invite.id,
-          userId: user?.uid || null
+          token: invite.id
         })
       });
 

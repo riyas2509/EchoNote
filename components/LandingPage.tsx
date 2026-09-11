@@ -1,4 +1,10 @@
 
+/**
+ * @deprecated
+ * Legacy landing page component. 
+ * Canonical "/" public homepage is rendered via `pages/Home.tsx`.
+ * Retained for backwards compatibility reference.
+ */
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 

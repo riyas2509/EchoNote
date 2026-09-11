@@ -8,6 +8,10 @@ export interface CalculatedUsage {
   percentage: number;
   isExceeded: boolean;
   remaining: number;
+  monthlyUsed: number;
+  monthlyLimit: number;
+  topupBalance: number;
+  monthlyPercentage: number;
 }
 
 export interface CalculatedThinkingUsage {
@@ -15,6 +19,10 @@ export interface CalculatedThinkingUsage {
   limit: number | 'unlimited';
   percentage: number;
   isExceeded: boolean;
+  monthlyUsed: number;
+  monthlyLimit: number | 'unlimited';
+  topupBalance: number;
+  monthlyPercentage: number;
 }
 
 export function getMinutesUsage(user: UserProfile | UsageStats): CalculatedUsage {
@@ -25,7 +33,7 @@ export function getMinutesUsage(user: UserProfile | UsageStats): CalculatedUsage
   const baseLimit = features.totalMinutesLimit;
   
   // Extra minutes from top-ups
-  const extraMinutes = user.extraMinutes || 0;
+  const extraMinutes = user.minuteTopupBalance ?? user.extraMinutes ?? 0;
   
   const limit = baseLimit + extraMinutes;
   
@@ -37,12 +45,22 @@ export function getMinutesUsage(user: UserProfile | UsageStats): CalculatedUsage
     used = (user as UserProfile).minutesUsed;
   }
 
+  const monthlyLimit = user.monthlyMinuteLimit ?? baseLimit;
+  const monthlyUsed = user.monthlyMinutesUsed ?? used;
+  const topupBalance = user.minuteTopupBalance ?? user.extraMinutes ?? 0;
+
+  const isExceeded = (monthlyUsed >= monthlyLimit) && (topupBalance <= 0);
+
   return {
     used,
     limit,
     percentage: Math.min((used / (limit || 1)) * 100, 100),
-    isExceeded: used > limit,
-    remaining: Math.max(0, limit - used)
+    isExceeded,
+    remaining: Math.max(0, limit - used),
+    monthlyUsed,
+    monthlyLimit,
+    topupBalance,
+    monthlyPercentage: Math.min((monthlyUsed / (monthlyLimit || 1)) * 100, 100),
   };
 }
 
@@ -60,6 +78,10 @@ export function getThinkingUsage(user: UserProfile | UsageStats): CalculatedThin
     used = (user as UserProfile).thinkingUsed;
   }
 
+  const monthlyLimit = user.monthlyThinkingLimit ?? limit;
+  const monthlyUsed = user.monthlyThinkingUsed ?? used;
+  const topupBalance = user.thinkingTopupBalance ?? 0;
+
   let percentage = 0;
   let isExceeded = false;
 
@@ -68,14 +90,20 @@ export function getThinkingUsage(user: UserProfile | UsageStats): CalculatedThin
     isExceeded = false;
   } else {
     percentage = Math.min((used / (limit || 1)) * 100, 100);
-    isExceeded = used > limit;
+    isExceeded = (monthlyUsed >= (monthlyLimit as number)) && (topupBalance <= 0);
   }
+
+  const monthlyPercentage = monthlyLimit === 'unlimited' ? 0 : Math.min((monthlyUsed / (monthlyLimit as number || 1)) * 100, 100);
 
   return {
     used,
     limit,
     percentage,
-    isExceeded
+    isExceeded,
+    monthlyUsed,
+    monthlyLimit,
+    topupBalance,
+    monthlyPercentage,
   };
 }
 

@@ -11,6 +11,7 @@ import DecisionIntelligence from './components/DecisionIntelligence';
 import DecisionHistory from './components/DecisionHistory';
 import HistoryDashboard from './components/HistoryDashboard';
 import { AdminTrackerView } from './components/AdminTrackerView';
+import { ProductAnalyticsView } from './components/ProductAnalyticsView';
 import GlobalPlayer from './components/GlobalPlayer';
 import LandingNavbar from './components/LandingNavbar';
 import LandingFooter from './components/LandingFooter';
@@ -35,6 +36,8 @@ import { Toaster } from 'sonner';
 import { auth, db, collection, query, where, getDocs, onSnapshot, doc, setDoc, updateDoc, deleteDoc, orderBy, handleFirestoreError, OperationType, serverTimestamp, getDoc, increment, addDoc } from './firebase';
 import { summarizeTranscript, analyzeDecisionIntelligence, analyzeStrategically } from './services/geminiService';
 import { getMinutesUsage, getThinkingUsage, formatRefreshDate } from './lib/usageUtils';
+import { logAction } from './services/auditService';
+import { apiFetch } from './lib/apiClient';
 
 const ScrollToTop = () => {
   const { pathname } = useLocation();
@@ -235,23 +238,32 @@ const App: React.FC = () => {
   }, [userProfile, addNotification]);
 
   const incrementThinkingUsage = useCallback(async () => {
-    if (authStatus === AuthStatus.LOGGED_IN && user) {
+    if (authStatus === AuthStatus.LOGGED_IN && user && userProfile) {
       const userRef = doc(db, 'users', user.uid);
       
       try {
-        const tier = userProfile?.plan || 'free';
-        const limit = PLAN_FEATURES[tier].thinkingLimit;
-        const currentUsage = userProfile?.thinkingUsed || 0;
+        const tier = userProfile.plan || 'free';
+        const limit = userProfile.monthlyThinkingLimit ?? PLAN_FEATURES[tier].thinkingLimit;
+        const currentUsage = userProfile.monthlyThinkingUsed ?? userProfile.thinkingUsed ?? 0;
+        const topupBalance = userProfile.thinkingTopupBalance ?? 0;
 
-        console.log("Thinking usage check:", currentUsage, "/", limit);
-
-        if (limit !== 'unlimited' && currentUsage >= (limit as number)) {
+        if (limit === 'unlimited') {
+          await updateDoc(userRef, { 
+            monthlyThinkingUsed: increment(1),
+            thinkingUsed: increment(1)
+          });
+        } else if (currentUsage < (limit as number)) {
+          await updateDoc(userRef, { 
+            monthlyThinkingUsed: increment(1),
+            thinkingUsed: increment(1)
+          });
+        } else if (topupBalance > 0) {
+          await updateDoc(userRef, { 
+            thinkingTopupBalance: increment(-1)
+          });
+        } else {
           throw new Error("❌ Thinking limit exceeded");
         }
-
-        await updateDoc(userRef, { 
-          thinkingUsed: increment(1)
-        });
         
         console.log("✅ Thinking usage incremented");
       } catch (error) {
@@ -266,12 +278,32 @@ const App: React.FC = () => {
   }, [authStatus, user, userProfile]);
 
   const incrementTranscriptionUsage = useCallback(async (minutes: number) => {
-    if (authStatus === AuthStatus.LOGGED_IN && user) {
+    if (authStatus === AuthStatus.LOGGED_IN && user && userProfile) {
       const userRef = doc(db, 'users', user.uid);
       
       try {
-        await updateDoc(userRef, { 
-          minutesUsed: increment(minutes)
+        const tier = userProfile.plan || 'free';
+        const monthlyLimit = userProfile.monthlyMinuteLimit ?? PLAN_FEATURES[tier].totalMinutesLimit;
+        const monthlyUsed = userProfile.monthlyMinutesUsed ?? userProfile.minutesUsed ?? 0;
+        const topupBalance = userProfile.minuteTopupBalance ?? userProfile.extraMinutes ?? 0;
+
+        let newMonthlyUsed = monthlyUsed;
+        let newTopupBalance = topupBalance;
+
+        const availableMonthly = Math.max(0, monthlyLimit - monthlyUsed);
+        if (minutes <= availableMonthly) {
+          newMonthlyUsed += minutes;
+        } else {
+          newMonthlyUsed = monthlyLimit;
+          const remainder = minutes - availableMonthly;
+          newTopupBalance = Math.max(0, topupBalance - remainder);
+        }
+
+        await updateDoc(userRef, {
+          monthlyMinutesUsed: newMonthlyUsed,
+          minutesUsed: increment(minutes),
+          minuteTopupBalance: newTopupBalance,
+          extraMinutes: newTopupBalance
         });
         
         console.log("✅ Transcription usage incremented by:", minutes);
@@ -284,13 +316,34 @@ const App: React.FC = () => {
         usedMinutes: prev.usedMinutes + minutes
       }));
     }
-  }, [authStatus, user]);
+  }, [authStatus, user, userProfile]);
 
   const deductMinutes = useCallback(async (minutes: number) => {
-    if (authStatus === AuthStatus.LOGGED_IN && user) {
+    if (authStatus === AuthStatus.LOGGED_IN && user && userProfile) {
+      const userRef = doc(db, 'users', user.uid);
       try {
-        await updateDoc(doc(db, 'users', user.uid), { 
-          minutesUsed: increment(minutes) 
+        const tier = userProfile.plan || 'free';
+        const monthlyLimit = userProfile.monthlyMinuteLimit ?? PLAN_FEATURES[tier].totalMinutesLimit;
+        const monthlyUsed = userProfile.monthlyMinutesUsed ?? userProfile.minutesUsed ?? 0;
+        const topupBalance = userProfile.minuteTopupBalance ?? userProfile.extraMinutes ?? 0;
+
+        let newMonthlyUsed = monthlyUsed;
+        let newTopupBalance = topupBalance;
+
+        const availableMonthly = Math.max(0, monthlyLimit - monthlyUsed);
+        if (minutes <= availableMonthly) {
+          newMonthlyUsed += minutes;
+        } else {
+          newMonthlyUsed = monthlyLimit;
+          const remainder = minutes - availableMonthly;
+          newTopupBalance = Math.max(0, topupBalance - remainder);
+        }
+
+        await updateDoc(userRef, {
+          monthlyMinutesUsed: newMonthlyUsed,
+          minutesUsed: increment(minutes),
+          minuteTopupBalance: newTopupBalance,
+          extraMinutes: newTopupBalance
         });
       } catch (error) {
         handleFirestoreError(error, OperationType.UPDATE, `users/${user.uid}`);
@@ -301,7 +354,7 @@ const App: React.FC = () => {
         usedMinutes: prev.usedMinutes + minutes
       }));
     }
-  }, [authStatus, user]);
+  }, [authStatus, user, userProfile]);
   
   const [audioHistory, setAudioHistory] = useState<AudioToTextRecord[]>([]);
   const [loadingArchive, setLoadingArchive] = useState(false);
@@ -853,12 +906,22 @@ const App: React.FC = () => {
           'upload_file',
           `${uName} uploaded recording "${record.fileName || 'Audio'}"`
         );
+
+        if (currentOrg) {
+          await logAction(currentOrg.id, {
+            action: 'Transcript Generated',
+            actor: user.email || 'Someone',
+            project: groupName,
+            details: `Completed AI Transcription for recording "${record.fileName || 'Audio'}" (${record.transcript.length} lines transcribed).`,
+            organizationName: currentOrg.name
+          });
+        }
       } catch (error) {
         console.error("❌ Failed to save record:", error);
         handleFirestoreError(error, OperationType.WRITE, `recordings/${record.id}`);
       }
     }
-  }, [authStatus, user, projects, userProfile, logProjectActivity]);
+  }, [authStatus, user, projects, userProfile, logProjectActivity, currentOrg]);
 
   const saveTextRecord = useCallback(async (record: TextToAudioRecord) => {
     console.log("💾 Saving synthesis record to archive...", record.id);
@@ -1080,6 +1143,17 @@ const App: React.FC = () => {
         try {
           await setDoc(doc(db, 'projects', id), newProject);
           setLastCreatedProjectId(id);
+
+          if (currentOrg) {
+            await logAction(currentOrg.id, {
+              action: 'Project Created',
+              actor: user?.email || 'Someone',
+              project: name,
+              details: `Created new collaboration project: "${name}" owned by ${user?.email || 'Someone'}.`,
+              organizationName: currentOrg.name
+            });
+          }
+
           return id;
         } catch (error) {
           handleFirestoreError(error, OperationType.WRITE, `projects/${id}`);
@@ -1114,6 +1188,16 @@ const App: React.FC = () => {
     if (project && authStatus === AuthStatus.LOGGED_IN) {
       try {
         await deleteDoc(doc(db, 'projects', project.id));
+
+        if (currentOrg) {
+          await logAction(currentOrg.id, {
+            action: 'Project Deleted',
+            actor: user?.email || 'Someone',
+            project: name,
+            details: `Deleted project: "${name}" and all associated metadata.`,
+            organizationName: currentOrg.name
+          });
+        }
       } catch (error) {
         handleFirestoreError(error, OperationType.DELETE, `projects/${project.id}`);
       }
@@ -1151,8 +1235,7 @@ const App: React.FC = () => {
 
       await setDoc(doc(db, "invites", inviteToken), inviteData);
 
-      const baseUrl = import.meta.env.VITE_API_URL || "";
-      const response = await fetch(`${baseUrl}/api/invite-member`, {
+      const response = await apiFetch('/api/invite-member', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1160,7 +1243,6 @@ const App: React.FC = () => {
           role,
           projectId: project.id,
           projectName: project.name,
-          invitedBy: user.email,
           ownerId: project.userId,
           inviteToken // pass the client-generated token
         })
@@ -1293,6 +1375,7 @@ const App: React.FC = () => {
             incrementThinkingUsage={incrementThinkingUsage}
             incrementTranscriptionUsage={incrementTranscriptionUsage}
             userOrgRole={userOrgRole}
+            onNavigateToHistory={() => setCurrentTab(AppWorkflow.DECISION_HISTORY)}
           />
         );
       case AppWorkflow.TEXT_TO_AUDIO:
@@ -1325,6 +1408,8 @@ const App: React.FC = () => {
             checkThinkingLimit={checkThinkingLimit}
             incrementThinkingUsage={incrementThinkingUsage}
             onLogActivity={logProjectActivity}
+            orgId={currentOrg?.id}
+            orgName={currentOrg?.name}
           />
         );
       case AppWorkflow.DECISION_HISTORY:
@@ -1406,6 +1491,17 @@ const App: React.FC = () => {
           );
         }
         return <AdminTrackerView userProfile={userProfile} onAnalyticsUpdate={handleAnalyticsUpdate} />;
+      case AppWorkflow.PRODUCT_ANALYTICS:
+        if (userProfile?.role !== 'admin') {
+          return (
+            <div className="flex flex-col items-center justify-center h-full text-center p-8">
+              <i className="fa-solid fa-triangle-exclamation text-red-500 text-4xl mb-4"></i>
+              <h1 className="text-xl font-bold">Access Denied</h1>
+              <p className="text-slate-500">You must be an administrator to view PMF Telemetry.</p>
+            </div>
+          );
+        }
+        return <ProductAnalyticsView userProfile={userProfile} onBack={() => setCurrentTab(AppWorkflow.HOME)} />;
       case AppWorkflow.COLLABORATION_DASHBOARD:
         return (
           <CollaborationDashboard 
@@ -1743,7 +1839,7 @@ const App: React.FC = () => {
               const record = audioHistory.find(r => r.id === activeRecordId);
               if (record) {
                 handleReuseDecision(record.transcript, 'transcript');
-                addToast('AI Action', 'Running thinking engine...', 'info');
+                addToast('AI Action', 'Processing AI request...', 'info');
               }
             } else {
               addToast('AI Action', 'Please select a file first.', 'error');

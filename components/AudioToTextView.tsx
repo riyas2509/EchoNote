@@ -1,13 +1,15 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { MessageSquareOff, ArrowRight, AlertTriangle } from 'lucide-react';
+import FirstValueActivation from './FirstValueActivation';
 import UnresolvedTopicsDetector from './UnresolvedTopicsDetector';
 import MeetingIntelligenceView from './MeetingIntelligenceView';
 import ExecutionTrackerView from './ExecutionTrackerView';
 import SmartReminderView from './SmartReminderView';
 import { transcribeAudio, summarizeTranscript, analyzeStrategically, processUnifiedMeetingIntelligence } from '../services/geminiService';
 import { uploadAudioToStorage } from '../services/recordingService';
+import { getApiUrl } from '../lib/apiClient';
 import { PLAN_FEATURES } from '../config/planConfig';
-import { getMinutesUsage, getThinkingUsage } from '../lib/usageUtils';
+import { getMinutesUsage, getThinkingUsage, formatRefreshDate } from '../lib/usageUtils';
 import { executeDownload, generateTranscriptBlob } from '../services/downloadService';
 import { AudioToTextRecord, TranscriptSegment, AuthStatus, UserProfile, Bookmark, SpeakerMapping, CollaborationRole, PlaybackMetadata, PlaybackStatus, CallSummary, UsageStats, Project, ExecutionTracker, OrgRole } from '../types';
 
@@ -37,22 +39,19 @@ interface AudioToTextViewProps {
   incrementThinkingUsage: () => Promise<void>;
   incrementTranscriptionUsage: (minutes: number) => Promise<void>;
   userOrgRole?: OrgRole;
+  onNavigateToHistory?: () => void;
 }
 
 const AudioToTextView: React.FC<AudioToTextViewProps> = ({ 
   onSave, groups, projects, onAddGroup, onInviteToProject, authStatus, userProfile, onNewProject, lastCreatedProjectId,
   activePlaybackId, activePlaybackSegIdx, playbackStatus, onPlay, onPause, onStop,
   addNotification, usageStats, onDeductMinutes, onSignInClick, searchTerm = '',
-  checkThinkingLimit, checkTranscriptionLimit, incrementThinkingUsage, incrementTranscriptionUsage, userOrgRole
+  checkThinkingLimit, checkTranscriptionLimit, incrementThinkingUsage, incrementTranscriptionUsage, userOrgRole,
+  onNavigateToHistory
 }) => {
   const isGuest = usageStats.plan === 'guest';
   const isFree = usageStats.plan === 'free';
   const isPro = usageStats.plan === 'pro';
-
-  const getApiUrl = (path: string) => {
-    const baseUrl = import.meta.env.VITE_API_URL || "";
-    return `${baseUrl}${path}`;
-  };
 
   const checkPermission = (record: AudioToTextRecord, action: 'edit' | 'delete') => {
     if (userOrgRole === 'super_admin' || userOrgRole === 'org_admin') return true;
@@ -393,7 +392,8 @@ const AudioToTextView: React.FC<AudioToTextViewProps> = ({
         reader.readAsDataURL(audioBlob);
       });
       
-      const { transcript, qualityScore, summary } = await transcribeAudio(b64, 'audio/webm', liveLanguage);
+      const audioMime = audioBlob.type || 'audio/webm';
+      const { transcript, qualityScore, summary } = await transcribeAudio(b64, audioMime, liveLanguage, 'live_recording.webm');
       await incrementTranscriptionUsage(estimatedMinutes);
       
       // Show module selection modal instead of auto-processing
@@ -405,11 +405,12 @@ const AudioToTextView: React.FC<AudioToTextViewProps> = ({
         estimatedMinutes,
         isLive: true
       });
-    } catch (e) {
+    } catch (e: any) {
+      const errorMsg = e?.message || 'Transcription service temporarily unavailable. Please try again or check connection.';
       setLiveQueue(prev => prev.map(item => item.id === newLiveRecord.id ? { 
         ...item, 
         status: 'error', 
-        errorMessage: 'Transcription service temporarily unavailable. Please try again or upload a smaller audio file.' 
+        errorMessage: errorMsg 
       } : item));
     } finally {
       setIsFinalizingLive(false);
@@ -631,7 +632,7 @@ const AudioToTextView: React.FC<AudioToTextViewProps> = ({
 
       setRecordedQueue(prev => prev.map(r => r.id === id ? { ...r, status: 'processing', processingStep: "Generating intelligence summary..." } : r));
       
-      const { transcript, qualityScore, summary } = await transcribeAudio(b64, file.type, strategy);
+      const { transcript, qualityScore, summary } = await transcribeAudio(b64, file.type, strategy, file.name);
       await incrementTranscriptionUsage(estimatedMinutes);
       
       // Show module selection modal instead of auto-processing
@@ -644,15 +645,16 @@ const AudioToTextView: React.FC<AudioToTextViewProps> = ({
         isLive: false
       });
     } catch (e: any) {
+      const errorMsg = e?.message || "Transcription service temporarily unavailable. Please try again or upload a smaller audio file.";
       setRecordedQueue(prev => prev.map(r => r.id === id ? { 
         ...r, 
         status: 'error', 
-        errorMessage: "Transcription service temporarily unavailable. Please try again or upload a smaller audio file." 
+        errorMessage: errorMsg 
       } : r));
       
       addNotification({
         title: "Intelligence Failure",
-        message: `Analysis for "${record.fileName}" failed. Please check the error details.`,
+        message: errorMsg,
         recordId: id,
         type: 'audio'
       });
@@ -900,30 +902,51 @@ const AudioToTextView: React.FC<AudioToTextViewProps> = ({
 
   if (subWorkflow === 'selection') {
     return (
-      <div className="flex flex-col items-center space-y-8 md:space-y-12 py-6 md:py-12 animate-in fade-in h-full justify-center">
-        <div className="text-center space-y-2 md:space-y-3">
-          <h1 className="text-brand-primary tracking-tight text-[38px] font-semibold">Intelligence Module</h1>
-          <p className="text-slate-600 font-normal max-w-lg mx-auto text-sm md:text-base px-4">Select your transcription workflow for multi-speaker analysis.</p>
-        </div>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 md:gap-10 w-full max-w-4xl px-4">
-          <button 
-            onClick={() => authStatus === AuthStatus.GUEST ? setUsageError("Live transcription is not available in Guest Mode. Please create an account to unlock.") : setSubWorkflow('live')} 
-            className={`group bg-white p-8 md:p-12 rounded-lg shadow-sm border border-brand-divider/20 text-left hover:shadow-xl transition-all ${authStatus === AuthStatus.GUEST ? 'opacity-40 grayscale-[0.8]' : ''}`}
-          >
-            <div className="w-12 h-12 md:w-14 md:h-14 bg-brand-primary/5 rounded-lg flex items-center justify-center mb-6 md:mb-8 group-hover:bg-brand-primary transition-colors">
-              <i className="fa-solid fa-tower-broadcast text-brand-primary group-hover:text-white text-lg md:text-xl animate-pulse"></i>
-            </div>
-            <div className="flex items-center gap-3 mb-2">
-              <h2 className="text-brand-primary text-[26px] font-medium">Live transcription</h2>
-              {authStatus === AuthStatus.GUEST && <i className="fa-solid fa-lock text-slate-300 text-sm"></i>}
-            </div>
-            <p className="text-slate-500 text-xs md:text-sm leading-relaxed font-normal">Secure real-time internal capture with on-the-fly speaker segmentation.</p>
-          </button>
-          <button onClick={() => setSubWorkflow('recorded')} className="group bg-white p-8 md:p-12 rounded-lg shadow-sm border border-brand-divider/20 text-left hover:shadow-xl transition-all">
-            <div className="w-12 h-12 md:w-14 md:h-14 bg-brand-primary/5 rounded-lg flex items-center justify-center mb-6 md:mb-8 group-hover:bg-brand-primary transition-colors"><i className="fa-solid fa-file-audio text-brand-primary group-hover:text-white text-lg md:text-xl"></i></div>
-            <h2 className="text-brand-primary mb-2 text-[26px] font-medium">Recorded assets</h2>
-            <p className="text-slate-500 text-xs md:text-sm leading-relaxed font-normal">High-fidelity processing. All audio formats are supported except MP4 format.</p>
-          </button>
+      <div className="space-y-6">
+        <FirstValueActivation
+          authStatus={authStatus}
+          userProfile={userProfile}
+          usageStats={usageStats}
+          onSaveRecord={(rec) => {
+            onSave(rec);
+            // Also append to recorded queue if needed
+            setRecordedQueue(prev => [rec, ...prev.filter(r => r.id !== rec.id)]);
+          }}
+          onNavigateToHistory={() => {
+            if (onNavigateToHistory) {
+              onNavigateToHistory();
+            } else {
+              setSubWorkflow('recorded');
+            }
+          }}
+          onSignInClick={onSignInClick}
+          checkThinkingLimit={checkThinkingLimit}
+          checkTranscriptionLimit={checkTranscriptionLimit}
+          incrementThinkingUsage={incrementThinkingUsage}
+          incrementTranscriptionUsage={incrementTranscriptionUsage}
+          addNotification={addNotification}
+          onRecordSavedCallback={(rec) => {
+            setActiveTab('recorded');
+          }}
+        />
+
+        {/* Secondary options for power users */}
+        <div className="pt-6 border-t border-slate-200/80 flex flex-col sm:flex-row items-center justify-between gap-4 text-xs text-slate-500">
+          <p className="font-medium">Need advanced multi-file batch queues or project routing?</p>
+          <div className="flex items-center space-x-3">
+            <button
+              onClick={() => setSubWorkflow('recorded')}
+              className="px-3.5 py-1.5 bg-white border border-slate-200 text-slate-700 hover:text-slate-900 hover:bg-slate-50 font-semibold rounded-lg transition-all cursor-pointer"
+            >
+              Batch Queue Manager
+            </button>
+            <button
+              onClick={() => authStatus === AuthStatus.GUEST ? setUsageError("Live transcription is not available in Guest Mode. Please create an account to unlock.") : setSubWorkflow('live')}
+              className="px-3.5 py-1.5 bg-white border border-slate-200 text-slate-700 hover:text-slate-900 hover:bg-slate-50 font-semibold rounded-lg transition-all cursor-pointer"
+            >
+              Live Recording Studio
+            </button>
+          </div>
         </div>
       </div>
     );
@@ -1026,6 +1049,18 @@ const AudioToTextView: React.FC<AudioToTextViewProps> = ({
           <div className="text-center space-y-2">
             <h2 className="text-white text-2xl font-medium tracking-tight">Finalizing Intelligence</h2>
             <p className="text-brand-accent/60 text-[11px] font-medium uppercase tracking-[0.2em] animate-pulse">Synthesizing multi-speaker discourse...</p>
+          </div>
+        </div>
+      )}
+
+      {minutesUsage.isExceeded && (
+        <div className="bg-red-50 border border-red-200 text-red-800 p-4 rounded-2xl flex items-start gap-3 shadow-sm mb-6 animate-in fade-in slide-in-from-top-2 duration-300">
+          <AlertTriangle className="text-red-500 shrink-0 mt-0.5" size={18} />
+          <div className="text-left space-y-1">
+            <h4 className="text-sm font-bold tracking-tight">Transcription Limits Exceeded</h4>
+            <p className="text-xs text-red-700 font-medium">
+              You've exceeded your {usageStats.plan.charAt(0).toUpperCase() + usageStats.plan.slice(1)} Plan limit. Your usage will reset on <span className="font-bold">{formatRefreshDate(userProfile?.nextRefreshDate)}</span>, or you can upgrade at any time.
+            </p>
           </div>
         </div>
       )}

@@ -2,7 +2,7 @@
 import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
-import { Crown } from 'lucide-react';
+import { Crown, Settings, Building2, CreditCard } from 'lucide-react';
 import { AppWorkflow, AuthStatus, UserProfile, AppNotification, UsageStats, Project, CollaborationRole, OrgRole } from '../types';
 import { PLAN_FEATURES } from '../config/planConfig';
 import { db, collection, query, where, getDocs, onSnapshot } from '../firebase';
@@ -113,6 +113,7 @@ const Navigation: React.FC<NavigationProps> = ({
 
   if (userProfile?.role === 'admin') {
     tabs.push({ id: AppWorkflow.ADMIN_TRACKER, label: 'Admin Cost Tracker', icon: 'fa-shield' });
+    tabs.push({ id: AppWorkflow.PRODUCT_ANALYTICS, label: 'PMF & Telemetry', icon: 'fa-chart-line' });
   }
 
   const isTabLocked = (tabId: AppWorkflow) => {
@@ -463,38 +464,51 @@ const Navigation: React.FC<NavigationProps> = ({
               <div className="flex justify-between text-[10px] font-black uppercase tracking-[0.2em] text-white/40">
                 <span>Transcription</span>
                 <span className="text-yellow-400">
-                  {Math.round(minutesUsage.percentage)}% used
+                  {Math.round(minutesUsage.monthlyPercentage)}% used
                 </span>
               </div>
 
               <div className="w-full h-2 bg-white/5 rounded-full overflow-hidden">
                 <div 
                   className="h-full bg-yellow-400 transition-all duration-1000 ease-out shadow-[0_0_10px_rgba(250,204,21,0.4)]"
-                  style={{ width: `${minutesUsage.percentage}%` }}
+                  style={{ width: `${minutesUsage.monthlyPercentage}%` }}
                 />
               </div>
 
-              <div className="flex justify-between items-center">
-                <div className="text-[11px] text-white/60 font-bold">
-                  {minutesUsage.used} / {minutesUsage.limit} minutes used
-                </div>
-                {minutesUsage.isExceeded && (
-                  <div className="text-[9px] text-yellow-400 font-bold animate-pulse">
-                    Limit exceeded
+              <div className="space-y-1">
+                <div className="flex justify-between items-center">
+                  <div className="text-[11px] text-white/60 font-bold">
+                    Monthly: {minutesUsage.monthlyUsed} / {minutesUsage.monthlyLimit} mins
                   </div>
-                )}
+                  {minutesUsage.isExceeded && (
+                    <div className="text-[9px] text-yellow-400 font-bold animate-pulse">
+                      Limit exceeded
+                    </div>
+                  )}
+                </div>
+                <div className="text-[10px] text-[#00D1FF] font-black uppercase tracking-wider">
+                  Top-Up: {minutesUsage.topupBalance} mins
+                </div>
               </div>
+
+              {minutesUsage.isExceeded && (
+                <div className="bg-red-500/10 border border-red-500/20 rounded-xl p-3 text-left space-y-1 mt-2 animate-in fade-in duration-300">
+                  <p className="text-[10px] text-red-300 font-medium leading-relaxed font-sans">
+                    You've exceeded your <span className="uppercase font-bold">{usageStats.plan}</span> Plan limit. Your usage will reset on <span className="font-bold">{formatRefreshDate(userProfile?.nextRefreshDate)}</span>, or you can upgrade at any time.
+                  </p>
+                </div>
+              )}
             </div>
 
             {/* Thinking Engine Section */}
             <div className="space-y-3 pt-2 border-t border-white/5">
               <div className="flex justify-between text-[10px] font-black uppercase tracking-[0.2em] text-white/40">
-                <span>Thinking Engine</span>
+                <span>AI Requests</span>
                 <span className="text-purple-400">
                   {isGuestMode ? (
                     "NOT AVAILABLE IN GUEST MODE"
                   ) : (
-                    `${Math.round(thinkingUsageRes.percentage)}% used`
+                    `${Math.round(thinkingUsageRes.monthlyPercentage)}% used`
                   )}
                 </span>
               </div>
@@ -502,37 +516,65 @@ const Navigation: React.FC<NavigationProps> = ({
               <div className="w-full h-2 bg-white/5 rounded-full overflow-hidden">
                 <div 
                   className="h-full bg-purple-500 transition-all duration-1000 ease-out shadow-[0_0_10px_rgba(168,85,247,0.4)]"
-                  style={{ width: `${thinkingUsageRes.percentage}%` }}
+                  style={{ width: `${thinkingUsageRes.monthlyPercentage}%` }}
                 />
               </div>
 
-              <div className="flex justify-between items-center">
-                <div className="text-[11px] text-white/60 font-bold">
-                  {!isGuestMode && (
-                    `${thinkingUsageRes.used} / ${thinkingUsageRes.limit === 'unlimited' ? '∞' : thinkingUsageRes.limit} used`
+              <div className="space-y-1">
+                <div className="flex justify-between items-center">
+                  <div className="text-[11px] text-white/60 font-bold">
+                    {!isGuestMode && (
+                      `Monthly: ${thinkingUsageRes.monthlyUsed} / ${thinkingUsageRes.monthlyLimit === 'unlimited' ? '∞' : thinkingUsageRes.monthlyLimit}`
+                    )}
+                  </div>
+                  {!isGuestMode && thinkingUsageRes.isExceeded && (
+                    <div className="text-[9px] text-purple-400 font-bold animate-pulse">
+                      Limit exceeded
+                    </div>
                   )}
                 </div>
-                {!isGuestMode && thinkingUsageRes.isExceeded && (
-                  <div className="text-[9px] text-purple-400 font-bold animate-pulse">
-                    Limit exceeded
+                {!isGuestMode && (
+                  <div className="text-[10px] text-[#00D1FF] font-black uppercase tracking-wider">
+                    Top-Up: {thinkingUsageRes.topupBalance} AI Requests
                   </div>
                 )}
               </div>
             </div>
 
-            {/* Upgrade Warning & Reset Date */}
+            {/* Upgrade/Manage Subscription button */}
             <div className="pt-2 space-y-3">
-              {userProfile?.plan !== 'pro' && (
-                <button 
-                  onClick={onOpenUpgrade}
-                  className="w-full p-2.5 rounded-lg bg-echo-accent/10 border border-echo-accent/20 text-center hover:bg-echo-accent transition-all group"
-                >
-                  <p className="text-[10px] text-brand-primary font-black uppercase tracking-widest flex items-center justify-center gap-2">
-                    <Crown size={12} className="text-brand-primary" />
-                    <span>Upgrade</span>
-                  </p>
-                </button>
-              )}
+              <button 
+                onClick={onOpenUpgrade}
+                className="w-full p-2.5 rounded-lg bg-echo-accent/10 border border-echo-accent/20 text-center hover:bg-echo-accent transition-all group"
+              >
+                <p className="text-[10px] text-brand-primary font-black uppercase tracking-widest flex items-center justify-center gap-2">
+                  {(() => {
+                    const plan = (userProfile?.plan || 'free').toLowerCase();
+                    if (plan === 'pro' || plan === 'team') {
+                      return (
+                        <>
+                          <CreditCard size={12} className="text-brand-primary" />
+                          <span>Manage Plan</span>
+                        </>
+                      );
+                    } else if (plan === 'enterprise') {
+                      return (
+                        <>
+                          <Building2 size={12} className="text-brand-primary" />
+                          <span>Manage Enterprise</span>
+                        </>
+                      );
+                    } else {
+                      return (
+                        <>
+                          <Crown size={12} className="text-brand-primary" />
+                          <span>Upgrade</span>
+                        </>
+                      );
+                    }
+                  })()}
+                </p>
+              </button>
               
               <div className="pt-2 text-center text-[10px] text-white/30 font-bold uppercase tracking-widest leading-[1.4]">
                 <div className="opacity-50 text-[9px]">Refreshes On</div>

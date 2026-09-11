@@ -8,18 +8,23 @@ import { calculateCost } from "./geminiPricing.js";
 
 let dbInstance: admin.firestore.Firestore | null = null;
 
-export function getDb(): admin.firestore.Firestore {
-  if (!dbInstance) {
-    const firebaseConfig = JSON.parse(
-      fs.readFileSync(path.join(process.cwd(), "firebase-applet-config.json"), "utf8")
-    );
-    const appAdmin = !getApps().length
-      ? initializeApp({
-          credential: admin.credential.applicationDefault(),
-          projectId: process.env.GOOGLE_CLOUD_PROJECT || firebaseConfig.projectId || "echonote-2509",
-        })
-      : getApps()[0];
-    dbInstance = getFirestore(appAdmin, firebaseConfig.firestoreDatabaseId);
+export function getDb(): admin.firestore.Firestore | null {
+  try {
+    if (!dbInstance) {
+      const firebaseConfigPath = path.join(process.cwd(), "firebase-applet-config.json");
+      if (fs.existsSync(firebaseConfigPath)) {
+        const firebaseConfig = JSON.parse(fs.readFileSync(firebaseConfigPath, "utf8"));
+        const appAdmin = !getApps().length
+          ? initializeApp({
+              credential: admin.credential.applicationDefault(),
+              projectId: firebaseConfig.projectId || process.env.GOOGLE_CLOUD_PROJECT || "echonote-2509",
+            })
+          : getApps()[0];
+        dbInstance = getFirestore(appAdmin, firebaseConfig.firestoreDatabaseId);
+      }
+    }
+  } catch (err) {
+    console.warn("[aiTracker] Firebase Admin init notice:", err);
   }
   return dbInstance;
 }
@@ -49,14 +54,70 @@ export const SUB_REVENUE_MAPPING: Record<string, number> = {
   "enterprise": 120.00
 };
 
+// In-Memory & File-backed Store for robust analytics persistence
+interface LocalUsageStore {
+  logs: any[];
+  userCostAnalytics: Record<string, any>;
+  userAnalytics: Record<string, any>;
+  teamAnalytics: Record<string, any>;
+  monthlyAnalytics: Record<string, any>;
+  featureAnalytics: Record<string, any>;
+}
+
+const STORE_PATH = path.join(process.cwd(), "data", "ai_usage_store.json");
+
+function loadStore(): LocalUsageStore {
+  try {
+    if (fs.existsSync(STORE_PATH)) {
+      return JSON.parse(fs.readFileSync(STORE_PATH, "utf8"));
+    }
+  } catch (e) {
+    // ignore read error
+  }
+  return {
+    logs: [],
+    userCostAnalytics: {},
+    userAnalytics: {},
+    teamAnalytics: {},
+    monthlyAnalytics: {},
+    featureAnalytics: {}
+  };
+}
+
+let storeMemory: LocalUsageStore = loadStore();
+
+function saveStore(): void {
+  try {
+    const dir = path.dirname(STORE_PATH);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    fs.writeFileSync(STORE_PATH, JSON.stringify(storeMemory, null, 2), "utf8");
+  } catch (e) {
+    // ignore write error
+  }
+}
+
+export function getAiUsageOverview() {
+  return {
+    userCostAnalytics: Object.values(storeMemory.userCostAnalytics),
+    userAnalytics: Object.values(storeMemory.userAnalytics),
+    teamAnalytics: Object.values(storeMemory.teamAnalytics),
+    monthlyAnalytics: Object.values(storeMemory.monthlyAnalytics).sort((a: any, b: any) => b.month.localeCompare(a.month)),
+    featureAnalytics: Object.values(storeMemory.featureAnalytics)
+  };
+}
+
+export function getRecentAiUsageLogs(maxCount: number = 100) {
+  return storeMemory.logs.slice(-maxCount).reverse();
+}
+
 /**
  * Tracks AI resource usage and updates granular logs, user aggregates,
  * team/project metrics, feature balances, and monthly snapshots.
- * Zero-read writes utilizing set with merge & native increments to guarantee high scale.
  */
 export async function trackAIUsage(payload: AIUsagePayload): Promise<void> {
   try {
-    const db = getDb();
     const { 
       userId, 
       email, 
@@ -71,17 +132,13 @@ export async function trackAIUsage(payload: AIUsagePayload): Promise<void> {
       minutesUsed
     } = payload;
     
-    console.log("TRACKING STARTED");
-    console.log("TRACKING USER", userId);
-    console.log("TRACKING FEATURE", featureName);
-    
     // 1. Core Pricing calculations
     const estimatedCost = calculateCost(modelUsed, inputTokens, outputTokens);
     const totalTokens = inputTokens + outputTokens;
-    const timestampVal = FieldValue.serverTimestamp();
+    const nowIso = new Date().toISOString();
     const requestId = crypto.randomUUID();
 
-    // 2. Map user to dynamic Team & Organization (respecting company corporate domains)
+    // 2. Map user to dynamic Team & Organization
     const normalizedEmail = (email || "anonymous@echotechai.in").toLowerCase();
     const emailDomain = normalizedEmail.split('@')[1] || 'generic';
     const isCompanyDomain = !['gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'aol.com', 'mail.com', 'icloud.com'].includes(emailDomain);
@@ -99,23 +156,20 @@ export async function trackAIUsage(payload: AIUsagePayload): Promise<void> {
 
     // 3. Compute subscription and topup revenue
     const subscriptionRevenue = SUB_REVENUE_MAPPING[plan] || 0;
-    // Assume average top-up values if present (e.g. extra minutes tracked or we can sync it)
-    const topupRevenue = 0.00; // Updated when payments happen. We keep a field for aggregate
+    const topupRevenue = 0.00;
     const lifetimeRevenue = subscriptionRevenue + topupRevenue;
 
-    // Feature minutes classification
     let featureMinutes = minutesUsed || 0;
     if (!featureMinutes && (featureName === "Intelligence Transcription" || featureName === "Live Transcription" || featureName === "Uploaded Audio Analysis")) {
-      // If none set, let's estimate 1.5 minutes per audio AI processing request as standard baseline
       featureMinutes = 1.5;
     }
 
-    // 4. Initialize Database References & Batch
-    const batch = db.batch();
+    const now = new Date();
+    const monthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    const featureSlug = featureName.replace(/\s+/g, '_').toLowerCase();
 
-    // A. aiUsageLogs doc
-    const logRef = db.collection("aiUsageLogs").doc(requestId);
-    batch.set(logRef, {
+    // Log payload
+    const logItem = {
       id: requestId,
       requestId,
       userId,
@@ -132,100 +186,251 @@ export async function trackAIUsage(payload: AIUsagePayload): Promise<void> {
       requestDuration,
       status,
       errorMessage: errorMessage || null,
-      timestamp: timestampVal,
-      createdAt: timestampVal
-    });
+      timestamp: nowIso,
+      createdAt: nowIso
+    };
 
-    // B. userCostAnalytics doc (compat with Admin Dashboard UI)
-    const userCostAnalyticsRef = db.collection("userCostAnalytics").doc(userId);
-    batch.set(userCostAnalyticsRef, {
+    // 4. Update In-Memory & Local File Store
+    storeMemory.logs.push(logItem);
+    if (storeMemory.logs.length > 2000) {
+      storeMemory.logs = storeMemory.logs.slice(-2000);
+    }
+
+    // User Cost Analytics
+    const prevCost = storeMemory.userCostAnalytics[userId] || {
+      id: userId,
       userId,
       email: normalizedEmail,
       plan: plan || "free",
-      totalRequests: FieldValue.increment(1),
-      totalInputTokens: FieldValue.increment(inputTokens),
-      totalOutputTokens: FieldValue.increment(outputTokens),
-      totalTokens: FieldValue.increment(totalTokens),
-      totalEstimatedCost: FieldValue.increment(estimatedCost),
-      lastUpdated: timestampVal
-    }, { merge: true });
+      totalRequests: 0,
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+      totalTokens: 0,
+      totalEstimatedCost: 0,
+      lastUpdated: nowIso
+    };
+    storeMemory.userCostAnalytics[userId] = {
+      ...prevCost,
+      totalRequests: prevCost.totalRequests + 1,
+      totalInputTokens: prevCost.totalInputTokens + inputTokens,
+      totalOutputTokens: prevCost.totalOutputTokens + outputTokens,
+      totalTokens: prevCost.totalTokens + totalTokens,
+      totalEstimatedCost: prevCost.totalEstimatedCost + estimatedCost,
+      lastUpdated: nowIso
+    };
 
-    // C. userAnalytics doc (rich extended profile metrics requested)
-    const userAnalyticsRef = db.collection("userAnalytics").doc(userId);
-    batch.set(userAnalyticsRef, {
+    // Rich User Analytics
+    const prevUser = storeMemory.userAnalytics[userId] || {
+      id: userId,
       userId,
       email: normalizedEmail,
       displayName: normalizedEmail.split('@')[0],
       plan: plan || "free",
-      transcriptionMinutesUsed: FieldValue.increment(featureMinutes),
-      intelligenceRequestsUsed: FieldValue.increment(1),
-      totalAIRequests: FieldValue.increment(1),
-      totalInputTokens: FieldValue.increment(inputTokens),
-      totalOutputTokens: FieldValue.increment(outputTokens),
-      totalTokens: FieldValue.increment(totalTokens),
-      totalAICost: FieldValue.increment(estimatedCost),
-      monthlyAICost: FieldValue.increment(estimatedCost),
-      lifetimeAICost: FieldValue.increment(estimatedCost),
+      transcriptionMinutesUsed: 0,
+      intelligenceRequestsUsed: 0,
+      totalAIRequests: 0,
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+      totalTokens: 0,
+      totalAICost: 0,
+      monthlyAICost: 0,
+      lifetimeAICost: 0,
       subscriptionRevenue: subscriptionRevenue,
-      topupRevenue: FieldValue.increment(topupRevenue),
-      lifetimeRevenue: FieldValue.increment(lifetimeRevenue),
-      revenueMinusCost: FieldValue.increment(lifetimeRevenue - estimatedCost),
-      lastActiveAt: timestampVal,
-      [`featureUsageBreakdown.${featureName.replace(/\s+/g, '_')}`]: FieldValue.increment(1)
-    }, { merge: true });
+      topupRevenue: 0,
+      lifetimeRevenue: 0,
+      revenueMinusCost: 0,
+      lastActiveAt: nowIso,
+      featureUsageBreakdown: {}
+    };
+    const featureBreakdown = { ...(prevUser.featureUsageBreakdown || {}) };
+    featureBreakdown[featureSlug] = (featureBreakdown[featureSlug] || 0) + 1;
+    storeMemory.userAnalytics[userId] = {
+      ...prevUser,
+      transcriptionMinutesUsed: prevUser.transcriptionMinutesUsed + featureMinutes,
+      intelligenceRequestsUsed: prevUser.intelligenceRequestsUsed + 1,
+      totalAIRequests: prevUser.totalAIRequests + 1,
+      totalInputTokens: prevUser.totalInputTokens + inputTokens,
+      totalOutputTokens: prevUser.totalOutputTokens + outputTokens,
+      totalTokens: prevUser.totalTokens + totalTokens,
+      totalAICost: prevUser.totalAICost + estimatedCost,
+      monthlyAICost: prevUser.monthlyAICost + estimatedCost,
+      lifetimeAICost: prevUser.lifetimeAICost + estimatedCost,
+      subscriptionRevenue,
+      topupRevenue: prevUser.topupRevenue + topupRevenue,
+      lifetimeRevenue: prevUser.lifetimeRevenue + lifetimeRevenue,
+      revenueMinusCost: prevUser.revenueMinusCost + (lifetimeRevenue - estimatedCost),
+      lastActiveAt: nowIso,
+      featureUsageBreakdown: featureBreakdown
+    };
 
-    // D. teamAnalytics doc
-    const teamAnalyticsRef = db.collection("teamAnalytics").doc(teamId);
-    batch.set(teamAnalyticsRef, {
+    // Team Analytics
+    const prevTeam = storeMemory.teamAnalytics[teamId] || {
+      id: teamId,
       teamId,
       teamName,
       organizationId,
-      totalMembers: FieldValue.increment(1), // Estimated increment representing unique member touches
-      totalMinutesUsed: FieldValue.increment(featureMinutes),
-      totalInputTokens: FieldValue.increment(inputTokens),
-      totalOutputTokens: FieldValue.increment(outputTokens),
-      totalTokens: FieldValue.increment(totalTokens),
-      totalAIRequests: FieldValue.increment(1),
-      totalAICost: FieldValue.increment(estimatedCost),
-      totalRevenue: FieldValue.increment(plan === 'team' ? 30.00 : 0.00),
-      profitability: FieldValue.increment((plan === 'team' ? 30.00 : 0.00) - estimatedCost)
-    }, { merge: true });
+      totalMembers: 1,
+      totalMinutesUsed: 0,
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+      totalTokens: 0,
+      totalAIRequests: 0,
+      totalAICost: 0,
+      totalRevenue: 0,
+      profitability: 0
+    };
+    storeMemory.teamAnalytics[teamId] = {
+      ...prevTeam,
+      totalMinutesUsed: prevTeam.totalMinutesUsed + featureMinutes,
+      totalInputTokens: prevTeam.totalInputTokens + inputTokens,
+      totalOutputTokens: prevTeam.totalOutputTokens + outputTokens,
+      totalTokens: prevTeam.totalTokens + totalTokens,
+      totalAIRequests: prevTeam.totalAIRequests + 1,
+      totalAICost: prevTeam.totalAICost + estimatedCost,
+      totalRevenue: prevTeam.totalRevenue + (plan === 'team' ? 30.00 : 0.00),
+      profitability: prevTeam.profitability + ((plan === 'team' ? 30.00 : 0.00) - estimatedCost)
+    };
 
-    // E. Monthly aggregates (e.g. "2026-05")
-    const now = new Date();
-    const monthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-    const monthlyRef = db.collection("monthlyAnalytics").doc(monthKey);
-    batch.set(monthlyRef, {
+    // Monthly Analytics
+    const prevMonth = storeMemory.monthlyAnalytics[monthKey] || {
+      id: monthKey,
       month: monthKey,
-      totalUsers: FieldValue.increment(1), // Estimator of dynamic metrics
-      activeUsers: FieldValue.increment(1),
-      totalMinutes: FieldValue.increment(featureMinutes),
-      totalInputTokens: FieldValue.increment(inputTokens),
-      totalOutputTokens: FieldValue.increment(outputTokens),
-      totalTokens: FieldValue.increment(totalTokens),
-      totalAISpend: FieldValue.increment(estimatedCost),
-      totalRevenue: FieldValue.increment(subscriptionRevenue),
-      profitEstimate: FieldValue.increment(subscriptionRevenue - estimatedCost)
-    }, { merge: true });
+      totalUsers: 1,
+      activeUsers: 1,
+      totalMinutes: 0,
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+      totalTokens: 0,
+      totalAISpend: 0,
+      totalRevenue: 0,
+      profitEstimate: 0
+    };
+    storeMemory.monthlyAnalytics[monthKey] = {
+      ...prevMonth,
+      totalMinutes: prevMonth.totalMinutes + featureMinutes,
+      totalInputTokens: prevMonth.totalInputTokens + inputTokens,
+      totalOutputTokens: prevMonth.totalOutputTokens + outputTokens,
+      totalTokens: prevMonth.totalTokens + totalTokens,
+      totalAISpend: prevMonth.totalAISpend + estimatedCost,
+      totalRevenue: prevMonth.totalRevenue + subscriptionRevenue,
+      profitEstimate: prevMonth.profitEstimate + (subscriptionRevenue - estimatedCost)
+    };
 
-    // F. Feature Analytics Aggregators
-    const featureSlug = featureName.replace(/\s+/g, '_').toLowerCase();
-    const featureRef = db.collection("featureAnalytics").doc(featureSlug);
-    batch.set(featureRef, {
+    // Feature Analytics
+    const prevFeature = storeMemory.featureAnalytics[featureSlug] || {
+      id: featureSlug,
       featureName,
-      totalRequests: FieldValue.increment(1),
-      totalInputTokens: FieldValue.increment(inputTokens),
-      totalOutputTokens: FieldValue.increment(outputTokens),
-      totalTokens: FieldValue.increment(totalTokens),
-      totalAICost: FieldValue.increment(estimatedCost),
-      totalResponseTime: FieldValue.increment(requestDuration)
-    }, { merge: true });
+      totalRequests: 0,
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+      totalTokens: 0,
+      totalAICost: 0,
+      totalResponseTime: 0
+    };
+    storeMemory.featureAnalytics[featureSlug] = {
+      ...prevFeature,
+      totalRequests: prevFeature.totalRequests + 1,
+      totalInputTokens: prevFeature.totalInputTokens + inputTokens,
+      totalOutputTokens: prevFeature.totalOutputTokens + outputTokens,
+      totalTokens: prevFeature.totalTokens + totalTokens,
+      totalAICost: prevFeature.totalAICost + estimatedCost,
+      totalResponseTime: prevFeature.totalResponseTime + requestDuration
+    };
 
-    // Commit everything atomically
-    await batch.commit();
-    console.log("TRACKING SUCCESS");
-    console.log(`[aiTracker] Fully tracked and aggregated usage for ${normalizedEmail} (${featureName}) - Cost: $${estimatedCost.toFixed(6)}`);
+    saveStore();
+
+    // 5. Attempt Cloud Firestore persistence if available
+    const db = getDb();
+    if (db) {
+      try {
+        const batch = db.batch();
+        const timestampVal = FieldValue.serverTimestamp();
+
+        batch.set(db.collection("aiUsageLogs").doc(requestId), {
+          ...logItem,
+          timestamp: timestampVal,
+          createdAt: timestampVal
+        });
+
+        batch.set(db.collection("userCostAnalytics").doc(userId), {
+          userId,
+          email: normalizedEmail,
+          plan: plan || "free",
+          totalRequests: FieldValue.increment(1),
+          totalInputTokens: FieldValue.increment(inputTokens),
+          totalOutputTokens: FieldValue.increment(outputTokens),
+          totalTokens: FieldValue.increment(totalTokens),
+          totalEstimatedCost: FieldValue.increment(estimatedCost),
+          lastUpdated: timestampVal
+        }, { merge: true });
+
+        batch.set(db.collection("userAnalytics").doc(userId), {
+          userId,
+          email: normalizedEmail,
+          displayName: normalizedEmail.split('@')[0],
+          plan: plan || "free",
+          transcriptionMinutesUsed: FieldValue.increment(featureMinutes),
+          intelligenceRequestsUsed: FieldValue.increment(1),
+          totalAIRequests: FieldValue.increment(1),
+          totalInputTokens: FieldValue.increment(inputTokens),
+          totalOutputTokens: FieldValue.increment(outputTokens),
+          totalTokens: FieldValue.increment(totalTokens),
+          totalAICost: FieldValue.increment(estimatedCost),
+          monthlyAICost: FieldValue.increment(estimatedCost),
+          lifetimeAICost: FieldValue.increment(estimatedCost),
+          subscriptionRevenue: subscriptionRevenue,
+          topupRevenue: FieldValue.increment(topupRevenue),
+          lifetimeRevenue: FieldValue.increment(lifetimeRevenue),
+          revenueMinusCost: FieldValue.increment(lifetimeRevenue - estimatedCost),
+          lastActiveAt: timestampVal,
+          [`featureUsageBreakdown.${featureSlug}`]: FieldValue.increment(1)
+        }, { merge: true });
+
+        batch.set(db.collection("teamAnalytics").doc(teamId), {
+          teamId,
+          teamName,
+          organizationId,
+          totalMembers: FieldValue.increment(1),
+          totalMinutesUsed: FieldValue.increment(featureMinutes),
+          totalInputTokens: FieldValue.increment(inputTokens),
+          totalOutputTokens: FieldValue.increment(outputTokens),
+          totalTokens: FieldValue.increment(totalTokens),
+          totalAIRequests: FieldValue.increment(1),
+          totalAICost: FieldValue.increment(estimatedCost),
+          totalRevenue: FieldValue.increment(plan === 'team' ? 30.00 : 0.00),
+          profitability: FieldValue.increment((plan === 'team' ? 30.00 : 0.00) - estimatedCost)
+        }, { merge: true });
+
+        batch.set(db.collection("monthlyAnalytics").doc(monthKey), {
+          month: monthKey,
+          totalUsers: FieldValue.increment(1),
+          activeUsers: FieldValue.increment(1),
+          totalMinutes: FieldValue.increment(featureMinutes),
+          totalInputTokens: FieldValue.increment(inputTokens),
+          totalOutputTokens: FieldValue.increment(outputTokens),
+          totalTokens: FieldValue.increment(totalTokens),
+          totalAISpend: FieldValue.increment(estimatedCost),
+          totalRevenue: FieldValue.increment(subscriptionRevenue),
+          profitEstimate: FieldValue.increment(subscriptionRevenue - estimatedCost)
+        }, { merge: true });
+
+        batch.set(db.collection("featureAnalytics").doc(featureSlug), {
+          featureName,
+          totalRequests: FieldValue.increment(1),
+          totalInputTokens: FieldValue.increment(inputTokens),
+          totalOutputTokens: FieldValue.increment(outputTokens),
+          totalTokens: FieldValue.increment(totalTokens),
+          totalAICost: FieldValue.increment(estimatedCost),
+          totalResponseTime: FieldValue.increment(requestDuration)
+        }, { merge: true });
+
+        await batch.commit();
+      } catch (firestoreErr: any) {
+        // Log at debug level only; store is already safely preserved in storeMemory
+        console.log(`[aiTracker] Firestore Admin write bypassed (${firestoreErr?.message || firestoreErr}). In-memory and local persistent store updated.`);
+      }
+    }
   } catch (error) {
-    console.error("❌ Failed to track AI usage on backend:", error);
+    console.warn("[aiTracker] Usage tracking handled with local fallback:", error);
   }
 }

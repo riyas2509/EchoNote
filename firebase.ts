@@ -1,7 +1,7 @@
 
 import { initializeApp } from 'firebase/app';
 import { getAuth, onAuthStateChanged, User } from 'firebase/auth';
-import { initializeFirestore, doc, getDocFromServer, collection, getDocs, onSnapshot, setDoc, updateDoc, deleteDoc, query, where, orderBy, limit, DocumentReference, CollectionReference, Query, getDoc } from 'firebase/firestore';
+import { getFirestore, doc, getDocFromServer, collection, getDocs, onSnapshot, setDoc, updateDoc, deleteDoc, query, where, orderBy, limit, DocumentReference, CollectionReference, Query, getDoc } from 'firebase/firestore';
 import { getStorage } from 'firebase/storage';
 import { getFunctions } from 'firebase/functions';
 
@@ -10,9 +10,7 @@ import firebaseConfig from './firebase-applet-config.json';
 
 // Initialize Firebase SDK
 const app = initializeApp(firebaseConfig);
-export const db = initializeFirestore(app, {
-  experimentalForceLongPolling: true
-}, firebaseConfig.firestoreDatabaseId);
+export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
 export const auth = getAuth(app);
 export const storage = getStorage(app);
 export const functions = getFunctions(app);
@@ -87,7 +85,21 @@ if (db) {
   testConnection();
 }
 
-export { onAuthStateChanged, signOut, createUserWithEmailAndPassword, signInWithEmailAndPassword, sendPasswordResetEmail, updateProfile, signInWithPopup, GoogleAuthProvider, OAuthProvider } from 'firebase/auth';
+export { 
+  onAuthStateChanged, 
+  signOut, 
+  createUserWithEmailAndPassword, 
+  signInWithEmailAndPassword, 
+  sendPasswordResetEmail, 
+  sendEmailVerification, 
+  updateProfile, 
+  signInWithPopup, 
+  signInWithRedirect, 
+  getRedirectResult, 
+  GoogleAuthProvider, 
+  OAuthProvider, 
+  SAMLAuthProvider 
+} from 'firebase/auth';
 export { getFunctions, httpsCallable } from 'firebase/functions';
 export { 
   collection, 

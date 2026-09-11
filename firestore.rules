@@ -13,9 +13,11 @@ service cloud.firestore {
     }
 
     function isAdmin() {
-      return isAuthenticated() && 
-             exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
-             get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin';
+      return isAuthenticated() && (
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin') ||
+        request.auth.token.email == 'riyamshah2509@gmail.com'
+      );
     }
     
     function isOwner(userId) {
@@ -119,6 +121,12 @@ service cloud.firestore {
       allow write: if false; // Only server-side or admin
     }
 
+    // Transactions / Billing History
+    match /transactions/{id} {
+      allow read: if isAuthenticated() && (resource.data.userId == request.auth.uid);
+      allow write: if isAuthenticated() && (request.resource.data.userId == request.auth.uid);
+    }
+
     // Project Activities
     match /projectActivities/{id} {
       allow read: if isAuthenticated();
@@ -126,8 +134,13 @@ service cloud.firestore {
       allow delete: if isAuthenticated() && (resource.data.userId == request.auth.uid || isProjectOwner(resource.data.projectId));
     }
     
-    // Health Check
+    // Health Check & Connection Test
     match /healthcheck/{id} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    match /test/{id} {
       allow read: if true;
       allow write: if false;
     }
@@ -168,26 +181,145 @@ service cloud.firestore {
       allow write: if false;
     }
 
+    // Organization Role & Custom Claims Helpers
+    function hasOrgClaim(orgId) {
+      return isAuthenticated() && request.auth.token.orgId == orgId;
+    }
+
+    function isOrgOwner(orgId) {
+      return isAuthenticated() && (
+        (request.auth.token.orgId == orgId && request.auth.token.orgRole == 'owner') ||
+        (exists(/databases/$(database)/documents/organizations/$(orgId)) && 
+         (get(/databases/$(database)/documents/organizations/$(orgId)).data.ownerId == request.auth.uid ||
+          get(/databases/$(database)/documents/organizations/$(orgId)).data.ownerEmail == request.auth.token.email))
+      );
+    }
+
+    function isOrgAdmin(orgId) {
+      return isAuthenticated() && (
+        isOrgOwner(orgId) ||
+        (request.auth.token.orgId == orgId && (request.auth.token.orgRole in ['org_admin', 'super_admin', 'admin']))
+      );
+    }
+
+    function isOrgManager(orgId) {
+      return isAuthenticated() && (
+        isOrgAdmin(orgId) ||
+        (request.auth.token.orgId == orgId && (request.auth.token.orgRole in ['team_manager', 'team_lead', 'manager']))
+      );
+    }
+
+    function isOrgMember(orgId) {
+      return isAuthenticated() && (
+        isOrgManager(orgId) ||
+        (request.auth.token.orgId == orgId && (request.auth.token.orgRole in ['member', 'viewer', 'guest'])) ||
+        (exists(/databases/$(database)/documents/orgMembers/$(request.auth.uid + "_" + orgId)) && 
+         get(/databases/$(database)/documents/orgMembers/$(request.auth.uid + "_" + orgId)).data.status == 'active')
+      );
+    }
+
     // Organizations
     match /organizations/{orgId} {
-      allow read: if isAuthenticated();
-      allow create: if isAuthenticated() && request.resource.data.ownerEmail == request.auth.token.email;
-      allow update, delete: if isAuthenticated() && resource.data.ownerEmail == request.auth.token.email;
+      allow read: if isAuthenticated() && (
+        isOrgMember(orgId) || 
+        isOrgOwner(orgId) || 
+        resource.data.ownerId == request.auth.uid || 
+        resource.data.ownerEmail == request.auth.token.email
+      );
+      allow create: if isAuthenticated() && (
+        request.resource.data.ownerId == request.auth.uid || 
+        request.resource.data.ownerEmail == request.auth.token.email
+      );
+      allow update: if isAuthenticated() && isOrgAdmin(orgId) && 
+        request.resource.data.ownerId == resource.data.ownerId && 
+        request.resource.data.ownerEmail == resource.data.ownerEmail;
+      allow delete: if isAuthenticated() && isOrgOwner(orgId);
+
+      match /monthlyTrends/{trendId} {
+        allow read: if isOrgAdmin(orgId);
+        allow write: if false; // Server-side admin only
+      }
+
+      match /invoices/{invoiceId} {
+        allow read: if isOrgAdmin(orgId);
+        allow write: if false;
+      }
+
+      match /auditLogs/{logId} {
+        allow read: if isOrgAdmin(orgId);
+        allow write: if false; // Server-side admin only
+      }
+
+      match /integrations/{integrationId} {
+        allow read: if isOrgAdmin(orgId);
+        allow write: if isOrgAdmin(orgId);
+      }
     }
 
     // Teams
     match /teams/{teamId} {
-      allow read, write: if isAuthenticated();
+      allow read: if isAuthenticated() && (isOrgMember(resource.data.orgId) || isOrgOwner(resource.data.orgId));
+      allow create, update, delete: if isAuthenticated() && (
+        isOrgManager(request.resource.data.orgId) || 
+        (resource != null && isOrgManager(resource.data.orgId))
+      );
     }
 
-    // Org Members
+    // Departments
+    match /departments/{deptId} {
+      allow read: if isAuthenticated() && (isOrgMember(resource.data.orgId) || isOrgOwner(resource.data.orgId));
+      allow create, update, delete: if isAuthenticated() && (
+        isOrgAdmin(request.resource.data.orgId) || 
+        (resource != null && isOrgAdmin(resource.data.orgId))
+      );
+    }
+
+    // Org Members (authoritatively managed by server-side Admin SDK)
     match /orgMembers/{memberId} {
-      allow read, write: if isAuthenticated();
+      allow read: if isAuthenticated() && (
+        isOrgMember(resource.data.orgId) || 
+        isOrgOwner(resource.data.orgId) || 
+        resource.data.userId == request.auth.uid || 
+        resource.data.email == request.auth.token.email
+      );
+      allow write: if false; // Role modifications and memberships are issued authoritatively via backend
     }
 
     // Org Invoices
     match /orgInvoices/{invoiceId} {
-      allow read, write: if isAuthenticated();
+      allow read: if isAuthenticated() && isOrgAdmin(resource.data.orgId);
+      allow write: if false;
+    }
+
+    // Org Invitations
+    match /orgInvitations/{inviteId} {
+      allow read: if isAuthenticated() && (
+        isOrgAdmin(resource.data.orgId) || 
+        resource.data.email == request.auth.token.email
+      );
+      allow write: if false; // Invitations are handled authoritatively by backend
+    }
+
+    // Enterprise Identity Group & Attribute Mappings (Phase 1.7)
+    match /orgIdentityMappings/{mappingId} {
+      allow read: if isAuthenticated() && (
+        isOrgAdmin(resource.data.orgId) || 
+        isOrgOwner(resource.data.orgId)
+      );
+      allow write: if false; // Identity mappings are authoritatively managed via backend endpoints
+    }
+
+    // Product Telemetry & Activation Events (Privacy-first, metadata only)
+    match /productEvents/{eventId} {
+      allow read: if isAdmin() || (isAuthenticated() && resource.data.userId == request.auth.uid);
+      allow create: if true; // Allows anonymous and authenticated event tracking
+      allow update, delete: if isAdmin();
+    }
+
+    match /activationEvents/{eventId} {
+      allow read: if isAdmin() || (isAuthenticated() && resource.data.userId == request.auth.uid);
+      allow create: if true;
+      allow update, delete: if isAdmin();
     }
   }
 }

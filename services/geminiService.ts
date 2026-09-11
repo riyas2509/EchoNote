@@ -1,56 +1,96 @@
 import { SubscriptionTier, TranscriptSegment, CallSummary, DecisionIntelligenceResult, StrategicAnalysis, UnifiedMeetingIntelligence } from "../types";
+import { apiFetch, ApiNetworkError } from "../lib/apiClient";
 
 export const transcribeAudio = async (
   base64Data: string, 
   mimeType: string, 
-  targetLanguage: 'original' | 'english' = 'english'
+  targetLanguage: 'original' | 'english' = 'english',
+  fileName?: string
 ): Promise<{ transcript: TranscriptSegment[], qualityScore: number, summary: CallSummary }> => {
-  let processedBase64 = base64Data;
-  let processedMimeType = mimeType;
+  if (!base64Data || base64Data.trim().length === 0) {
+    throw new Error("No audio data provided for transcription.");
+  }
 
-  // Detect OPUS or OGG (often used for OPUS) and convert via backend
-  if (mimeType === 'audio/opus' || mimeType === 'audio/ogg' || mimeType.includes('opus')) {
-    console.log(`[GeminiService] Detected OPUS-compatible audio (${mimeType}). Converting via backend...`);
+  // Normalize MIME type and strip parameter suffixes like ';codecs=opus'
+  let cleanMime = (mimeType || 'audio/webm').trim().toLowerCase();
+  if (cleanMime.includes(';')) {
+    cleanMime = cleanMime.split(';')[0].trim();
+  }
+
+  // Direct supported MIME types for Gemini models
+  const isDirectSupported = [
+    'audio/webm',
+    'audio/ogg',
+    'audio/mp3',
+    'audio/mpeg',
+    'audio/wav',
+    'audio/x-wav',
+    'audio/aac',
+    'audio/flac',
+    'audio/mp4',
+    'audio/m4a'
+  ].includes(cleanMime);
+
+  let processedBase64 = base64Data;
+  let processedMimeType = cleanMime === 'audio/x-wav' ? 'audio/wav' : cleanMime;
+
+  // If MIME is audio/opus or non-standard container, convert to standard WAV via backend
+  if (!isDirectSupported || cleanMime === 'audio/opus') {
+    console.log(`[GeminiService] Audio format '${mimeType}' requires conversion. Invoking backend converter...`);
     try {
-      const baseUrl = import.meta.env.VITE_API_URL || "";
-      const convResponse = await fetch(`${baseUrl}/api/convert-opus`, {
+      const convResponse = await apiFetch('/api/convert-opus', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ base64Audio: base64Data })
+        body: JSON.stringify({ 
+          base64Audio: base64Data,
+          fileName: fileName || (cleanMime === 'audio/opus' ? 'recording.opus' : 'audio_input'),
+          mimeType: cleanMime
+        })
       });
       
       if (!convResponse.ok) {
-        const errorData = await convResponse.json();
-        throw new Error(errorData.error || 'Backend audio conversion failed');
+        const errorData = await convResponse.json().catch(() => ({}));
+        throw new Error(errorData.error || "EchoNote couldn't process this audio format. Please try another audio file.");
       }
       
       const convData = await convResponse.json();
       processedBase64 = convData.base64Audio;
-      processedMimeType = convData.mimeType;
-      console.log(`[GeminiService] Conversion successful. Proceeding with ${processedMimeType}`);
-    } catch (err) {
+      processedMimeType = convData.mimeType || 'audio/wav';
+      console.log(`[GeminiService] Conversion successful. Transcribing as ${processedMimeType}`);
+    } catch (err: any) {
       console.error(`[GeminiService] Audio conversion pipeline failed:`, err);
-      throw new Error(`Audio processing failed: ${err instanceof Error ? err.message : 'Unknown error'}`);
+      if (err instanceof ApiNetworkError) {
+        throw new Error("EchoNote couldn't reach the audio processing service. Please check your connection and try again.");
+      }
+      throw new Error(err.message || "EchoNote couldn't process this audio format. Please try another audio file.");
     }
   }
 
-  const baseUrl = import.meta.env.VITE_API_URL || "";
-  const response = await fetch(`${baseUrl}/api/ai/transcribe-audio`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      base64Data: processedBase64,
-      mimeType: processedMimeType,
-      targetLanguage
-    })
-  });
+  // Send normalized audio to Gemini Transcription endpoint
+  try {
+    const response = await apiFetch('/api/ai/transcribe-audio', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        base64Data: processedBase64,
+        mimeType: processedMimeType,
+        targetLanguage
+      })
+    });
 
-  if (!response.ok) {
-    const errorData = await response.json().catch(() => ({}));
-    throw new Error(errorData.error || 'Audio transcription failed');
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.error || 'The audio was processed, but transcription could not be completed. Please try again.');
+    }
+
+    return await response.json();
+  } catch (err: any) {
+    console.error(`[GeminiService] Audio transcription error:`, err);
+    if (err instanceof ApiNetworkError) {
+      throw new Error("EchoNote couldn't reach the transcription service. Please check your connection and try again.");
+    }
+    throw new Error(err.message || "The audio was processed, but transcription could not be completed. Please try again.");
   }
-
-  return response.json();
 };
 
 export const summarizeTranscript = async (transcript: TranscriptSegment[], tier: SubscriptionTier = 'free'): Promise<CallSummary> => {
@@ -58,43 +98,55 @@ export const summarizeTranscript = async (transcript: TranscriptSegment[], tier:
     return { mainTopic: "No content available", keyPoints: [], decisions: [], actionItems: [] };
   }
 
-  const baseUrl = import.meta.env.VITE_API_URL || "";
-  const response = await fetch(`${baseUrl}/api/ai/summarize-transcript`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ transcript, tier, plan: tier })
-  });
+  try {
+    const response = await apiFetch('/api/ai/summarize-transcript', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ transcript, tier, plan: tier })
+    });
 
-  if (!response.ok) {
-    const errorData = await response.json().catch(() => ({}));
-    throw new Error(errorData.error || 'Transcript summarization failed');
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.error || 'Transcript summarization failed');
+    }
+
+    return await response.json();
+  } catch (err: any) {
+    if (err instanceof ApiNetworkError) {
+      throw new Error("EchoNote couldn't reach the summarization service. Please check your connection and try again.");
+    }
+    throw err;
   }
-
-  return response.json();
 };
 
 export const synthesizeSpeech = async (text: string, gender: 'male' | 'female'): Promise<{ data: string; mimeType: string }> => {
   if (!text.trim()) throw new Error("Input text is empty");
 
-  const baseUrl = import.meta.env.VITE_API_URL || "";
-  const response = await fetch(`${baseUrl}/api/ai/synthesize-speech`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text, gender })
-  });
+  try {
+    const response = await apiFetch('/api/ai/synthesize-speech', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, gender })
+    });
 
-  if (!response.ok) {
-    const errorData = await response.json().catch(() => ({}));
-    throw new Error(errorData.error || 'Speech synthesis failed');
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.error || 'Speech synthesis failed');
+    }
+
+    const { base64Audio } = await response.json();
+    if (!base64Audio) throw new Error("Audio generation failed.");
+
+    return {
+      data: base64Audio,
+      mimeType: 'audio/mp3'
+    };
+  } catch (err: any) {
+    if (err instanceof ApiNetworkError) {
+      throw new Error("EchoNote couldn't reach the speech synthesis service. Please check your connection and try again.");
+    }
+    throw err;
   }
-
-  const { base64Audio } = await response.json();
-  if (!base64Audio) throw new Error("Audio generation failed.");
-
-  return {
-    data: base64Audio,
-    mimeType: 'audio/mp3' // backend returns standard audio data
-  };
 };
 
 export const pcmToWavUrl = (base64Pcm: string, sampleRate: number = 24000): string => {
@@ -150,19 +202,25 @@ export const analyzeStrategically = async (
   userId?: string,
   email?: string
 ): Promise<StrategicAnalysis> => {
-  const baseUrl = import.meta.env.VITE_API_URL || "";
-  const response = await fetch(`${baseUrl}/api/ai/analyze-strategically`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ input, inputType, tier, userId, email, plan: tier })
-  });
+  try {
+    const response = await apiFetch('/api/ai/analyze-strategically', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ input, inputType, tier, userId, email, plan: tier })
+    });
 
-  if (!response.ok) {
-    const errorData = await response.json().catch(() => ({}));
-    throw new Error(errorData.error || 'Strategic analysis failed');
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.error || 'Strategic analysis failed');
+    }
+
+    return await response.json();
+  } catch (err: any) {
+    if (err instanceof ApiNetworkError) {
+      throw new Error("EchoNote couldn't reach the strategic analysis service. Please check your connection.");
+    }
+    throw err;
   }
-
-  return response.json();
 };
 
 export const analyzeDecisionIntelligence = async (
@@ -172,42 +230,54 @@ export const analyzeDecisionIntelligence = async (
   userId?: string,
   email?: string
 ): Promise<DecisionIntelligenceResult> => {
-  const baseUrl = import.meta.env.VITE_API_URL || "";
-  const response = await fetch(`${baseUrl}/api/ai/decision-intelligence`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      input,
-      inputType,
-      tier,
-      userId,
-      email,
-      plan: tier
-    })
-  });
+  try {
+    const response = await apiFetch('/api/ai/decision-intelligence', {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        input,
+        inputType,
+        tier,
+        userId,
+        email,
+        plan: tier
+      })
+    });
 
-  if (!response.ok) {
-    const errorData = await response.json().catch(() => ({}));
-    throw new Error(errorData.error || "Decision Intelligence analysis failed");
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.error || "Decision Intelligence analysis failed");
+    }
+
+    return await response.json();
+  } catch (err: any) {
+    if (err instanceof ApiNetworkError) {
+      throw new Error("EchoNote couldn't reach the decision intelligence service. Please check your connection.");
+    }
+    throw err;
   }
-
-  return response.json();
 };
 
 export const processUnifiedMeetingIntelligence = async (transcript: string, tier: SubscriptionTier = 'free'): Promise<UnifiedMeetingIntelligence> => {
-  const baseUrl = import.meta.env.VITE_API_URL || "";
-  const response = await fetch(`${baseUrl}/api/ai/unified-meeting-intelligence`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ transcript, tier, plan: tier })
-  });
+  try {
+    const response = await apiFetch('/api/ai/unified-meeting-intelligence', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ transcript, tier, plan: tier })
+    });
 
-  if (!response.ok) {
-    const errorData = await response.json().catch(() => ({}));
-    throw new Error(errorData.error || 'Meeting intelligence processing failed');
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.error || 'Meeting intelligence processing failed');
+    }
+
+    return await response.json();
+  } catch (err: any) {
+    if (err instanceof ApiNetworkError) {
+      throw new Error("EchoNote couldn't reach the meeting intelligence service. Please check your connection.");
+    }
+    throw err;
   }
-
-  return response.json();
 };

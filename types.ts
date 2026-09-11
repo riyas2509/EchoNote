@@ -51,8 +51,76 @@ export interface SpeakerMapping {
 }
 
 export type CollaborationRole = 'owner' | 'editor' | 'viewer';
-export type OrgRole = 'super_admin' | 'org_admin' | 'team_manager' | 'member' | 'viewer';
+export type AuthoritativeOrgRole = 'owner' | 'org_admin' | 'team_manager' | 'member' | 'viewer';
+export type OrgRole = AuthoritativeOrgRole | 'super_admin' | 'admin' | 'team_lead' | 'guest';
 export type ReadStatus = 'not-read' | 'in-progress' | 'read';
+
+export interface CustomClaims {
+  orgId?: string;
+  orgRole?: AuthoritativeOrgRole;
+  role?: 'admin' | 'user';
+  isOwner?: boolean;
+}
+
+export interface OrgAuditEvent {
+  id?: string;
+  organizationId: string;
+  actorUserId: string;
+  actorEmail: string;
+  targetUserId?: string;
+  targetUserEmail?: string;
+  previousRole?: string;
+  newRole?: string;
+  action: 
+    | 'ROLE_ASSIGNED' 
+    | 'ROLE_CHANGED' 
+    | 'ROLE_REVOKED' 
+    | 'OWNER_TRANSFERRED' 
+    | 'MEMBER_DEACTIVATED' 
+    | 'MEMBER_REACTIVATED' 
+    | 'MEMBER_INVITED' 
+    | 'MEMBER_REMOVED' 
+    | 'ORGANIZATION_CREATED' 
+    | 'SECURITY_UPDATED' 
+    | 'SSO_LOGIN_SUCCESS' 
+    | 'SSO_LOGIN_FAILED' 
+    | 'SSO_LOGIN_BLOCKED'
+    | 'SSO_CONFIGURATION_CREATED'
+    | 'SSO_CONFIGURATION_UPDATED' 
+    | 'SSO_CONFIGURATION_DELETED'
+    | 'SSO_BYPASS_BLOCKED' 
+    | 'SSO_TENANT_MISMATCH' 
+    | 'ENTERPRISE_LOGIN_SUCCESS'
+    | 'ENTERPRISE_JIT_PROVISIONED'
+    | 'SAML_CONFIGURATION_CREATED' 
+    | 'SAML_CONFIGURATION_UPDATED' 
+    | 'SAML_CONFIGURATION_ENABLED' 
+    | 'SAML_CONFIGURATION_DISABLED' 
+    | 'SAML_LOGIN_SUCCESS' 
+    | 'SAML_LOGIN_FAILURE' 
+    | 'SAML_LOGIN_BLOCKED' 
+    | 'SAML_CONFIGURATION_ERROR' 
+    | 'SSO_ENFORCEMENT_ENABLED' 
+    | 'SSO_ENFORCEMENT_DISABLED' 
+    | 'JIT_USER_CREATED' 
+    | 'JIT_USER_UPDATED' 
+    | 'JIT_MEMBER_CREATED' 
+    | 'JIT_ROLE_ASSIGNED' 
+    | 'JIT_ROLE_CHANGED' 
+    | 'JIT_DEPARTMENT_ASSIGNED' 
+    | 'JIT_MAPPING_APPLIED' 
+    | 'JIT_MAPPING_CONFLICT' 
+    | 'JIT_PROVISIONING_BLOCKED' 
+    | 'JIT_USER_DEACTIVATED' 
+    | 'JIT_USER_REACTIVATED' 
+    | 'IDENTITY_MAPPING_CREATED' 
+    | 'IDENTITY_MAPPING_UPDATED' 
+    | 'IDENTITY_MAPPING_DELETED';
+  timestamp: string;
+  source: string;
+  details?: string;
+  metadata?: Record<string, any>;
+}
 
 export interface ProjectMember {
   projectId: string;
@@ -105,6 +173,12 @@ export interface UserProfile {
   minutesUsed: number;
   extraMinutes?: number;
   thinkingUsed: number;
+  monthlyThinkingLimit?: number;
+  monthlyThinkingUsed?: number;
+  thinkingTopupBalance?: number;
+  monthlyMinuteLimit?: number;
+  monthlyMinutesUsed?: number;
+  minuteTopupBalance?: number;
   billingStartDate?: string; // ISO string
   lastResetDate?: string; // ISO string
   planExpiresAt: string; // ISO string
@@ -235,23 +309,270 @@ export enum AppWorkflow {
   DECISION_HISTORY = 'decision-history',
   HISTORY = 'history',
   ADMIN_TRACKER = 'admin-tracker',
+  PRODUCT_ANALYTICS = 'product-analytics',
   COLLABORATION_DASHBOARD = 'collaboration-dashboard',
   ORGANIZATION_DASHBOARD = 'organization-dashboard'
+}
+
+export enum ProductEventName {
+  SIGNUP_COMPLETED = 'SIGNUP_COMPLETED',
+  FIRST_APP_ENTRY = 'FIRST_APP_ENTRY',
+  ONBOARDING_VIEWED = 'ONBOARDING_VIEWED',
+  CAPTURE_STARTED = 'CAPTURE_STARTED',
+  AUDIO_UPLOADED = 'AUDIO_UPLOADED',
+  RECORDING_STARTED = 'RECORDING_STARTED',
+  TRANSCRIPTION_STARTED = 'TRANSCRIPTION_STARTED',
+  TRANSCRIPTION_COMPLETED = 'TRANSCRIPTION_COMPLETED',
+  INTELLIGENCE_ANALYSIS_STARTED = 'INTELLIGENCE_ANALYSIS_STARTED',
+  INTELLIGENCE_ANALYSIS_COMPLETED = 'INTELLIGENCE_ANALYSIS_COMPLETED',
+  DECISION_VIEWED = 'DECISION_VIEWED',
+  DECISION_SAVED = 'DECISION_SAVED',
+  HISTORY_VIEWED = 'HISTORY_VIEWED',
+  DECISION_SEARCHED = 'DECISION_SEARCHED',
+  DECISION_RETRIEVED = 'DECISION_RETRIEVED',
+  EXECUTION_ITEM_CREATED = 'EXECUTION_ITEM_CREATED',
+  EXECUTION_ITEM_COMPLETED = 'EXECUTION_ITEM_COMPLETED',
+  RETURN_SESSION = 'RETURN_SESSION',
+  UPGRADE_STARTED = 'UPGRADE_STARTED',
+  SUBSCRIPTION_STARTED = 'SUBSCRIPTION_STARTED'
+}
+
+export interface ProductEventPayload {
+  eventName: ProductEventName | keyof typeof ProductEventName;
+  userId?: string;
+  organizationId?: string;
+  teamId?: string;
+  sessionId?: string;
+  plan?: string;
+  source?: string;
+  entityType?: 'decision' | 'task' | 'recording' | 'search' | 'session' | 'subscription' | 'onboarding' | 'history';
+  entityId?: string; // safe internal identifier
+  isHistorical?: boolean; // true when retrieval represents accessing past memory, not current session
+  metadata?: {
+    durationMs?: number;
+    decisionCount?: number;
+    taskCount?: number;
+    searchQueryLength?: number;
+    retrievalMatchCount?: number;
+    sessionIndex?: number;
+    daysSinceFirstSeen?: number;
+    [key: string]: string | number | boolean | undefined;
+  };
+}
+
+export interface StoredProductEvent extends ProductEventPayload {
+  id: string;
+  timestamp: string; // ISO 8601 string
+  createdAt?: any;
+}
+
+export interface OrgDomain {
+  domain: string;
+  orgId: string;
+  status: 'verified' | 'unverified';
+  dnsTxtRecord?: string;
+  verifiedAt?: string;
+  createdAt: string;
+}
+
+export type EnterpriseSsoProtocol = 'SAML' | 'OIDC';
+
+export type EnterpriseProviderType = 
+  | 'SAML' 
+  | 'OIDC' 
+  | 'MICROSOFT_ENTRA' 
+  | 'GOOGLE_WORKSPACE' 
+  | 'OKTA' 
+  | 'PING' 
+  | 'GENERIC_SAML' 
+  | 'GENERIC_OIDC';
+
+export interface OidcProviderConfig {
+  issuer: string; // e.g. https://login.microsoftonline.com/{tenantId}/v2.0 or https://accounts.google.com
+  clientId: string; // Client / Application ID
+  clientSecretMasked?: string; // e.g. "••••••••" (secrets are never returned raw to client)
+  hasClientSecret?: boolean;
+  scopes?: string[]; // e.g. ['openid', 'email', 'profile']
+  entraTenantId?: string; // Optional Microsoft Entra tenant ID
+  entraClientId?: string;
+  enabled: boolean;
+  status: 'draft' | 'configured' | 'verified' | 'active';
+  identityPlatformStatus?: 'synced' | 'local_fallback' | 'manual_required';
+  lastTestedAt?: string;
+  lastTestStatus?: 'success' | 'failed';
+  lastTestError?: string;
+  updatedAt?: string;
+}
+
+export interface EnterpriseSsoConfig {
+  protocol: EnterpriseSsoProtocol;
+  providerType: EnterpriseProviderType;
+  providerId: string; // Deterministic collision-safe ID: e.g. saml.<orgId> or oidc.<orgId>
+  displayName: string;
+  identityPlatformTenantId?: string; // Associated Identity Platform Tenant ID
+  enabled: boolean;
+  enforceSso: boolean;
+  status: 'draft' | 'configured' | 'verified' | 'active';
+  identityPlatformStatus?: 'synced' | 'local_fallback' | 'manual_required';
+  saml?: SamlProviderConfig;
+  oidc?: OidcProviderConfig;
+  lastTestedAt?: string;
+  lastTestStatus?: 'success' | 'failed';
+  lastTestState?: 'CONFIGURATION_VALID' | 'CONFIGURATION_INVALID' | 'EXTERNAL_AUTH_REQUIRED' | 'PROVIDER_NOT_CONFIGURED' | 'IDENTITY_PLATFORM_NOT_ENABLED';
+  lastTestError?: string;
+  configuredAt?: string;
+  configuredBy?: string;
+  updatedAt?: string;
+}
+
+export interface SamlProviderConfig {
+  providerId: string; // Deterministic collision-safe ID: e.g. saml.<orgId>
+  displayName: string; // e.g. "Okta", "OneLogin", "Ping Identity", "Enterprise SAML"
+  entityId: string; // IdP Entity ID / Issuer URI
+  ssoUrl: string; // IdP Single Sign-On HTTP-POST / HTTP-Redirect Service URL
+  x509Certificates: string[]; // X.509 public signing certificates (supports rotation)
+  spEntityId?: string; // Service Provider Entity ID / Audience
+  callbackUrl?: string; // ACS Callback URL
+  enabled: boolean;
+  status: 'draft' | 'configured' | 'verified' | 'active';
+  identityPlatformStatus?: 'synced' | 'local_fallback' | 'manual_required';
+  lastTestedAt?: string;
+  lastTestStatus?: 'success' | 'failed';
+  lastTestError?: string;
+  updatedAt?: string;
+}
+
+export type OrgSsoEnforcementState = 'SSO_DISABLED' | 'SSO_OPTIONAL' | 'SSO_REQUIRED' | 'SSO_CONFIGURATION_ERROR';
+
+export type OrgAllowedAuthMethod = 'EMAIL_PASSWORD' | 'GOOGLE' | 'MICROSOFT' | 'OIDC' | 'SAML';
+
+export type RemovedGroupBehavior = 'KEEP_ROLE' | 'REVERT_TO_DEFAULT_ROLE' | 'REMOVE_DEPARTMENT' | 'DEACTIVATE_MEMBER';
+
+export type DeactivationBehavior = 'SUSPEND_ACCESS' | 'REVOKE_MEMBERSHIP';
+
+export interface OrgSecurityHealthIssue {
+  code: string;
+  severity: 'error' | 'warning' | 'info';
+  message: string;
+}
+
+export interface OrgSecurityHealthSummary {
+  status: 'HEALTHY' | 'WARNING' | 'CONFIGURATION_ERROR';
+  issues: OrgSecurityHealthIssue[];
+  summary: {
+    verifiedDomainsCount: number;
+    ssoState: OrgSsoEnforcementState;
+    ssoProvider: string;
+    ssoProtocol: 'OIDC' | 'SAML';
+    allowedAuthMethods: OrgAllowedAuthMethod[];
+    jitEnabled: boolean;
+    invitationRequired: boolean;
+    mappingsCount: number;
+    sessionTimeoutMinutes: number;
+    mfaRequirement: string;
+    adminSafetyVerified: boolean;
+  };
+}
+
+export interface AuthDiscoveryResult {
+  authMode: 'standard' | 'enterprise';
+  domain: string;
+  ssoEnforced: boolean;
+  ssoEnforcementState?: OrgSsoEnforcementState;
+  organizationName?: string;
+  ssoProvider?: string;
+  ssoProviderType?: EnterpriseProviderType;
+  ssoProtocol?: 'OIDC' | 'SAML';
+  providerId?: string;
+  samlProviderId?: string;
+  ssoConfigurationError?: boolean;
+  ssoErrorMessage?: string;
+  entraTenantId?: string;
+  identityPlatformTenantId?: string;
+  allowedAuthMethods: ('sso' | 'password' | 'google' | 'microsoft')[];
+  rawAllowedAuthMethods?: OrgAllowedAuthMethod[];
+  orgId?: string;
+  isDomainVerified?: boolean;
+}
+
+export interface OrgIdentityMapping {
+  id: string;
+  orgId: string;
+  provider: 'entra' | 'saml' | 'google' | 'oidc' | 'all';
+  sourceType: 'group' | 'department' | 'job_title' | 'claim';
+  sourceValue: string;
+  targetRole: AuthoritativeOrgRole;
+  targetDepartmentId?: string;
+  targetDepartmentName?: string;
+  enabled: boolean;
+  priority: number; // 1 to 100, higher number = evaluated first
+  createdBy?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface OrgJitSettings {
+  jitProvisioningEnabled: boolean;
+  provisioningMode: 'jit_allowed' | 'invitation_required';
+  defaultJitRole: AuthoritativeOrgRole;
+  defaultDepartmentId?: string;
+  defaultDepartmentName?: string;
+  roleManagementMode: 'manual' | 'idp_managed';
+  syncIdentityAttributes: boolean;
+  syncGroups: boolean;
+  autoDeactivateRemovedUsers?: boolean;
+  removedGroupBehavior?: RemovedGroupBehavior;
+  deactivationBehavior?: DeactivationBehavior;
+}
+
+export interface OrgSecuritySettings {
+  identityPlatformTenantId?: string;
+  ssoStatus?: 'enabled' | 'disabled';
+  ssoEnforcementState?: OrgSsoEnforcementState;
+  ssoProtocol?: 'OIDC' | 'SAML';
+  ssoProviderType?: EnterpriseProviderType;
+  enforceSso?: boolean;
+  allowedAuthMethods?: OrgAllowedAuthMethod[];
+  entraTenantId?: string;
+  entraClientId?: string;
+  samlProvider?: SamlProviderConfig;
+  oidcProvider?: OidcProviderConfig;
+  ssoConfig?: EnterpriseSsoConfig | {
+    enabled?: boolean;
+    provider?: string;
+    domainDiscovery?: boolean;
+    jitEnabled?: boolean;
+    defaultRole?: string;
+  };
+  allowedDomains?: string[] | string;
+  enforceMfa?: boolean;
+  mfaRequirement?: 'MFA_DISABLED' | 'MFA_OPTIONAL' | 'MFA_REQUIRED_ADMINS' | 'MFA_REQUIRED_ALL';
+  sessionTimeoutMinutes?: number;
+  enforceSessionTimeout?: boolean;
+  twoFactorRequired?: boolean;
+  allowedIpRanges?: string[];
+  jitSettings?: OrgJitSettings;
+  removedGroupBehavior?: RemovedGroupBehavior;
+  deactivationBehavior?: DeactivationBehavior;
 }
 
 export interface Organization {
   id: string;
   name: string;
   domain?: string;
+  domains?: OrgDomain[];
   ownerId: string;
   ownerEmail: string;
   plan: SubscriptionTier;
   createdAt: string;
+  identityPlatformTenantId?: string;
   settings?: {
     allowedDomains?: string[];
     enforceMfa?: boolean;
     sessionTimeoutMinutes?: number;
+    jitProvisioningEnabled?: boolean;
   };
+  securitySettings?: OrgSecuritySettings;
 }
 
 export interface Team {
@@ -263,14 +584,36 @@ export interface Team {
   createdAt: string;
 }
 
+export interface Department {
+  id: string;
+  orgId: string;
+  name: string;
+  description?: string;
+  projectIds: string[];
+  createdAt: string;
+  minutesUsed?: number;
+  aiCost?: number;
+  aiUsage?: number;
+  aiBudgetLimit?: number;
+}
+
 export interface OrgMember {
   id: string;
   orgId: string;
   userId: string;
   email: string;
   name?: string;
-  role: 'owner' | 'admin' | 'team_lead' | 'member' | 'guest';
-  status: 'active' | 'pending';
+  displayName?: string;
+  role: OrgRole;
+  departmentId?: string;
+  departmentName?: string;
+  teamId?: string;
+  status: 'active' | 'pending' | 'deactivated';
+  provisionedVia?: 'jit' | 'manual' | 'invitation';
+  identityProvider?: string;
+  syncedGroups?: string[];
+  syncedAttributes?: Record<string, any>;
+  lastActive?: string;
   joinedAt: string;
 }
 
@@ -320,6 +663,12 @@ export interface UsageStats {
   mode: 'guest' | 'free' | 'pro';
   renewalDate: string;
   minutesPerFileLimit: number;
+  monthlyThinkingLimit?: number;
+  monthlyThinkingUsed?: number;
+  thinkingTopupBalance?: number;
+  monthlyMinuteLimit?: number;
+  monthlyMinutesUsed?: number;
+  minuteTopupBalance?: number;
 }
 
 export enum AuthStatus {

@@ -6,11 +6,10 @@
  */
 
 import 'dotenv/config';
-import { onCall, HttpsError, onRequest } from 'firebase-functions/v2/https';
+import { onCall, HttpsError } from 'firebase-functions/v2/https';
 import { onObjectFinalized } from 'firebase-functions/v2/storage';
 import * as admin from 'firebase-admin';
 import { GoogleGenAI } from '@google/genai';
-import Razorpay from 'razorpay';
 import { Resend } from 'resend';
 import * as crypto from 'crypto';
 import axios from 'axios';
@@ -18,30 +17,6 @@ import axios from 'axios';
 admin.initializeApp();
 const db = admin.firestore();
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || '' });
-
-function getRazorpay() {
-  // Force fresh read of environment variables from process.env
-  const key_id = process.env.RAZORPAY_KEY_ID?.trim();
-  const key_secret = process.env.RAZORPAY_KEY_SECRET?.trim();
-
-  console.log("🔥 RAZORPAY KEY IN USE (Functions):", key_id);
-
-  if (!key_id || !key_secret) {
-    throw new Error("CRITICAL: Razorpay API keys are missing in functions environment.");
-  }
-
-  // Strict validation for TEST mode
-  if (!key_id.startsWith("rzp_test_")) {
-    console.error("❌ ERROR: Razorpay must use TEST keys (rzp_test_*). Found:", key_id.substring(0, 12) + "...");
-    throw new Error("❌ Razorpay must use TEST keys (rzp_test_*). Please update your keys in the Settings menu.");
-  }
-
-  // Always return a fresh instance to ensure latest env values are used
-  return new Razorpay({
-    key_id,
-    key_secret,
-  });
-}
 
 const resend = new Resend(process.env.RESEND_API_KEY);
 
@@ -129,209 +104,9 @@ export const onAudioUpload = onObjectFinalized(async (event) => {
   }
 });
 
-/**
- * API Endpoint: Create Razorpay Subscription
- */
-export const createSubscription = onCall(async (request) => {
-  if (!request.auth) throw new HttpsError('unauthenticated', 'User must be logged in');
-
-  const { plan } = request.data;
-  if (!['pro', 'team', 'enterprise'].includes(plan)) {
-    throw new HttpsError('invalid-argument', 'Invalid plan type');
-  }
-
-  const planId = plan === 'pro' ? process.env.RAZORPAY_PRO_PLAN_ID : 
-                 plan === 'team' ? process.env.RAZORPAY_TEAM_PLAN_ID : 
-                 process.env.RAZORPAY_ENTERPRISE_PLAN_ID;
-  if (!planId) {
-    console.error("Plan ID not configured for plan:", plan);
-    console.error("Available env vars:", Object.keys(process.env).filter(k => k.startsWith('RAZORPAY')));
-    throw new HttpsError('internal', `Plan ID not configured for ${plan}`);
-  }
-
-  try {
-    const razorpay = getRazorpay();
-    console.log("Creating Razorpay subscription for plan:", plan, "with planId:", planId);
-    const subscription = await razorpay.subscriptions.create({
-      plan_id: planId,
-      customer_notify: 1,
-      total_count: 12, // 1 year
-      notes: {
-        firebaseUid: request.auth.uid,
-        plan: plan,
-      },
-    });
-
-    const keyId = process.env.RAZORPAY_KEY_ID;
-    if (!keyId) throw new HttpsError('internal', 'Razorpay Key ID not configured on server');
-
-    return {
-      subscriptionId: subscription.id,
-      keyId: keyId,
-    };
-  } catch (error: any) {
-    console.error("Razorpay Subscription Error:", error);
-    const message = error?.error?.description || error?.message || 'Failed to create subscription';
-    throw new HttpsError('internal', message);
-  }
-});
-
-/**
- * API Endpoint: Verify Razorpay Payment
- */
-export const verifyPayment = onCall(async (request) => {
-  if (!request.auth) throw new HttpsError('unauthenticated', 'User must be logged in');
-
-  const { razorpay_payment_id, razorpay_subscription_id, razorpay_signature } = request.data;
-
-  const secret = process.env.RAZORPAY_KEY_SECRET || '';
-  if (!secret) {
-    console.error("RAZORPAY_KEY_SECRET not configured");
-    throw new HttpsError('internal', 'Payment verification failed due to server configuration');
-  }
-
-  const generated_signature = crypto
-    .createHmac('sha256', secret)
-    .update(razorpay_payment_id + '|' + razorpay_subscription_id)
-    .digest('hex');
-
-  if (generated_signature === razorpay_signature) {
-    console.log("Payment verified successfully for subscription:", razorpay_subscription_id);
-    return { status: 'success' };
-  } else {
-    console.error("Invalid signature for subscription:", razorpay_subscription_id);
-    console.error("Generated:", generated_signature);
-    console.error("Received:", razorpay_signature);
-    throw new HttpsError('permission-denied', 'Invalid signature');
-  }
-});
-
-/**
- * Razorpay Webhook Handler
- */
-export const razorpayWebhook = onRequest(async (req, res) => {
-  const secret = process.env.RAZORPAY_WEBHOOK_SECRET || '';
-  const signature = req.headers['x-razorpay-signature'] as string;
-
-  // Use rawBody for signature verification
-  const rawBody = (req as any).rawBody;
-  const expectedSignature = crypto
-    .createHmac('sha256', secret)
-    .update(rawBody)
-    .digest('hex');
-
-  if (expectedSignature !== signature) {
-    res.status(400).send('Invalid signature');
-    return;
-  }
-
-  const event = req.body;
-  const subscription = event.payload.subscription.entity;
-  const firebaseUid = subscription.notes?.firebaseUid;
-
-  if (!firebaseUid) {
-    res.status(200).send('No firebaseUid found in notes');
-    return;
-  }
-
-  const plan = subscription.notes?.plan || 'pro';
-
-  switch (event.event) {
-    case 'subscription.activated':
-    case 'subscription.charged':
-      await db.collection('users').doc(firebaseUid).update({
-        plan: plan,
-      });
-
-      await db.collection('subscriptions').doc(subscription.id).set({
-        userId: firebaseUid,
-        plan: plan,
-        status: subscription.status,
-        razorpaySubscriptionId: subscription.id,
-        razorpayPlanId: subscription.plan_id,
-        currentPeriodEnd: new Date(subscription.current_end * 1000).toISOString(),
-        billingCycle: 'monthly',
-      });
-
-      await db.collection('usage').doc(firebaseUid).set({
-        monthlyLimit: PLAN_LIMITS[plan as keyof typeof PLAN_LIMITS],
-      }, { merge: true });
-      break;
-
-    case 'subscription.cancelled':
-    case 'subscription.expired':
-      await db.collection('users').doc(firebaseUid).update({
-        plan: 'free',
-      });
-      await db.collection('usage').doc(firebaseUid).update({
-        monthlyLimit: PLAN_LIMITS.free,
-      });
-      break;
-  }
-
-  res.status(200).send('Success');
-});
-
-/**
- * API Endpoint: Simulate Webhook (TESTING ONLY)
- * This allows testing the webhook logic without an external trigger.
- */
-export const simulateWebhook = onCall(async (request) => {
-  if (!request.auth) throw new HttpsError('unauthenticated', 'User must be logged in');
-  
-  // Only allow admins or specific test users if needed
-  // For this prototype, we'll allow the current user to simulate for themselves
-  
-  const { event, plan } = request.data;
-  const mockSubscriptionId = `sub_test_${Date.now()}`;
-  
-  const mockPayload = {
-    event: event || 'subscription.activated',
-    payload: {
-      subscription: {
-        entity: {
-          id: mockSubscriptionId,
-          status: 'active',
-          plan_id: plan === 'pro' ? process.env.RAZORPAY_PRO_PLAN_ID : 
-                   plan === 'team' ? process.env.RAZORPAY_TEAM_PLAN_ID : 
-                   process.env.RAZORPAY_ENTERPRISE_PLAN_ID,
-          current_end: Math.floor(Date.now() / 1000) + (30 * 24 * 60 * 60),
-          notes: {
-            firebaseUid: request.auth.uid,
-            plan: plan || 'pro'
-          }
-        }
-      }
-    }
-  };
-
-  // We bypass the signature check here because it's an internal call
-  // but we use the same logic as the real webhook
-  
-  const subscription = mockPayload.payload.subscription.entity;
-  const firebaseUid = subscription.notes.firebaseUid;
-  const planType = subscription.notes.plan;
-
-  await db.collection('users').doc(firebaseUid).update({
-    plan: planType,
-  });
-
-  await db.collection('subscriptions').doc(subscription.id).set({
-    userId: firebaseUid,
-    plan: planType,
-    status: subscription.status,
-    razorpaySubscriptionId: subscription.id,
-    razorpayPlanId: subscription.plan_id,
-    currentPeriodEnd: new Date(subscription.current_end * 1000).toISOString(),
-    billingCycle: 'monthly',
-  });
-
-  await db.collection('usage').doc(firebaseUid).set({
-    monthlyLimit: PLAN_LIMITS[planType as keyof typeof PLAN_LIMITS],
-  }, { merge: true });
-
-  return { success: true, subscriptionId: mockSubscriptionId };
-});
+// NOTE: All Razorpay payment operations (Subscriptions, Orders, Payment Verification,
+// and Webhooks) are authoritatively unified and handled by the Express backend running
+// on Google Cloud Run (server.ts). Legacy duplicate Cloud Functions have been retired.
 
 /**
  * API Endpoint: Create Project

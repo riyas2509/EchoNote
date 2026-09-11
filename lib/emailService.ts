@@ -15,10 +15,9 @@ function getResendClient(): Resend {
   if (!resendInstance) {
     const key = process.env.RESEND_API_KEY;
     if (!key) {
-      console.warn("⚠️ WARNING: RESEND_API_KEY environment variable is not defined. Email service will run in mock mode.");
+      console.warn("⚠️ WARNING: RESEND_API_KEY environment variable is not defined.");
     }
-    // Fallback key or empty key is handled gracefully in mock mode
-    resendInstance = new Resend(key || "mock_key");
+    resendInstance = new Resend(key || "");
   }
   return resendInstance;
 }
@@ -129,7 +128,7 @@ function renderButton(text: string, url: string): string {
 }
 
 /**
- * Helper to execute sending via Resend or log as mock when API key is missing.
+ * Helper to execute sending via Resend or handle missing API key gracefully.
  */
 async function sendEmail(options: {
   to: string;
@@ -138,9 +137,8 @@ async function sendEmail(options: {
 }): Promise<{ success: boolean; id?: string; error?: any }> {
   const apiKey = process.env.RESEND_API_KEY;
   if (!apiKey) {
-    console.log(`[MOCK EMAIL SERVICE] To: ${options.to} | Subject: ${options.subject}`);
-    console.log(`[MOCK EMAIL SERVICE] HTML: ${options.html.slice(0, 300)}...`);
-    return { success: true, id: `mock_${Date.now()}` };
+    console.warn(`[EMAIL SERVICE] Cannot send email to ${options.to}: RESEND_API_KEY environment variable is not set.`);
+    return { success: false, error: 'RESEND_API_KEY environment variable is required to send emails.' };
   }
 
   try {

@@ -3,6 +3,8 @@ import React, { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { MessageCircle, X, Send, Minus, Maximize2, Sparkles, Layout, FileText, Brain, CheckSquare, BarChart2 } from 'lucide-react';
 import { GoogleGenAI, Type } from "@google/genai";
+import { ProductEventName } from '../types';
+import { trackProductEvent, trackDecisionRetrieved } from '../services/productAnalyticsService';
 
 interface AssistantContext {
   current_page: string;
@@ -52,6 +54,15 @@ const EchoNoteAssistant: React.FC<EchoNoteAssistantProps> = ({ context, actions 
     setChatHistory(prev => [...prev, newUserMsg]);
     setMessage('');
     setIsTyping(true);
+
+    trackProductEvent({
+      eventName: ProductEventName.DECISION_SEARCHED,
+      entityType: 'search',
+      source: 'ask_echonote',
+      metadata: {
+        searchQueryLength: textToSend.trim().length
+      }
+    });
 
     try {
       const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
@@ -120,11 +131,23 @@ Intents: "summarize", "analyze thinking", "decisions", "add to project", "usage 
 
       // Execute actions based on intent
       if (data.intent === 'summarize') actions.summarizeTranscript();
-      if (data.intent === 'analyze thinking') actions.runThinkingEngine();
-      if (data.intent === 'decisions') actions.extractDecisions();
+      if (data.intent === 'analyze thinking') {
+        actions.runThinkingEngine();
+        trackDecisionRetrieved({
+          entityId: context.selected_file_name || 'assistant_retrieval',
+          source: 'ask_echonote'
+        });
+      }
+      if (data.intent === 'decisions') {
+        actions.extractDecisions();
+        trackDecisionRetrieved({
+          entityId: context.selected_file_name || 'assistant_retrieval',
+          source: 'ask_echonote'
+        });
+      }
       if (data.intent === 'add to project') actions.assignToProject();
       if (data.intent === 'usage / minutes') {
-        // Already handled by the AI's reply usually, but we could trigger a specific UI
+        // Handled by reply
       }
 
     } catch (error) {

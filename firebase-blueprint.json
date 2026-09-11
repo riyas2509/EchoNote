@@ -244,10 +244,119 @@
         "totalResponseTime": { "type": "number" }
       },
       "required": ["featureName"]
+    },
+    "Transaction": {
+      "title": "Transaction",
+      "description": "Payment transactions and billing invoices.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "paymentId": { "type": "string" },
+        "orderId": { "type": "string" },
+        "type": { "type": "string", "enum": ["subscription", "topup", "downgrade"] },
+        "planId": { "type": "string" },
+        "billingCycle": { "type": "string" },
+        "amount": { "type": "number" },
+        "minutes": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "status": { "type": "string" }
+      },
+      "required": ["userId", "amount", "createdAt"]
+    },
+    "Organization": {
+      "title": "Organization",
+      "description": "Corporate organization settings and Enterprise Security Center policies.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "logoUrl": { "type": "string" },
+        "ownerEmail": { "type": "string" },
+        "industry": { "type": "string" },
+        "timezone": { "type": "string" },
+        "country": { "type": "string" },
+        "language": { "type": "string" },
+        "defaultWorkspace": { "type": "string" },
+        "brandColor": { "type": "string" },
+        "settings": {
+          "type": "object",
+          "properties": {
+            "enforceMfa": { "type": "boolean" },
+            "sessionTimeoutMinutes": { "type": "number" },
+            "logoUrl": { "type": "string" },
+            "industry": { "type": "string" },
+            "timezone": { "type": "string" },
+            "country": { "type": "string" },
+            "language": { "type": "string" },
+            "defaultWorkspace": { "type": "string" },
+            "brandColor": { "type": "string" }
+          }
+        },
+        "securitySettings": {
+          "type": "object",
+          "properties": {
+            "googleAuthEnabled": { "type": "boolean" },
+            "googleClientId": { "type": "string" },
+            "googleClientSecret": { "type": "string" },
+            "microsoftAuthEnabled": { "type": "boolean" },
+            "microsoftClientId": { "type": "string" },
+            "microsoftClientSecret": { "type": "string" },
+            "ssoStatus": { "type": "string" },
+            "ssoProtocol": { "type": "string" },
+            "ssoIdpUrl": { "type": "string" },
+            "samlStatus": { "type": "string" },
+            "samlEntityId": { "type": "string" },
+            "samlSsoUrl": { "type": "string" },
+            "samlCertificate": { "type": "string" },
+            "pwdMinLength": { "type": "number" },
+            "pwdEnforceSpecial": { "type": "boolean" },
+            "pwdEnforceNumbers": { "type": "boolean" },
+            "pwdMaxAge": { "type": "number" },
+            "twoFactorStatus": { "type": "string" },
+            "sessionTimeout": { "type": "string" },
+            "allowedDomains": { "type": "string" },
+            "blockedDomains": { "type": "string" },
+            "apiKeys": { "type": "array" },
+            "securityEvents": { "type": "array" },
+            "auditLogs": { "type": "array" }
+          }
+        }
+      },
+      "required": ["id", "name", "ownerEmail"]
+    },
+    "AuditLog": {
+      "title": "AuditLog",
+      "description": "Enterprise audit log tracking system actions.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "action": { "type": "string" },
+        "actor": { "type": "string" },
+        "project": { "type": "string" },
+        "organization": { "type": "string" },
+        "ip": { "type": "string" },
+        "details": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "action", "actor", "timestamp"]
+    },
+    "Integration": {
+      "title": "Integration",
+      "description": "Third-party enterprise integration configuration.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "enabled": { "type": "boolean" },
+        "status": { "type": "string", "enum": ["connected", "disconnected"] },
+        "config": { "type": "object" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "enabled", "status"]
     }
   },
   "firestore": {
     "/users/{userId}": { "schema": "UserProfile", "description": "User profiles" },
+    "/transactions/{id}": { "schema": "Transaction", "description": "Billing and invoice transactions" },
     "/projects/{projectId}": { "schema": "Project", "description": "Collaboration projects" },
     "/recordings/{recordingId}": { "schema": "Recording", "description": "Audio recordings" },
     "/transcriptions/{transcriptionId}": { "schema": "Transcription", "description": "AI transcriptions" },
@@ -264,6 +373,13 @@
     "/userAnalytics/{userId}": { "schema": "UserAnalytics", "description": "Aggregated user rich analytics" },
     "/teamAnalytics/{teamId}": { "schema": "TeamAnalytics", "description": "Aggregated team cost analytics" },
     "/monthlyAnalytics/{month}": { "schema": "MonthlyAnalytics", "description": "Monthly aggregates analytics document" },
-    "/featureAnalytics/{featureId}": { "schema": "FeatureAnalytics", "description": "Feature usage and latency statistics" }
+    "/featureAnalytics/{featureId}": { "schema": "FeatureAnalytics", "description": "Feature usage and latency statistics" },
+    "/organizations/{orgId}": { "schema": "Organization", "description": "Corporate organizations" },
+    "/organizations/{orgId}/monthlyTrends/{trendId}": { "schema": "MonthlyAnalytics", "description": "Month-by-month financial and usage trends of the organization" },
+    "/organizations/{orgId}/auditLogs/{id}": { "schema": "AuditLog", "description": "Granular enterprise audit logs" },
+    "/organizations/{orgId}/integrations/{id}": { "schema": "Integration", "description": "Third-party enterprise integration configurations" },
+    "/departments/{deptId}": { "schema": "Department", "description": "Created organizational divisions" },
+    "/orgMembers/{memberId}": { "schema": "OrgMember", "description": "Employees registered to the organization" },
+    "/orgInvitations/{inviteId}": { "schema": "OrgInvitation", "description": "History of corporate invitations" }
   }
 }

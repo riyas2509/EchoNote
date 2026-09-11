@@ -1,20 +1,24 @@
 
-import React, { createContext, useContext, useEffect, useState } from 'react';
-import { auth, onAuthStateChanged, User, db, doc, getDoc, getDocFromServer, setDoc, onSnapshot, updateDoc } from '../firebase';
-import { UserProfile } from '../types';
+import React, { createContext, useContext, useEffect, useState, useCallback } from 'react';
+import { auth, onAuthStateChanged, User, getRedirectResult, db, doc, getDoc, getDocFromServer, setDoc, onSnapshot, updateDoc } from '../firebase';
+import { UserProfile, CustomClaims } from '../types';
 import { PLAN_FEATURES } from '../config/planConfig';
 import { shouldResetUsage, getAdvancedRefreshDate, migrateLegacyUserFields, calculateNextRefreshDate } from '../lib/usageUtils';
 
 interface FirebaseContextType {
   user: User | null;
   profile: UserProfile | null;
+  customClaims: CustomClaims | null;
   isAuthReady: boolean;
+  refreshClaims: () => Promise<CustomClaims | null>;
 }
 
 const FirebaseContext = createContext<FirebaseContextType>({
   user: null,
   profile: null,
+  customClaims: null,
   isAuthReady: false,
+  refreshClaims: async () => null,
 });
 
 export const useFirebase = () => useContext(FirebaseContext);
@@ -22,7 +26,62 @@ export const useFirebase = () => useContext(FirebaseContext);
 export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);
   const [profile, setProfile] = useState<UserProfile | null>(null);
+  const [customClaims, setCustomClaims] = useState<CustomClaims | null>(null);
   const [isAuthReady, setIsAuthReady] = useState(false);
+
+  const refreshClaims = useCallback(async (): Promise<CustomClaims | null> => {
+    if (!auth?.currentUser) {
+      setCustomClaims(null);
+      return null;
+    }
+
+    try {
+      // 1. Force refresh the Firebase ID Token
+      const tokenResult = await auth.currentUser.getIdTokenResult(true);
+      const claims: CustomClaims = {
+        orgId: tokenResult.claims.orgId as string | undefined,
+        orgRole: tokenResult.claims.orgRole as any,
+        role: tokenResult.claims.role as any,
+        isOwner: Boolean(tokenResult.claims.isOwner || tokenResult.claims.orgRole === 'owner')
+      };
+
+      // 2. If claims are not yet set or need backend sync, call sync-claims
+      if (!claims.orgId) {
+        try {
+          const idToken = await auth.currentUser.getIdToken();
+          const syncRes = await fetch('/api/auth/sync-claims', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${idToken}`
+            }
+          });
+          if (syncRes.ok) {
+            const data = await syncRes.json();
+            if (data.claims) {
+              const freshTokenResult = await auth.currentUser.getIdTokenResult(true);
+              const updatedClaims: CustomClaims = {
+                orgId: freshTokenResult.claims.orgId as string | undefined || data.claims.orgId,
+                orgRole: freshTokenResult.claims.orgRole as any || data.claims.orgRole,
+                role: freshTokenResult.claims.role as any || data.claims.role,
+                isOwner: Boolean(freshTokenResult.claims.isOwner || data.claims.orgRole === 'owner')
+              };
+              setCustomClaims(updatedClaims);
+              return updatedClaims;
+            }
+          }
+        } catch (syncErr) {
+          console.warn("⚠️ Claim sync request warning:", syncErr);
+        }
+      }
+
+      setCustomClaims(claims);
+      return claims;
+    } catch (err) {
+      console.error("⚠️ Failed to refresh claims:", err);
+      return null;
+    }
+  }, []);
 
   useEffect(() => {
     if (!auth) {
@@ -30,11 +89,48 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       return;
     }
 
-    const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
+    // Check for enterprise or social redirect result
+    getRedirectResult(auth)
+      .then(async (result) => {
+        if (result?.user) {
+          try {
+            const idToken = await result.user.getIdToken(true);
+            await fetch('/api/auth/sso/validate', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${idToken}`
+              }
+            });
+            await result.user.getIdToken(true);
+          } catch (syncErr) {
+            console.warn("⚠️ Redirect auth synchronization note:", syncErr);
+          }
+        }
+      })
+      .catch((err) => {
+        console.warn("⚠️ Redirect authentication result info:", err);
+      });
+
+    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
       setUser(firebaseUser);
       if (!firebaseUser) {
         setProfile(null);
+        setCustomClaims(null);
         setIsAuthReady(true);
+      } else {
+        try {
+          const tokenResult = await firebaseUser.getIdTokenResult();
+          const claims: CustomClaims = {
+            orgId: tokenResult.claims.orgId as string | undefined,
+            orgRole: tokenResult.claims.orgRole as any,
+            role: tokenResult.claims.role as any,
+            isOwner: Boolean(tokenResult.claims.isOwner || tokenResult.claims.orgRole === 'owner')
+          };
+          setCustomClaims(claims);
+        } catch (err) {
+          console.warn("⚠️ Initial claims inspection note:", err);
+        }
       }
     });
 
@@ -53,8 +149,13 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         const userDocRef = doc(db, 'users', user.uid);
         
         // Initial check and creation if needed
-        const userDoc = await getDocFromServer(userDocRef);
-        if (!userDoc.exists()) {
+        let userDoc;
+        try {
+          userDoc = await getDoc(userDocRef);
+        } catch (fetchErr) {
+          console.warn("⚠️ Initial profile getDoc warning (will rely on snapshot):", fetchErr);
+        }
+        if (userDoc && !userDoc.exists()) {
           const now = new Date();
           const nowStr = now.toISOString();
           const nextRefresh = calculateNextRefreshDate(nowStr, 'monthly', 'free', nowStr);
@@ -80,21 +181,41 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             subscriptionStartDate: nowStr,
             billingCycle: 'monthly',
             nextRefreshDate: nextRefresh.toISOString(),
-            lastUsageResetDate: nowStr
+            lastUsageResetDate: nowStr,
+            monthlyMinuteLimit: 60,
+            monthlyMinutesUsed: 0,
+            minuteTopupBalance: 0,
+            monthlyThinkingLimit: 10,
+            monthlyThinkingUsed: 0,
+            thinkingTopupBalance: 0
           };
           await setDoc(userDocRef, newProfile);
-        } else {
+        } else if (userDoc && userDoc.exists()) {
           // SYNC CHECK: If Firestore profile is missing displayName but Firebase Auth has it
           let currentData = userDoc.data() as UserProfile;
           
           // Migration of legacy user fields
-          if (!currentData.subscriptionStartDate || !currentData.nextRefreshDate || !currentData.billingCycle || !currentData.lastUsageResetDate) {
+          if (!currentData.subscriptionStartDate || !currentData.nextRefreshDate || !currentData.billingCycle || !currentData.lastUsageResetDate || currentData.monthlyMinuteLimit === undefined) {
             console.log("🔄 Migrating legacy user fields in setupProfile...");
             const migratedFields = migrateLegacyUserFields(currentData);
+            const planLimits = {
+              free: { minutes: 60, thinking: 10 },
+              pro: { minutes: 1200, thinking: 250 },
+              team: { minutes: 5000, thinking: 1500 },
+              enterprise: { minutes: 25000, thinking: 10000 }
+            };
+            const limits = planLimits[(currentData.plan || "free") as keyof typeof planLimits] || planLimits.free;
+
             const updateObj = {
               ...migratedFields,
               billingStartDate: migratedFields.subscriptionStartDate,
-              lastResetDate: migratedFields.lastUsageResetDate
+              lastResetDate: migratedFields.lastUsageResetDate,
+              monthlyMinuteLimit: currentData.monthlyMinuteLimit ?? limits.minutes,
+              monthlyMinutesUsed: currentData.monthlyMinutesUsed ?? currentData.minutesUsed ?? 0,
+              minuteTopupBalance: currentData.minuteTopupBalance ?? currentData.extraMinutes ?? 0,
+              monthlyThinkingLimit: currentData.monthlyThinkingLimit ?? limits.thinking,
+              monthlyThinkingUsed: currentData.monthlyThinkingUsed ?? currentData.thinkingUsed ?? 0,
+              thinkingTopupBalance: currentData.thinkingTopupBalance ?? 0
             };
             await updateDoc(userDocRef, updateObj);
             currentData = {
@@ -110,6 +231,8 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             await updateDoc(userDocRef, {
               minutesUsed: 0,
               thinkingUsed: 0,
+              monthlyMinutesUsed: 0,
+              monthlyThinkingUsed: 0,
               nextRefreshDate: advancedNextRefresh.toISOString(),
               lastUsageResetDate: currentData.nextRefreshDate,
               lastResetDate: currentData.nextRefreshDate
@@ -118,6 +241,8 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
               ...currentData,
               minutesUsed: 0,
               thinkingUsed: 0,
+              monthlyMinutesUsed: 0,
+              monthlyThinkingUsed: 0,
               nextRefreshDate: advancedNextRefresh.toISOString(),
               lastUsageResetDate: currentData.nextRefreshDate,
               lastResetDate: currentData.nextRefreshDate
@@ -155,13 +280,27 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             console.log("🔥 Firestore user data sync:", data);
             
             // Check if fields are missing
-            if (!data.subscriptionStartDate || !data.nextRefreshDate || !data.billingCycle || !data.lastUsageResetDate) {
+            if (!data.subscriptionStartDate || !data.nextRefreshDate || !data.billingCycle || !data.lastUsageResetDate || data.monthlyMinuteLimit === undefined) {
               console.log("🔄 Live migrating legacy user fields...");
               const migratedFields = migrateLegacyUserFields(data);
+              const planLimits = {
+                free: { minutes: 60, thinking: 10 },
+                pro: { minutes: 1200, thinking: 250 },
+                team: { minutes: 5000, thinking: 1500 },
+                enterprise: { minutes: 25000, thinking: 10000 }
+              };
+              const limits = planLimits[(data.plan || "free") as keyof typeof planLimits] || planLimits.free;
+
               await updateDoc(userDocRef, {
                 ...migratedFields,
                 billingStartDate: migratedFields.subscriptionStartDate,
-                lastResetDate: migratedFields.lastUsageResetDate
+                lastResetDate: migratedFields.lastUsageResetDate,
+                monthlyMinuteLimit: data.monthlyMinuteLimit ?? limits.minutes,
+                monthlyMinutesUsed: data.monthlyMinutesUsed ?? data.minutesUsed ?? 0,
+                minuteTopupBalance: data.minuteTopupBalance ?? data.extraMinutes ?? 0,
+                monthlyThinkingLimit: data.monthlyThinkingLimit ?? limits.thinking,
+                monthlyThinkingUsed: data.monthlyThinkingUsed ?? data.thinkingUsed ?? 0,
+                thinkingTopupBalance: data.thinkingTopupBalance ?? 0
               });
               return;
             }
@@ -173,6 +312,8 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
               await updateDoc(userDocRef, {
                 minutesUsed: 0,
                 thinkingUsed: 0,
+                monthlyMinutesUsed: 0,
+                monthlyThinkingUsed: 0,
                 nextRefreshDate: advancedNextRefresh.toISOString(),
                 lastUsageResetDate: data.nextRefreshDate,
                 lastResetDate: data.nextRefreshDate

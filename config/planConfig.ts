@@ -47,7 +47,7 @@ export const PLAN_FEATURES: Record<SubscriptionTier, PlanFeatures> = {
     team: true,
     minutesPerFileLimit: 15,
     totalMinutesLimit: 60,
-    aiRequestLimit: 20,
+    aiRequestLimit: 10,
     meetingContinuity: true,
     executionTracking: 'full',
     historicalInsights: true,
@@ -59,13 +59,13 @@ export const PLAN_FEATURES: Record<SubscriptionTier, PlanFeatures> = {
   },
   pro: {
     transcription: true,
-    thinkingLimit: 1000,
+    thinkingLimit: 250,
     decisionHistoryLimit: 1000,
     export: true,
     team: true,
     minutesPerFileLimit: 120,
     totalMinutesLimit: 1200,
-    aiRequestLimit: 1000,
+    aiRequestLimit: 250,
     meetingContinuity: true,
     executionTracking: 'full',
     historicalInsights: true,
@@ -77,13 +77,13 @@ export const PLAN_FEATURES: Record<SubscriptionTier, PlanFeatures> = {
   },
   team: {
     transcription: true,
-    thinkingLimit: 'unlimited',
+    thinkingLimit: 1500,
     decisionHistoryLimit: 'unlimited',
     export: true,
     team: true,
     minutesPerFileLimit: 180,
     totalMinutesLimit: 5000,
-    aiRequestLimit: 'unlimited',
+    aiRequestLimit: 1500,
     meetingContinuity: true,
     executionTracking: 'full',
     historicalInsights: true,
@@ -95,13 +95,13 @@ export const PLAN_FEATURES: Record<SubscriptionTier, PlanFeatures> = {
   },
   enterprise: {
     transcription: true,
-    thinkingLimit: 'unlimited',
+    thinkingLimit: 10000,
     decisionHistoryLimit: 'unlimited',
     export: true,
     team: true,
     minutesPerFileLimit: 300,
-    totalMinutesLimit: 50000,
-    aiRequestLimit: 'unlimited',
+    totalMinutesLimit: 25000,
+    aiRequestLimit: 10000,
     advancedSecurity: true,
     meetingContinuity: true,
     executionTracking: 'full',
@@ -123,3 +123,75 @@ export const canUseFeature = (plan: SubscriptionTier, feature: keyof PlanFeature
   if (value === 'none') return false;
   return true;
 };
+
+/**
+ * Authoritative Server-Side Pricing Definitions (Amounts in Paise for INR)
+ */
+export const SUBSCRIPTION_PRICING = {
+  pro: {
+    monthly: { price: 99900, label: '₹999/month' },
+    yearly: { price: 79900 * 12, label: '₹799/mo (₹9,588 billed yearly)' }
+  },
+  team: {
+    monthly: { price: 249900, label: '₹2,499/month' },
+    yearly: { price: 199900 * 12, label: '₹1,999/mo (₹23,988 billed yearly)' }
+  }
+} as const;
+
+export const MINUTE_TOPUP_PACKAGES = {
+  100: {
+    minutes: 100,
+    amountInPaise: 9900,
+    amount: 99,
+    label: "+100 Minutes",
+    popular: false,
+    badge: "Starter"
+  },
+  350: {
+    minutes: 350,
+    amountInPaise: 29900,
+    amount: 299,
+    label: "+350 Minutes",
+    popular: true,
+    badge: "Best Value"
+  },
+} as const;
+
+export const AI_REQUEST_TOPUP_PACKAGES = {
+  100: {
+    requests: 100,
+    amountInPaise: 9900,
+    amount: 99,
+    label: "+100 AI Requests",
+    popular: false,
+    badge: "Starter"
+  },
+  500: {
+    requests: 500,
+    amountInPaise: 39900,
+    amount: 399,
+    label: "+500 AI Requests",
+    popular: true,
+    badge: "Professional"
+  },
+  1500: {
+    requests: 1500,
+    amountInPaise: 99900,
+    amount: 999,
+    label: "+1500 AI Requests",
+    popular: false,
+    badge: "Business"
+  },
+} as const;
+
+export const TOPUP_PRICING: Record<number, number> = {
+  100: 9900,   // ₹99
+  350: 29900   // ₹299
+};
+
+export const THINKING_TOPUP_PRICING: Record<number, number> = {
+  100: 9900,    // ₹99
+  500: 39900,   // ₹399
+  1500: 99900   // ₹999
+};
+

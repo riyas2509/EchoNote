@@ -1,9 +1,9 @@
-
 import React, { useState, useEffect } from 'react';
 import { NavLink, Link } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
-import { Menu, X } from 'lucide-react';
+import { Menu, X, ArrowRight } from 'lucide-react';
 import { AuthStatus } from '../types';
+import BrandWordmark from './public/BrandWordmark';
 
 interface LandingNavbarProps {
   onLogin: () => void;
@@ -12,7 +12,12 @@ interface LandingNavbarProps {
   authStatus?: AuthStatus;
 }
 
-const LandingNavbar: React.FC<LandingNavbarProps> = ({ onLogin, onStartFree, onGoToDashboard, authStatus }) => {
+export const LandingNavbar: React.FC<LandingNavbarProps> = ({ 
+  onLogin, 
+  onStartFree, 
+  onGoToDashboard, 
+  authStatus 
+}) => {
   const [isScrolled, setIsScrolled] = useState(false);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
@@ -20,14 +25,13 @@ const LandingNavbar: React.FC<LandingNavbarProps> = ({ onLogin, onStartFree, onG
 
   useEffect(() => {
     const handleScroll = () => {
-      setIsScrolled(window.scrollY > 20);
+      setIsScrolled(window.scrollY > 15);
     };
-    window.addEventListener('scroll', handleScroll);
+    window.addEventListener('scroll', handleScroll, { passive: true });
     return () => window.removeEventListener('scroll', handleScroll);
   }, []);
 
   const navLinks = [
-    { name: 'Home', path: '/' },
     { name: 'Features', path: '/features' },
     { name: 'Solutions', path: '/solutions' },
     { name: 'Pricing', path: '/pricing' },
@@ -36,37 +40,40 @@ const LandingNavbar: React.FC<LandingNavbarProps> = ({ onLogin, onStartFree, onG
 
   return (
     <nav 
+      aria-label="Public Navigation"
       className={`fixed top-0 left-0 right-0 z-50 transition-all duration-300 ${
-        isScrolled ? 'bg-white/80 backdrop-blur-md border-b border-brand-divider/20 py-4' : 'bg-transparent py-4'
+        isScrolled 
+          ? 'bg-white/90 backdrop-blur-md border-b border-slate-200/80 py-3.5 shadow-sm' 
+          : 'bg-transparent py-5'
       }`}
     >
       <div className="max-w-7xl mx-auto px-6 flex items-center justify-between">
-        {/* Logo */}
+        
+        {/* LEFT: EchoNote Brand & Logo */}
         <Link 
           to="/"
-          className="flex items-center gap-3 cursor-pointer group"
+          className="flex items-center gap-2.5 cursor-pointer group shrink-0"
+          aria-label="EchoNote Homepage"
         >
           <img 
             src="/Logo-2.png" 
-            alt="EchoNote"
-            className="h-10 w-auto object-contain"
+            alt="EchoNote Logo"
+            className="h-8 sm:h-9 w-auto object-contain transition-transform group-hover:scale-105"
           />
-          <span className="text-xl font-bold text-[#1B2A4E] tracking-tight">
-            EchoNote
-          </span>
+          <BrandWordmark size="md" animate={true} />
         </Link>
 
-        {/* Desktop Nav */}
-        <div className="hidden md:flex items-center space-x-8">
+        {/* CENTER: Navigation Links */}
+        <div className="hidden md:flex items-center space-x-1 lg:space-x-2 bg-slate-50/80 border border-slate-200/60 rounded-full px-4 py-1.5 shadow-sm">
           {navLinks.map((link) => (
             <NavLink
               key={link.name}
               to={link.path}
               className={({ isActive }) => 
-                `text-[14px] font-medium transition-colors ${
+                `px-3.5 py-1.5 rounded-full text-[13px] font-semibold transition-all ${
                   isActive 
-                    ? 'text-brand-primary' 
-                    : 'text-brand-secondary hover:text-brand-primary'
+                    ? 'text-blue-700 bg-white shadow-xs font-bold' 
+                    : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100/70'
                 }`
               }
             >
@@ -75,93 +82,104 @@ const LandingNavbar: React.FC<LandingNavbarProps> = ({ onLogin, onStartFree, onG
           ))}
         </div>
 
-        {/* Desktop CTAs */}
-        <div className="hidden md:flex items-center space-x-4">
+        {/* RIGHT: Actions */}
+        <div className="hidden md:flex items-center space-x-3">
           <Link 
             to="/auth"
-            className="text-[14px] font-semibold text-brand-primary hover:opacity-70 transition-opacity px-4 py-2"
+            className="text-[13px] font-bold text-slate-700 hover:text-blue-600 transition-colors px-3 py-2"
           >
-            Log in
+            Sign In
           </Link>
+          
           {isLoggedIn ? (
             <button 
+              id="navbar-dashboard-btn"
               onClick={onGoToDashboard}
-              className="bg-brand-primary text-white text-[13px] font-bold uppercase tracking-widest px-6 py-3 rounded-lg shadow-xl hover:shadow-2xl hover:-translate-y-0.5 transition-all"
+              className="bg-brand-primary text-slate-900 text-[12px] font-bold uppercase tracking-wider px-5 py-2.5 rounded-xl shadow-xs hover:bg-blue-400 hover:scale-[1.01] active:scale-[0.99] transition-all flex items-center gap-1.5"
             >
-              Dashboard
+              <span>Dashboard</span>
+              <ArrowRight size={13} />
             </button>
           ) : (
             <button 
+              id="navbar-start-free-btn"
               onClick={onStartFree}
-              className="bg-brand-primary text-white text-[13px] font-bold uppercase tracking-widest px-6 py-3 rounded-lg shadow-xl hover:shadow-2xl hover:-translate-y-0.5 transition-all"
+              className="bg-brand-primary text-slate-900 text-[12px] font-bold uppercase tracking-wider px-5 py-2.5 rounded-xl shadow-xs hover:bg-blue-400 hover:scale-[1.01] active:scale-[0.99] transition-all flex items-center gap-1.5"
             >
-              Start Free
+              <span>Get Started</span>
+              <ArrowRight size={13} />
             </button>
           )}
         </div>
 
         {/* Mobile Menu Toggle */}
         <button 
-          className="md:hidden text-brand-primary"
+          className="md:hidden text-slate-800 p-1.5 rounded-lg hover:bg-slate-100"
           onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
+          aria-label={isMobileMenuOpen ? "Close menu" : "Open menu"}
+          aria-expanded={isMobileMenuOpen}
         >
-          {isMobileMenuOpen ? <X size={24} /> : <Menu size={24} />}
+          {isMobileMenuOpen ? <X size={22} /> : <Menu size={22} />}
         </button>
       </div>
 
-      {/* Mobile Menu */}
+      {/* Mobile Dropdown Menu */}
       <AnimatePresence>
         {isMobileMenuOpen && (
           <motion.div
             initial={{ opacity: 0, height: 0 }}
             animate={{ opacity: 1, height: 'auto' }}
             exit={{ opacity: 0, height: 0 }}
-            className="md:hidden bg-white border-b border-brand-divider/20 overflow-hidden"
+            transition={{ duration: 0.2 }}
+            className="md:hidden bg-white border-b border-slate-200 overflow-hidden shadow-xl"
           >
-            <div className="px-6 py-8 flex flex-col space-y-6">
+            <div className="px-6 py-6 flex flex-col space-y-4">
               {navLinks.map((link) => (
                 <NavLink
                   key={link.name}
                   to={link.path}
                   onClick={() => setIsMobileMenuOpen(false)}
                   className={({ isActive }) => 
-                    `text-left text-lg font-medium ${
-                      isActive ? 'text-brand-primary' : 'text-brand-secondary'
+                    `text-left text-base font-bold py-2 border-b border-slate-100 ${
+                      isActive ? 'text-blue-600' : 'text-slate-700'
                     }`
                   }
                 >
                   {link.name}
                 </NavLink>
               ))}
-              <hr className="border-brand-divider/20" />
-              <Link 
-                to="/auth"
-                onClick={() => setIsMobileMenuOpen(false)}
-                className="text-left text-lg font-semibold text-brand-primary"
-              >
-                Log in
-              </Link>
-              {isLoggedIn ? (
-                <button 
-                  onClick={() => {
-                    setIsMobileMenuOpen(false);
-                    onGoToDashboard?.();
-                  }}
-                  className="bg-brand-primary text-white text-center py-4 rounded-lg font-bold uppercase tracking-widest text-[13px]"
+              
+              <div className="pt-2 flex flex-col space-y-3">
+                <Link 
+                  to="/auth"
+                  onClick={() => setIsMobileMenuOpen(false)}
+                  className="text-center text-sm font-bold text-slate-700 py-2.5 rounded-lg hover:bg-slate-50"
                 >
-                  Dashboard
-                </button>
-              ) : (
-                <button 
-                  onClick={() => {
-                    setIsMobileMenuOpen(false);
-                    onStartFree?.();
-                  }}
-                  className="bg-brand-primary text-white text-center py-4 rounded-lg font-bold uppercase tracking-widest text-[13px]"
-                >
-                  Start Free
-                </button>
-              )}
+                  Sign In
+                </Link>
+                
+                {isLoggedIn ? (
+                  <button 
+                    onClick={() => {
+                      setIsMobileMenuOpen(false);
+                      onGoToDashboard?.();
+                    }}
+                    className="bg-brand-primary text-slate-900 text-center py-3.5 rounded-xl font-bold uppercase tracking-wider text-[12px] shadow-sm"
+                  >
+                    Go to Dashboard
+                  </button>
+                ) : (
+                  <button 
+                    onClick={() => {
+                      setIsMobileMenuOpen(false);
+                      onStartFree?.();
+                    }}
+                    className="bg-brand-primary text-slate-900 text-center py-3.5 rounded-xl font-bold uppercase tracking-wider text-[12px] shadow-sm"
+                  >
+                    Get Started Free
+                  </button>
+                )}
+              </div>
             </div>
           </motion.div>
         )}

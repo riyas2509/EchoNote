@@ -1,127 +1,239 @@
-
 import React, { useState } from 'react';
 import { motion } from 'motion/react';
-import { CheckCircle2, ArrowRight, Calendar, Clock, Users, ShieldCheck } from 'lucide-react';
+import { 
+  CheckCircle2, 
+  ArrowRight, 
+  Calendar, 
+  Clock, 
+  Users, 
+  ShieldCheck, 
+  Sparkles,
+  Search,
+  Check
+} from 'lucide-react';
+import FAQAccordion from './public/FAQAccordion';
+import ProductWindow from './public/ProductWindow';
 
-const BookDemoPage: React.FC = () => {
+export const BookDemoPage: React.FC = () => {
   const [isSubmitted, setIsSubmitted] = useState(false);
-
-  const fadeIn = {
-    initial: { opacity: 0, y: 20 },
-    animate: { opacity: 1, y: 0 },
-    transition: { duration: 0.6 }
-  };
+  const [formData, setFormData] = useState({
+    fullName: '',
+    workEmail: '',
+    companyName: '',
+    teamSize: '10-50 employees',
+    primaryGoal: 'Preserve Architectural & Engineering Decisions'
+  });
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     setIsSubmitted(true);
   };
 
+  const demoFAQs = [
+    {
+      q: "Who should attend the demonstration?",
+      a: "Engineering managers, VP of Engineering, Operations heads, Product leaders, or anyone responsible for cross-functional alignment and organizational continuity."
+    },
+    {
+      q: "How long is the walkthrough?",
+      a: "Our standard walkthrough is 25 minutes, with 10 minutes reserved for technical Q&A and security discussions."
+    },
+    {
+      q: "Can we test EchoNote with our own sample recordings?",
+      a: "Yes. During the demo or trial period, we can show you how EchoNote extracts decisions and builds provenance trails from your representative audio files."
+    }
+  ];
+
   return (
-    <div className="bg-brand-background pt-32 pb-24 px-6">
-      <div className="max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-2 gap-24 items-start">
-        <motion.div {...fadeIn} className="space-y-12">
-          <div className="space-y-6">
-            <h1 className="text-4xl md:text-6xl font-bold tracking-tight text-brand-primary">See intelligence in action.</h1>
-            <p className="text-brand-secondary/60 text-lg leading-relaxed max-w-lg">
-              Schedule a 30-minute strategic walkthrough with our enterprise solutions team to see how EchoNote can transform your operations.
+    <div className="bg-brand-background text-slate-900 pb-20 overflow-x-hidden">
+      {/* ========================================================================= */}
+      {/* 1. HERO SECTION                                                          */}
+      {/* ========================================================================= */}
+      <header className="pt-32 pb-16 md:pt-40 md:pb-20 px-6 border-b border-slate-200/80 bg-white">
+        <div className="max-w-4xl mx-auto text-center space-y-4">
+          <div className="inline-flex items-center space-x-2 px-3.5 py-1.5 rounded-full bg-blue-50 border border-blue-100 text-blue-800 text-[11px] font-bold uppercase tracking-wider shadow-sm">
+            <Calendar size={14} className="text-blue-600" />
+            <span>Interactive Walkthrough</span>
+          </div>
+          <h1 className="text-4xl sm:text-5xl md:text-6xl font-extrabold tracking-tight text-slate-900 leading-[1.12]">
+            See decision intelligence <br />
+            <span className="text-blue-600">in action.</span>
+          </h1>
+          <p className="text-slate-600 text-base sm:text-lg max-w-xl mx-auto leading-relaxed">
+            Schedule a focused 25-minute walkthrough to see how EchoNote captures decisions, preserves rationale, and prevents forgotten commitments.
+          </p>
+        </div>
+      </header>
+
+      {/* ========================================================================= */}
+      {/* 2. DEMO DETAILS & FORM                                                   */}
+      {/* ========================================================================= */}
+      <section className="py-16 md:py-24 px-6 max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-12 gap-12 items-start">
+        
+        {/* Left: What to Expect */}
+        <div className="lg:col-span-5 space-y-8">
+          <div className="space-y-3">
+            <h2 className="text-2xl font-extrabold text-slate-900">What to Expect</h2>
+            <p className="text-slate-600 text-sm leading-relaxed">
+              We focus directly on your coordination workflows rather than running through generic slide decks.
             </p>
           </div>
 
-          <div className="space-y-8">
-            <h3 className="text-[11px] font-bold uppercase tracking-widest text-brand-secondary/40">What to expect:</h3>
-            <div className="space-y-6">
-              {[
-                { icon: <Users size={20} />, title: 'Personalized Walkthrough', desc: 'A deep dive into features tailored to your industry and use cases.' },
-                { icon: <ShieldCheck size={20} />, title: 'Security & Compliance Review', desc: 'Detailed overview of our data protection and compliance controls.' },
-                { icon: <Clock size={20} />, title: 'ROI Assessment', desc: 'Calculate the potential time and cost savings for your organization.' }
-              ].map((item, i) => (
-                <div key={i} className="flex items-start space-x-4">
-                  <div className="w-10 h-10 rounded-xl bg-brand-primary/5 flex items-center justify-center text-brand-primary shrink-0">
-                    {item.icon}
-                  </div>
-                  <div className="space-y-1">
-                    <h4 className="font-bold text-brand-primary">{item.title}</h4>
-                    <p className="text-brand-secondary/60 text-sm">{item.desc}</p>
-                  </div>
+          <div className="space-y-4">
+            {[
+              {
+                icon: <Sparkles size={18} className="text-blue-600" />,
+                title: "Live Decision Extraction",
+                desc: "See raw conversation audio transformed into structured decisions, rationale, and owner assignments."
+              },
+              {
+                icon: <Search size={18} className="text-indigo-600" />,
+                title: "Memory Provenance Search",
+                desc: "Experience how teams query past decisions and jump straight to original spoken context."
+              },
+              {
+                icon: <ShieldCheck size={18} className="text-emerald-600" />,
+                title: "Security & Governance Review",
+                desc: "Detailed overview of Firestore database rules, RBAC, and zero-training AI architecture."
+              }
+            ].map((item, idx) => (
+              <div key={idx} className="p-5 rounded-2xl bg-white border border-slate-200/90 shadow-sm flex items-start gap-3.5">
+                <div className="w-9 h-9 rounded-xl bg-slate-50 border border-slate-100 flex items-center justify-center shrink-0 mt-0.5">
+                  {item.icon}
                 </div>
-              ))}
-            </div>
-          </div>
-        </motion.div>
-
-        <motion.div 
-          initial={{ opacity: 0, x: 30 }}
-          animate={{ opacity: 1, x: 0 }}
-          transition={{ duration: 0.8, delay: 0.2 }}
-          className="bg-white p-12 rounded-3xl shadow-[0_50px_100px_-20px_rgba(17,34,80,0.1)] border border-brand-divider/20"
-        >
-          {isSubmitted ? (
-            <div className="text-center space-y-8 py-12">
-              <div className="w-20 h-20 rounded-full bg-emerald-50 flex items-center justify-center text-emerald-500 mx-auto">
-                <CheckCircle2 size={40} />
+                <div className="space-y-1">
+                  <h3 className="font-bold text-slate-900 text-sm">{item.title}</h3>
+                  <p className="text-slate-600 text-xs leading-relaxed">{item.desc}</p>
+                </div>
               </div>
-              <div className="space-y-4">
-                <h2 className="text-3xl font-bold text-brand-primary">Demo Requested!</h2>
-                <p className="text-brand-secondary/60">Thank you for your interest. A member of our team will reach out within 24 hours to schedule your demo.</p>
+            ))}
+          </div>
+
+          <div className="p-5 rounded-2xl bg-slate-900 text-white space-y-2">
+            <div className="text-xs font-bold text-blue-400 uppercase tracking-wider flex items-center gap-1.5">
+              <CheckCircle2 size={14} />
+              <span>Direct Expert Consultation</span>
+            </div>
+            <p className="text-slate-300 text-xs leading-relaxed">
+              Walkthroughs are conducted by senior solutions specialists who understand technical architecture and coordination bottlenecks.
+            </p>
+          </div>
+        </div>
+
+        {/* Right: Booking Form */}
+        <div className="lg:col-span-7 bg-white p-8 sm:p-12 rounded-3xl border border-slate-200/90 shadow-lg">
+          {isSubmitted ? (
+            <div className="text-center space-y-6 py-12">
+              <div className="w-16 h-16 rounded-full bg-emerald-50 text-emerald-600 flex items-center justify-center mx-auto">
+                <CheckCircle2 size={36} />
+              </div>
+              <div className="space-y-2">
+                <h2 className="text-2xl font-bold text-slate-900">Walkthrough Requested!</h2>
+                <p className="text-slate-600 text-sm max-w-md mx-auto">
+                  Thank you, <strong>{formData.fullName || 'there'}</strong>. We've received your request and will reach out via <strong>{formData.workEmail || 'your email'}</strong> within 24 hours to finalize your demo schedule.
+                </p>
               </div>
               <button 
+                type="button"
                 onClick={() => setIsSubmitted(false)}
-                className="text-brand-primary font-bold uppercase tracking-widest text-[13px] hover:opacity-70 transition-opacity"
+                className="text-blue-600 font-bold uppercase tracking-wider text-xs hover:text-blue-800"
               >
-                Request another demo
+                Schedule For Another Team
               </button>
             </div>
           ) : (
-            <form onSubmit={handleSubmit} className="space-y-8">
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                <div className="space-y-2">
-                  <label className="text-[11px] font-bold uppercase tracking-widest text-brand-secondary/40">Full Name</label>
-                  <input required type="text" className="w-full bg-brand-background border border-brand-divider/20 rounded-xl px-4 py-4 text-brand-primary focus:outline-none focus:border-brand-primary transition-colors" placeholder="John Doe" />
+            <form onSubmit={handleSubmit} className="space-y-6">
+              <div className="space-y-1">
+                <h3 className="text-xl font-bold text-slate-900">Schedule Your Session</h3>
+                <p className="text-slate-500 text-xs">Fill out the details below to receive a calendar invitation.</p>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
+                <div className="space-y-1.5">
+                  <label className="text-xs font-bold text-slate-700 uppercase tracking-wider">Full Name</label>
+                  <input 
+                    required 
+                    type="text" 
+                    value={formData.fullName}
+                    onChange={e => setFormData({...formData, fullName: e.target.value})}
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm text-slate-900 focus:outline-none focus:border-blue-600 focus:bg-white transition-all" 
+                    placeholder="Morgan Patel" 
+                  />
                 </div>
-                <div className="space-y-2">
-                  <label className="text-[11px] font-bold uppercase tracking-widest text-brand-secondary/40">Work Email</label>
-                  <input required type="email" className="w-full bg-brand-background border border-brand-divider/20 rounded-xl px-4 py-4 text-brand-primary focus:outline-none focus:border-brand-primary transition-colors" placeholder="john@company.com" />
+                <div className="space-y-1.5">
+                  <label className="text-xs font-bold text-slate-700 uppercase tracking-wider">Work Email</label>
+                  <input 
+                    required 
+                    type="email" 
+                    value={formData.workEmail}
+                    onChange={e => setFormData({...formData, workEmail: e.target.value})}
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm text-slate-900 focus:outline-none focus:border-blue-600 focus:bg-white transition-all" 
+                    placeholder="morgan@company.com" 
+                  />
                 </div>
               </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                <div className="space-y-2">
-                  <label className="text-[11px] font-bold uppercase tracking-widest text-brand-secondary/40">Company Name</label>
-                  <input required type="text" className="w-full bg-brand-background border border-brand-divider/20 rounded-xl px-4 py-4 text-brand-primary focus:outline-none focus:border-brand-primary transition-colors" placeholder="Acme Inc." />
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
+                <div className="space-y-1.5">
+                  <label className="text-xs font-bold text-slate-700 uppercase tracking-wider">Company Name</label>
+                  <input 
+                    required 
+                    type="text" 
+                    value={formData.companyName}
+                    onChange={e => setFormData({...formData, companyName: e.target.value})}
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm text-slate-900 focus:outline-none focus:border-blue-600 focus:bg-white transition-all" 
+                    placeholder="Acme Technologies" 
+                  />
                 </div>
-                <div className="space-y-2">
-                  <label className="text-[11px] font-bold uppercase tracking-widest text-brand-secondary/40">Company Size</label>
-                  <select className="w-full bg-brand-background border border-brand-divider/20 rounded-xl px-4 py-4 text-brand-primary focus:outline-none focus:border-brand-primary transition-colors appearance-none">
-                    <option>1-50 employees</option>
-                    <option>51-200 employees</option>
-                    <option>201-1000 employees</option>
-                    <option>1000+ employees</option>
+                <div className="space-y-1.5">
+                  <label className="text-xs font-bold text-slate-700 uppercase tracking-wider">Team Size</label>
+                  <select 
+                    value={formData.teamSize}
+                    onChange={e => setFormData({...formData, teamSize: e.target.value})}
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm text-slate-900 focus:outline-none focus:border-blue-600 focus:bg-white transition-all"
+                  >
+                    <option>1-10 employees</option>
+                    <option>10-50 employees</option>
+                    <option>50-250 employees</option>
+                    <option>250+ employees</option>
                   </select>
                 </div>
               </div>
-              <div className="space-y-2">
-                <label className="text-[11px] font-bold uppercase tracking-widest text-brand-secondary/40">Industry</label>
-                <select className="w-full bg-brand-background border border-brand-divider/20 rounded-xl px-4 py-4 text-brand-primary focus:outline-none focus:border-brand-primary transition-colors appearance-none">
-                  <option>Financial Services</option>
-                  <option>Legal Services</option>
-                  <option>Compliance & Audit</option>
-                  <option>Healthcare</option>
-                  <option>Technology</option>
-                  <option>Other</option>
+
+              <div className="space-y-1.5">
+                <label className="text-xs font-bold text-slate-700 uppercase tracking-wider">Primary Use Case</label>
+                <select 
+                  value={formData.primaryGoal}
+                  onChange={e => setFormData({...formData, primaryGoal: e.target.value})}
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm text-slate-900 focus:outline-none focus:border-blue-600 focus:bg-white transition-all"
+                >
+                  <option>Preserve Architectural & Engineering Decisions</option>
+                  <option>Cross-Functional Initiative Alignment</option>
+                  <option>Client Consulting & Scope Change Protection</option>
+                  <option>Policy & Governance Compliance Records</option>
+                  <option>General Organizational Memory</option>
                 </select>
               </div>
+
               <button 
                 type="submit"
-                className="w-full bg-brand-primary text-white py-5 rounded-xl font-bold uppercase tracking-widest text-[13px] shadow-2xl hover:shadow-brand-primary/20 hover:-translate-y-1 transition-all flex items-center justify-center space-x-3"
+                className="w-full bg-brand-primary text-slate-900 py-3.5 rounded-xl font-bold uppercase tracking-wider text-[12px] shadow-sm hover:bg-blue-400 hover:scale-[1.01] active:scale-[0.99] transition-all flex items-center justify-center gap-2"
               >
-                <span>Schedule Demo</span>
-                <ArrowRight size={18} />
+                <span>Confirm Walkthrough Request</span>
+                <ArrowRight size={14} />
               </button>
-              <p className="text-center text-[11px] text-brand-secondary/40">By clicking "Schedule Demo", you agree to our Terms of Service and Privacy Policy.</p>
+
+              <p className="text-center text-[11px] text-slate-500">
+                No credit card required. We respect your inbox privacy.
+              </p>
             </form>
           )}
-        </motion.div>
-      </div>
+        </div>
+
+      </section>
+
+      {/* FAQs */}
+      <FAQAccordion items={demoFAQs} title="Demo Walkthrough FAQ" />
     </div>
   );
 };
