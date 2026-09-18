@@ -14,9 +14,10 @@ service cloud.firestore {
 
     function isAdmin() {
       return isAuthenticated() && (
+        request.auth.token.role == 'admin' ||
+        request.auth.token.platform_admin == true ||
         (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
-         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin') ||
-        request.auth.token.email == 'riyamshah2509@gmail.com'
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin')
       );
     }
     
@@ -46,10 +47,17 @@ service cloud.firestore {
       );
     }
 
-    // User Profiles
+    // User Profiles - strictly isolate tenant & prevent privilege escalation
     match /users/{userId} {
-      allow read: if isOwner(userId);
-      allow write: if isOwner(userId);
+      allow read: if isOwner(userId) || isAdmin();
+      // Users can initialize profile, but cannot self-assign platform admin or elevated roles
+      allow create: if isOwner(userId) && 
+        (!('role' in request.resource.data) || request.resource.data.role != 'admin') &&
+        (!('platform_admin' in request.resource.data) || request.resource.data.platform_admin != true);
+      // Users cannot modify role, platform_admin, or authoritative billing fields (handled strictly by server Admin SDK)
+      allow update: if isOwner(userId) && 
+        !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role', 'platform_admin', 'claims', 'monthlyMinuteLimit', 'monthlyThinkingLimit']);
+      allow delete: if isAdmin();
     }
     
     // Projects
@@ -59,7 +67,8 @@ service cloud.firestore {
         resource.data.userId == request.auth.uid || 
         isProjectMember(projectId)
       );
-      allow write: if isAuthenticated() && (isAdmin() || resource == null || resource.data.userId == request.auth.uid);
+      allow create, update: if isAuthenticated() && (isAdmin() || resource == null || resource.data.userId == request.auth.uid);
+      allow delete: if isAdmin(); // Direct client-side deletion forbidden for standard users. Use server-authoritative DELETE /api/projects/:projectId
     }
 
     // Project Members
@@ -233,7 +242,7 @@ service cloud.firestore {
       allow update: if isAuthenticated() && isOrgAdmin(orgId) && 
         request.resource.data.ownerId == resource.data.ownerId && 
         request.resource.data.ownerEmail == resource.data.ownerEmail;
-      allow delete: if isAuthenticated() && isOrgOwner(orgId);
+      allow delete: if false; // Direct client deletion strictly forbidden to prevent orphaned subcollections and identity mappings. Use server-authoritative workflow.
 
       match /monthlyTrends/{trendId} {
         allow read: if isOrgAdmin(orgId);

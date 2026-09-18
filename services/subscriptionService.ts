@@ -1,38 +1,11 @@
 import { toast } from 'sonner';
-import { db, doc, updateDoc, increment, serverTimestamp, setDoc } from '../firebase';
 import { apiFetch, getApiUrl, safeApiJson } from '../lib/apiClient';
 
-export const createTransactionDocument = async (userId: string, data: {
-  paymentId: string;
-  orderId?: string;
-  subscriptionId?: string;
-  type: 'subscription' | 'topup' | 'thinking-topup' | 'downgrade';
-  planId: string;
-  billingCycle: string;
-  amount: number;
-  minutes?: number;
-}) => {
-  try {
-    const txnId = data.paymentId || `txn_${Date.now()}`;
-    const txnRef = doc(db, "transactions", txnId);
-    await setDoc(txnRef, {
-      userId,
-      paymentId: data.paymentId,
-      orderId: data.orderId || null,
-      subscriptionId: data.subscriptionId || null,
-      type: data.type,
-      planId: data.planId,
-      billingCycle: data.billingCycle,
-      amount: data.amount,
-      minutes: data.minutes || 0,
-      createdAt: new Date().toISOString(),
-      status: 'success'
-    }, { merge: true });
-    console.log("✅ Written billing history to Firestore:", txnId);
-  } catch (error) {
-    console.error("⚠️ Failed to write transaction document:", error);
-  }
-};
+/**
+ * Note: Billing transactions and entitlements are strictly server-authoritative
+ * via Cloud Functions / Express API routes (POST /api/verify-payment, /api/downgrade-plan, etc.).
+ * Client-side code never writes to transactions or entitlements directly.
+ */
 
 /**
  * Handle Recurring Subscription Upgrade (PRO / TEAM)
@@ -294,6 +267,8 @@ export const handleThinkingTopup = async (
 
 /**
  * Handle Plan Downgrade
+ * Authoritatively executes via POST /api/downgrade-plan.
+ * Server validates plan hierarchy and updates user profile in Firestore.
  */
 export const handleDowngradePlan = async (userId: string, targetPlanId: string) => {
   if (!userId) {
@@ -307,19 +282,6 @@ export const handleDowngradePlan = async (userId: string, targetPlanId: string) 
       body: JSON.stringify({ targetPlanId })
     });
     await safeApiJson(resp);
-
-    const now = new Date();
-    const nextRefreshDate = new Date();
-    nextRefreshDate.setMonth(nextRefreshDate.getMonth() + 1);
-
-    await updateDoc(doc(db, "users", userId), {
-      plan: targetPlanId,
-      subscriptionStatus: "active",
-      subscriptionStartDate: now.toISOString(),
-      billingCycle: "monthly",
-      nextRefreshDate: nextRefreshDate.toISOString(),
-      planExpiresAt: nextRefreshDate.toISOString(),
-    });
 
     toast.success(`Successfully downgraded to ${targetPlanId.charAt(0).toUpperCase() + targetPlanId.slice(1)} plan!`);
     setTimeout(() => {

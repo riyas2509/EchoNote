@@ -2,7 +2,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { MessageCircle, X, Send, Minus, Maximize2, Sparkles, Layout, FileText, Brain, CheckSquare, BarChart2 } from 'lucide-react';
-import { GoogleGenAI, Type } from "@google/genai";
+import { apiFetch } from '../lib/apiClient';
 import { ProductEventName } from '../types';
 import { trackProductEvent, trackDecisionRetrieved } from '../services/productAnalyticsService';
 
@@ -65,63 +65,21 @@ const EchoNoteAssistant: React.FC<EchoNoteAssistantProps> = ({ context, actions 
     });
 
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-      const model = "gemini-3-flash-preview";
-      
-      const systemInstruction = `You are EchoNote Assistant, an AI embedded inside an audio intelligence platform.
-Your role is NOT just to answer questions, but to help users take actions on their audio data.
-You have access to:
-* transcripts
-* summaries
-* projects
-* user usage data
-
-Current Context:
-- Page: ${context.current_page}
-- Project: ${context.current_project}
-- Selected File: ${context.selected_file_name}
-- User Plan: ${context.user_plan}
-- Minutes Used: ${context.minutes_used}
-- Minutes Remaining: ${context.minutes_remaining}
-
-You must:
-1. Understand user intent
-2. If the request is actionable → suggest or trigger an action
-3. If unclear → ask a clarifying question
-4. Keep responses short, clear, and actionable (2-5 lines)
-
-You can perform:
-* Summarization
-* Thinking analysis
-* Decision extraction
-* Project assignment
-* Usage explanation
-
-Always prioritize helping the user move forward, not just explaining things.
-
-If you detect an intent, specify it in the JSON response.
-Intents: "summarize", "analyze thinking", "decisions", "add to project", "usage / minutes".`;
-
-      const response = await ai.models.generateContent({
-        model,
-        contents: [
-          { role: 'user', parts: [{ text: textToSend }] }
-        ],
-        config: {
-          systemInstruction,
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              reply: { type: Type.STRING },
-              intent: { type: Type.STRING, enum: ["summarize", "analyze thinking", "decisions", "add to project", "usage / minutes", "none"] }
-            },
-            required: ["reply", "intent"]
-          }
-        }
+      const response = await apiFetch('/api/ai/assistant-chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message: textToSend,
+          context
+        })
       });
 
-      const data = JSON.parse(response.text);
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.error || 'Assistant service failed to respond');
+      }
+
+      const data = await response.json();
       
       setChatHistory(prev => [...prev, { 
         role: 'assistant', 

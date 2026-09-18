@@ -168,15 +168,15 @@ const Navigation: React.FC<NavigationProps> = ({
       </AnimatePresence>
 
       <nav className={`
-        bg-[#1B2A4E] h-full fixed top-0 left-0 z-[60]
-        flex flex-col shrink-0 border-r border-white/10 shadow-lg
+        bg-[#1B2A4E] h-screen h-[100dvh] max-h-screen max-h-[100dvh] fixed top-0 left-0 z-[60]
+        flex flex-col shrink-0 border-r border-white/10 shadow-lg overflow-hidden custom-scrollbar
         transition-all duration-300 ease-in-out
         ${isOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'}
         ${isCollapsed ? 'w-20' : 'w-72 lg:w-64 xl:w-72'}
         ${!isOpen ? 'hidden lg:flex' : 'flex'}
       `}>
         {/* Fixed Header */}
-        <div className={`p-4 flex items-center justify-between relative ${isCollapsed ? 'flex-col gap-4' : ''}`}>
+        <div className={`p-4 flex items-center justify-between relative shrink-0 ${isCollapsed ? 'flex-col gap-4' : ''}`}>
           <Link to="/" className={`flex items-center gap-3 px-2 py-2 cursor-pointer group hover:bg-white/5 rounded-xl transition-all duration-200 ${isCollapsed ? 'justify-center' : ''}`}>
             <div className="bg-white/10 p-1 rounded-xl shadow-md group-hover:scale-105 transition-transform shrink-0">
               <img 
@@ -291,8 +291,9 @@ const Navigation: React.FC<NavigationProps> = ({
       </div>
         
         {/* Scrollable Body */}
-        <div className={`flex-1 overflow-y-auto custom-scrollbar py-4 space-y-1.5 ${isCollapsed ? 'px-2' : 'px-4 md:px-6'}`}>
-          <div className={`px-4 flex items-center justify-between mb-4 ${isCollapsed ? 'justify-center px-0' : ''}`}>
+        <div className={`flex-1 min-h-0 overflow-y-auto custom-scrollbar flex flex-col justify-between py-4 ${isCollapsed ? 'px-2' : 'px-4 md:px-6'}`}>
+          <div className="space-y-1.5">
+            <div className={`px-4 flex items-center justify-between mb-4 ${isCollapsed ? 'justify-center px-0' : ''}`}>
             {!isCollapsed ? (
               <>
                 <p className="text-[10px] md:text-[12px] font-bold uppercase tracking-widest text-white/30">Module access</p>
@@ -450,147 +451,150 @@ const Navigation: React.FC<NavigationProps> = ({
           )}
         </div>
 
-        {/* Usage Meter */}
-        {!isCollapsed ? (
-          <div className="mx-4 mb-4 p-5 rounded-[1.5rem] bg-white/10 border border-white/10 space-y-6">
-            {isGuestMode && (
-              <div className="flex items-center space-x-2 px-4 py-2 bg-black/40 border border-white/5 rounded-xl">
-                <div className="w-1.5 h-1.5 bg-[#00D1FF] rounded-full shadow-[0_0_8px_rgba(0,209,255,0.6)]" />
-                <span className="text-[10px] font-black text-[#00D1FF] uppercase tracking-[0.2em]">Guest Mode</span>
-              </div>
-            )}
-            {/* Transcription Section */}
-            <div className="space-y-3">
-              <div className="flex justify-between text-[10px] font-black uppercase tracking-[0.2em] text-white/40">
-                <span>Transcription</span>
-                <span className="text-yellow-400">
-                  {Math.round(minutesUsage.monthlyPercentage)}% used
-                </span>
-              </div>
-
-              <div className="w-full h-2 bg-white/5 rounded-full overflow-hidden">
-                <div 
-                  className="h-full bg-yellow-400 transition-all duration-1000 ease-out shadow-[0_0_10px_rgba(250,204,21,0.4)]"
-                  style={{ width: `${minutesUsage.monthlyPercentage}%` }}
-                />
-              </div>
-
-              <div className="space-y-1">
-                <div className="flex justify-between items-center">
-                  <div className="text-[11px] text-white/60 font-bold">
-                    Monthly: {minutesUsage.monthlyUsed} / {minutesUsage.monthlyLimit} mins
-                  </div>
-                  {minutesUsage.isExceeded && (
-                    <div className="text-[9px] text-yellow-400 font-bold animate-pulse">
-                      Limit exceeded
-                    </div>
-                  )}
-                </div>
-                <div className="text-[10px] text-[#00D1FF] font-black uppercase tracking-wider">
-                  Top-Up: {minutesUsage.topupBalance} mins
-                </div>
-              </div>
-
-              {minutesUsage.isExceeded && (
-                <div className="bg-red-500/10 border border-red-500/20 rounded-xl p-3 text-left space-y-1 mt-2 animate-in fade-in duration-300">
-                  <p className="text-[10px] text-red-300 font-medium leading-relaxed font-sans">
-                    You've exceeded your <span className="uppercase font-bold">{usageStats.plan}</span> Plan limit. Your usage will reset on <span className="font-bold">{formatRefreshDate(userProfile?.nextRefreshDate)}</span>, or you can upgrade at any time.
-                  </p>
+        {/* Usage Meter (docked to bottom via flex layout, scrolls when content exceeds viewport) */}
+        <div className="mt-6 shrink-0">
+          {!isCollapsed ? (
+            <div className="p-5 rounded-[1.5rem] bg-white/10 border border-white/10 space-y-6">
+              {isGuestMode && (
+                <div className="flex items-center space-x-2 px-4 py-2 bg-black/40 border border-white/5 rounded-xl">
+                  <div className="w-1.5 h-1.5 bg-[#00D1FF] rounded-full shadow-[0_0_8px_rgba(0,209,255,0.6)]" />
+                  <span className="text-[10px] font-black text-[#00D1FF] uppercase tracking-[0.2em]">Guest Mode</span>
                 </div>
               )}
-            </div>
+              {/* Transcription Section */}
+              <div className="space-y-3">
+                <div className="flex justify-between text-[10px] font-black uppercase tracking-[0.2em] text-white/40">
+                  <span>Transcription</span>
+                  <span className="text-yellow-400">
+                    {Math.round(minutesUsage.monthlyPercentage)}% used
+                  </span>
+                </div>
 
-            {/* Thinking Engine Section */}
-            <div className="space-y-3 pt-2 border-t border-white/5">
-              <div className="flex justify-between text-[10px] font-black uppercase tracking-[0.2em] text-white/40">
-                <span>AI Requests</span>
-                <span className="text-purple-400">
-                  {isGuestMode ? (
-                    "NOT AVAILABLE IN GUEST MODE"
-                  ) : (
-                    `${Math.round(thinkingUsageRes.monthlyPercentage)}% used`
-                  )}
-                </span>
-              </div>
+                <div className="w-full h-2 bg-white/5 rounded-full overflow-hidden">
+                  <div 
+                    className="h-full bg-yellow-400 transition-all duration-1000 ease-out shadow-[0_0_10px_rgba(250,204,21,0.4)]"
+                    style={{ width: `${minutesUsage.monthlyPercentage}%` }}
+                  />
+                </div>
 
-              <div className="w-full h-2 bg-white/5 rounded-full overflow-hidden">
-                <div 
-                  className="h-full bg-purple-500 transition-all duration-1000 ease-out shadow-[0_0_10px_rgba(168,85,247,0.4)]"
-                  style={{ width: `${thinkingUsageRes.monthlyPercentage}%` }}
-                />
-              </div>
-
-              <div className="space-y-1">
-                <div className="flex justify-between items-center">
-                  <div className="text-[11px] text-white/60 font-bold">
-                    {!isGuestMode && (
-                      `Monthly: ${thinkingUsageRes.monthlyUsed} / ${thinkingUsageRes.monthlyLimit === 'unlimited' ? '∞' : thinkingUsageRes.monthlyLimit}`
+                <div className="space-y-1">
+                  <div className="flex justify-between items-center">
+                    <div className="text-[11px] text-white/60 font-bold">
+                      Monthly: {minutesUsage.monthlyUsed} / {minutesUsage.monthlyLimit} mins
+                    </div>
+                    {minutesUsage.isExceeded && (
+                      <div className="text-[9px] text-yellow-400 font-bold animate-pulse">
+                        Limit exceeded
+                      </div>
                     )}
                   </div>
-                  {!isGuestMode && thinkingUsageRes.isExceeded && (
-                    <div className="text-[9px] text-purple-400 font-bold animate-pulse">
-                      Limit exceeded
-                    </div>
-                  )}
-                </div>
-                {!isGuestMode && (
                   <div className="text-[10px] text-[#00D1FF] font-black uppercase tracking-wider">
-                    Top-Up: {thinkingUsageRes.topupBalance} AI Requests
+                    Top-Up: {minutesUsage.topupBalance} mins
+                  </div>
+                </div>
+
+                {minutesUsage.isExceeded && (
+                  <div className="bg-red-500/10 border border-red-500/20 rounded-xl p-3 text-left space-y-1 mt-2 animate-in fade-in duration-300">
+                    <p className="text-[10px] text-red-300 font-medium leading-relaxed font-sans">
+                      You've exceeded your <span className="uppercase font-bold">{usageStats.plan}</span> Plan limit. Your usage will reset on <span className="font-bold">{formatRefreshDate(userProfile?.nextRefreshDate)}</span>, or you can upgrade at any time.
+                    </p>
                   </div>
                 )}
               </div>
-            </div>
 
-            {/* Upgrade/Manage Subscription button */}
-            <div className="pt-2 space-y-3">
-              <button 
-                onClick={onOpenUpgrade}
-                className="w-full p-2.5 rounded-lg bg-echo-accent/10 border border-echo-accent/20 text-center hover:bg-echo-accent transition-all group"
-              >
-                <p className="text-[10px] text-brand-primary font-black uppercase tracking-widest flex items-center justify-center gap-2">
-                  {(() => {
-                    const plan = (userProfile?.plan || 'free').toLowerCase();
-                    if (plan === 'pro' || plan === 'team') {
-                      return (
-                        <>
-                          <CreditCard size={12} className="text-brand-primary" />
-                          <span>Manage Plan</span>
-                        </>
-                      );
-                    } else if (plan === 'enterprise') {
-                      return (
-                        <>
-                          <Building2 size={12} className="text-brand-primary" />
-                          <span>Manage Enterprise</span>
-                        </>
-                      );
-                    } else {
-                      return (
-                        <>
-                          <Crown size={12} className="text-brand-primary" />
-                          <span>Upgrade</span>
-                        </>
-                      );
-                    }
-                  })()}
-                </p>
-              </button>
-              
-              <div className="pt-2 text-center text-[10px] text-white/30 font-bold uppercase tracking-widest leading-[1.4]">
-                <div className="opacity-50 text-[9px]">Refreshes On</div>
-                <div className="text-white/60 font-extrabold mt-0.5">
-                  {formatRefreshDate(userProfile?.nextRefreshDate)}
+              {/* Thinking Engine Section */}
+              <div className="space-y-3 pt-2 border-t border-white/5">
+                <div className="flex justify-between text-[10px] font-black uppercase tracking-[0.2em] text-white/40">
+                  <span>AI Requests</span>
+                  <span className="text-purple-400">
+                    {isGuestMode ? (
+                      "NOT AVAILABLE IN GUEST MODE"
+                    ) : (
+                      `${Math.round(thinkingUsageRes.monthlyPercentage)}% used`
+                    )}
+                  </span>
+                </div>
+
+                <div className="w-full h-2 bg-white/5 rounded-full overflow-hidden">
+                  <div 
+                    className="h-full bg-purple-500 transition-all duration-1000 ease-out shadow-[0_0_10px_rgba(168,85,247,0.4)]"
+                    style={{ width: `${thinkingUsageRes.monthlyPercentage}%` }}
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <div className="flex justify-between items-center">
+                    <div className="text-[11px] text-white/60 font-bold">
+                      {!isGuestMode && (
+                        `Monthly: ${thinkingUsageRes.monthlyUsed} / ${thinkingUsageRes.monthlyLimit === 'unlimited' ? '∞' : thinkingUsageRes.monthlyLimit}`
+                      )}
+                    </div>
+                    {!isGuestMode && thinkingUsageRes.isExceeded && (
+                      <div className="text-[9px] text-purple-400 font-bold animate-pulse">
+                        Limit exceeded
+                      </div>
+                    )}
+                  </div>
+                  {!isGuestMode && (
+                    <div className="text-[10px] text-[#00D1FF] font-black uppercase tracking-wider">
+                      Top-Up: {thinkingUsageRes.topupBalance} AI Requests
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Upgrade/Manage Subscription button */}
+              <div className="pt-2 space-y-3">
+                <button 
+                  onClick={onOpenUpgrade}
+                  className="w-full p-2.5 rounded-lg bg-echo-accent/10 border border-echo-accent/20 text-center hover:bg-echo-accent transition-all group"
+                >
+                  <p className="text-[10px] text-brand-primary font-black uppercase tracking-widest flex items-center justify-center gap-2">
+                    {(() => {
+                      const plan = (userProfile?.plan || 'free').toLowerCase();
+                      if (plan === 'pro' || plan === 'team') {
+                        return (
+                          <>
+                            <CreditCard size={12} className="text-brand-primary" />
+                            <span>Manage Plan</span>
+                          </>
+                        );
+                      } else if (plan === 'enterprise') {
+                        return (
+                          <>
+                            <Building2 size={12} className="text-brand-primary" />
+                            <span>Manage Enterprise</span>
+                          </>
+                        );
+                      } else {
+                        return (
+                          <>
+                            <Crown size={12} className="text-brand-primary" />
+                            <span>Upgrade</span>
+                          </>
+                        );
+                      }
+                    })()}
+                  </p>
+                </button>
+                
+                <div className="pt-2 text-center text-[10px] text-white/30 font-bold uppercase tracking-widest leading-[1.4]">
+                  <div className="opacity-50 text-[9px]">Refreshes On</div>
+                  <div className="text-white/60 font-extrabold mt-0.5">
+                    {formatRefreshDate(userProfile?.nextRefreshDate)}
+                  </div>
                 </div>
               </div>
             </div>
-          </div>
-        ) : (
-          <div className="mx-4 mb-4 flex justify-center">
-            <div className="w-10 h-10 rounded-full bg-white/10 text-white/40 flex items-center justify-center shadow-lg">
-              <i className="fa-solid fa-chart-pie text-sm"></i>
+          ) : (
+            <div className="flex justify-center pb-2">
+              <div className="w-10 h-10 rounded-full bg-white/10 text-white/40 flex items-center justify-center shadow-lg">
+                <i className="fa-solid fa-chart-pie text-sm"></i>
+              </div>
             </div>
-          </div>
-        )}
+          )}
+        </div>
+      </div>
 
 
         {/* Project Deletion Modal */}

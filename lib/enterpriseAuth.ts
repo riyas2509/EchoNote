@@ -10,6 +10,7 @@ import {
   UserCredential 
 } from 'firebase/auth';
 import { AuthDiscoveryResult, EnterpriseProviderType } from '../types';
+import { apiFetch, getApiUrl } from './apiClient';
 
 export interface EnterpriseSignInOptions {
   mode?: 'popup' | 'redirect';
@@ -136,17 +137,14 @@ export async function initiateEnterpriseSignIn(
 export async function validateEnterpriseAuthSession(
   user: User,
   discovery?: AuthDiscoveryResult | null,
-  apiUrlBase: string = ""
+  apiUrlBase?: string
 ): Promise<EnterpriseValidationResult> {
-  const idToken = await user.getIdToken(true);
-  const endpoint = `${apiUrlBase}/api/auth/sso/validate`;
+  const endpoint = apiUrlBase 
+    ? `${apiUrlBase.replace(/\/+$/, '')}/api/auth/sso/validate`
+    : getApiUrl('/api/auth/sso/validate');
 
-  const response = await fetch(endpoint, {
+  const response = await apiFetch(endpoint, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${idToken}`
-    },
     body: JSON.stringify({
       orgId: discovery?.orgId,
       providerId: discovery ? resolveProviderId(discovery) : undefined,

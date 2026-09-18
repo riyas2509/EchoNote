@@ -44,6 +44,7 @@ RUN npm ci --only=production && npm cache clean --force
 # Copy compiled assets from builder
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/firebase-blueprint.json ./firebase-blueprint.json
+COPY --from=builder /app/firebase-applet-config.json ./firebase-applet-config.json
 COPY --from=builder /app/firestore.rules ./firestore.rules
 
 # Cloud Run injects PORT dynamically; server.ts reads process.env.PORT

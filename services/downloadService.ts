@@ -1,18 +1,27 @@
 import { jsPDF } from "jspdf";
+import { auth } from "../firebase";
 
 export const executeDownload = async (fileName: string, contentUrl: string, format: string) => {
   try {
     let finalUrl = contentUrl;
     
-    // For cross-origin URLs (like remote audio), we fetch them to ensure download works
-    if (contentUrl.startsWith('http') && !contentUrl.includes(window.location.host)) {
+    // For protected backend routes or cross-origin URLs, fetch them with authorization to ensure secure download
+    if (contentUrl.includes('/api/recordings/') || contentUrl.startsWith('/') || (contentUrl.startsWith('http') && !contentUrl.includes(window.location.host))) {
       try {
-        const response = await fetch(contentUrl);
+        const headers: Record<string, string> = {};
+        if (auth.currentUser) {
+          const idToken = await auth.currentUser.getIdToken();
+          headers['Authorization'] = `Bearer ${idToken}`;
+        }
+        const response = await fetch(contentUrl, { headers });
+        if (!response.ok) {
+          throw new Error(`Download request failed: ${response.status} ${response.statusText}`);
+        }
         const blob = await response.blob();
         finalUrl = URL.createObjectURL(blob);
       } catch (err) {
-        console.error("Failed to fetch remote asset for download:", err);
-        // Fallback to original URL if fetch fails (might still work if CORS allows)
+        console.error("Failed to fetch asset for download:", err);
+        throw err;
       }
     }
 

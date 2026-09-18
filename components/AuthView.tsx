@@ -57,6 +57,25 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
+function formatAuthError(err: any, fallbackMessage: string = 'Authentication failed.'): string {
+  if (!err) return fallbackMessage;
+  const code = err.code || '';
+  if (code === 'auth/unauthorized-domain') {
+    const currentHost = typeof window !== 'undefined' ? window.location.hostname : 'this domain';
+    return `Domain "${currentHost}" is not authorized for Firebase Authentication. Please add "${currentHost}" to Authorized Domains in your Firebase Console (Authentication > Settings > Authorized domains).`;
+  }
+  if (code === 'auth/operation-not-allowed') {
+    return 'This sign-in provider is not enabled in Firebase Authentication.';
+  }
+  if (code === 'auth/popup-blocked') {
+    return 'Popup was blocked by your browser. Please allow popups to authenticate.';
+  }
+  if (code === 'auth/popup-closed-by-user') {
+    return 'Sign-in popup was closed before completing authentication.';
+  }
+  return err.message || fallbackMessage;
+}
+
 interface AuthViewProps {
   onAuth: (status: AuthStatus, profile?: UserProfile, rememberMe?: boolean) => void;
   isSettingsMode?: boolean;
@@ -204,15 +223,7 @@ const AuthView: React.FC<AuthViewProps> = ({
       toast.success('Signed in with Google!');
     } catch (err: any) {
       console.error("Google SSO Error:", err);
-      if (err.code === 'auth/operation-not-allowed') {
-        setError("Google Sign-In is not enabled for this project.");
-      } else if (err.code === 'auth/popup-blocked') {
-        setError("Popup was blocked by your browser. Please allow popups to authenticate.");
-      } else if (err.code === 'auth/popup-closed-by-user') {
-        setError("Sign in popup was closed before completing authentication.");
-      } else {
-        setError(err.message || 'Google authentication failed.');
-      }
+      setError(formatAuthError(err, 'Google authentication failed.'));
     } finally {
       setSsoLoading(null);
     }
@@ -246,13 +257,8 @@ const AuthView: React.FC<AuthViewProps> = ({
       
       if (authDiscovery?.authMode === 'enterprise' || authDiscovery?.entraTenantId) {
         try {
-          const idToken = await result.user.getIdToken(true);
-          const response = await fetch(getApiUrl("/api/auth/sso/validate-entra"), {
+          const response = await apiFetch("/api/auth/sso/validate-entra", {
             method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "Authorization": `Bearer ${idToken}`
-            },
             body: JSON.stringify({
               tenantId: authDiscovery?.entraTenantId
             })
@@ -288,15 +294,7 @@ const AuthView: React.FC<AuthViewProps> = ({
       toast.success('Signed in with Microsoft!');
     } catch (err: any) {
       console.error("Microsoft SSO Error:", err);
-      if (err.code === 'auth/operation-not-allowed' || err.code === 'auth/configuration-not-found') {
-        setError("Microsoft Enterprise SSO is not configured or enabled in Google Identity Platform.");
-      } else if (err.code === 'auth/popup-blocked') {
-        setError("Popup was blocked by your browser. Please allow popups to connect Microsoft account.");
-      } else if (err.code === 'auth/popup-closed-by-user') {
-        setError("Sign in popup was closed before completing authentication.");
-      } else {
-        setError(err.message || 'Microsoft SSO authentication failed.');
-      }
+      setError(formatAuthError(err, 'Microsoft SSO authentication failed.'));
     } finally {
       setSsoLoading(null);
     }
@@ -319,13 +317,8 @@ const AuthView: React.FC<AuthViewProps> = ({
       const provider = new SAMLAuthProvider(providerId);
       const result = await signInWithPopup(auth, provider);
 
-      const idToken = await result.user.getIdToken(true);
-      const response = await fetch(getApiUrl("/api/auth/sso/validate-saml"), {
+      const response = await apiFetch("/api/auth/sso/validate-saml", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${idToken}`
-        },
         body: JSON.stringify({
           orgId: authDiscovery?.orgId,
           providerId
@@ -362,17 +355,7 @@ const AuthView: React.FC<AuthViewProps> = ({
       toast.success('Signed in with Enterprise SAML!');
     } catch (err: any) {
       console.error("SAML SSO Error:", err);
-      if (err.code === 'auth/operation-not-allowed' || err.code === 'auth/configuration-not-found') {
-        setError(`SAML provider "${providerId}" is not configured in Google Identity Platform.`);
-      } else if (err.code === 'auth/popup-blocked') {
-        setError("Popup was blocked by your browser. Please allow popups to continue SAML login.");
-      } else if (err.code === 'auth/popup-closed-by-user') {
-        setError("Sign in popup was closed before completing SAML authentication.");
-      } else if (err.code === 'auth/invalid-credential' || err.code === 'auth/user-mismatch') {
-        setError("SAML assertion could not be validated. Please verify your IdP credentials.");
-      } else {
-        setError(err.message || 'SAML Enterprise SSO authentication failed.');
-      }
+      setError(formatAuthError(err, 'SAML Enterprise SSO authentication failed.'));
     } finally {
       setSsoLoading(null);
     }
@@ -474,7 +457,9 @@ const AuthView: React.FC<AuthViewProps> = ({
       toast.success('Signed in successfully!');
     } catch (err: any) {
       console.error("Sign In Error:", err);
-      if (err.code === 'auth/user-not-found' || err.code === 'auth/wrong-password' || err.code === 'auth/invalid-credential') {
+      if (err.code === 'auth/unauthorized-domain') {
+        setError(formatAuthError(err));
+      } else if (err.code === 'auth/user-not-found' || err.code === 'auth/wrong-password' || err.code === 'auth/invalid-credential') {
         setError('Incorrect email or password.');
       } else if (err.code === 'auth/invalid-email') {
         setError('Invalid email address format.');
@@ -485,7 +470,7 @@ const AuthView: React.FC<AuthViewProps> = ({
       } else if (err.code === 'auth/network-request-failed') {
         setError('Network error. Please verify your connection.');
       } else {
-        setError(err.message || 'Failed to sign in. Please try again.');
+        setError(formatAuthError(err, 'Failed to sign in. Please try again.'));
       }
     } finally {
       setLoading(false);
@@ -588,7 +573,9 @@ const AuthView: React.FC<AuthViewProps> = ({
       toast.success('Welcome to EchoNote!');
     } catch (err: any) {
       console.error("Sign Up Error:", err);
-      if (err.code === 'auth/email-already-in-use') {
+      if (err.code === 'auth/unauthorized-domain') {
+        setError(formatAuthError(err));
+      } else if (err.code === 'auth/email-already-in-use') {
         setError('An account with this email address already exists. Please sign in instead.');
       } else if (err.code === 'auth/invalid-email') {
         setError('Invalid email address format.');
@@ -599,7 +586,7 @@ const AuthView: React.FC<AuthViewProps> = ({
       } else if (err.code === 'auth/network-request-failed') {
         setError('Network error. Please check your internet connection.');
       } else {
-        setError(err.message || 'Failed to create account. Please try again.');
+        setError(formatAuthError(err, 'Failed to create account. Please try again.'));
       }
     } finally {
       setLoading(false);

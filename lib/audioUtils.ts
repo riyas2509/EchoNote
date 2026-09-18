@@ -10,8 +10,12 @@ try {
     ffmpeg.setFfmpegPath(ffmpegStatic);
     ffmpegPathResolved = ffmpegStatic;
     console.log(`[AudioUtils] FFmpeg initialized with binary at: ${ffmpegStatic}`);
+  } else if (fs.existsSync('/usr/bin/ffmpeg')) {
+    ffmpeg.setFfmpegPath('/usr/bin/ffmpeg');
+    ffmpegPathResolved = '/usr/bin/ffmpeg';
+    console.log(`[AudioUtils] FFmpeg initialized with system binary at: /usr/bin/ffmpeg`);
   } else {
-    console.warn("[AudioUtils] ffmpeg-static path did not resolve to an existing executable file.");
+    console.warn("[AudioUtils] Neither ffmpeg-static nor /usr/bin/ffmpeg was found.");
   }
 } catch (err: any) {
   console.error("[AudioUtils] Error configuring FFmpeg path:", err?.message || err);

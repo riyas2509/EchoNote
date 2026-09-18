@@ -4,6 +4,7 @@ import { auth, onAuthStateChanged, User, getRedirectResult, db, doc, getDoc, get
 import { UserProfile, CustomClaims } from '../types';
 import { PLAN_FEATURES } from '../config/planConfig';
 import { shouldResetUsage, getAdvancedRefreshDate, migrateLegacyUserFields, calculateNextRefreshDate } from '../lib/usageUtils';
+import { apiFetch } from '../lib/apiClient';
 
 interface FirebaseContextType {
   user: User | null;
@@ -48,13 +49,8 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       // 2. If claims are not yet set or need backend sync, call sync-claims
       if (!claims.orgId) {
         try {
-          const idToken = await auth.currentUser.getIdToken();
-          const syncRes = await fetch('/api/auth/sync-claims', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': `Bearer ${idToken}`
-            }
+          const syncRes = await apiFetch('/api/auth/sync-claims', {
+            method: 'POST'
           });
           if (syncRes.ok) {
             const data = await syncRes.json();
@@ -94,13 +90,8 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       .then(async (result) => {
         if (result?.user) {
           try {
-            const idToken = await result.user.getIdToken(true);
-            await fetch('/api/auth/sso/validate', {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${idToken}`
-              }
+            await apiFetch('/api/auth/sso/validate', {
+              method: 'POST'
             });
             await result.user.getIdToken(true);
           } catch (syncErr) {

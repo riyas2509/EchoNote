@@ -7,6 +7,7 @@ export interface AuthenticatedRequest extends Request {
     orgId?: string;
     orgRole?: AuthoritativeOrgRole;
     role?: 'admin' | 'user';
+    platform_admin?: boolean;
     isOwner?: boolean;
   };
 }
@@ -480,3 +481,157 @@ export function requireOrgRole(
     }
   };
 }
+
+/**
+ * Authoritative Platform Administrator Middleware Generator.
+ * Enforces that caller is authenticated and possesses the platform 'admin' role.
+ * Distinguishes platform administrators from tenant/organization roles (owner, org_admin, etc.).
+ * Verifies via trusted Firebase ID Token custom claims first, with authoritative Firestore database fallback.
+ */
+export function requireAdmin(db: admin.firestore.Firestore) {
+  return async (req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> => {
+    if (!req.user || !req.user.uid) {
+      res.status(401).json({
+        error: "Unauthorized",
+        message: "Authentication required."
+      });
+      return;
+    }
+
+    const userUid = req.user.uid;
+
+    // 1. Authoritative check via verified token custom claims
+    // The custom claim `role` is set strictly server-side to 'admin' | 'user'.
+    // Tenant-scoped roles ('owner', 'org_admin', 'team_manager', 'member', 'viewer') do NOT grant platform admin access.
+    if (req.user.role === 'admin') {
+      next();
+      return;
+    }
+
+    // 2. Authoritative Database verification fallback in Firestore /users/{uid}
+    try {
+      const userDoc = await db.collection("users").doc(userUid).get();
+      if (userDoc.exists) {
+        const userData = userDoc.data() || {};
+        if (userData.role === 'admin') {
+          // Sync custom claims in background for subsequent requests
+          syncUserCustomClaims(userUid, db, { role: 'admin' }).catch(err => {
+            console.warn("Background admin claim sync notice:", err?.message);
+          });
+          req.user.role = 'admin';
+          next();
+          return;
+        }
+      }
+
+      // User is authenticated but is not a platform administrator
+      console.warn(`🔒 [requireAdmin] Unauthorized access attempt to ${req.originalUrl || req.path} by user ${userUid} (email: ${req.user?.email || 'unknown'})`);
+      res.status(403).json({
+        error: "Forbidden",
+        message: "Access denied. Platform administrator privileges required."
+      });
+      return;
+    } catch (err: any) {
+      console.error("⚠️ requireAdmin verification error:", err?.message || err);
+      res.status(403).json({
+        error: "Forbidden",
+        message: "Access denied."
+      });
+      return;
+    }
+  };
+}
+
+/**
+ * Authoritative Platform Administrator Middleware.
+ * Validates the Firebase ID token and verifies that the caller has:
+ * 1. The 'platform_admin' custom claim (or platform role 'admin') set server-side
+ *    OR
+ * 2. Authoritative role 'admin' in Firestore /users/{uid} document.
+ * 
+ * Tenant-scoped roles (owner, org_admin, etc.) and hardcoded emails DO NOT grant platform admin access.
+ */
+export async function requirePlatformAdmin(
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  // 1. Validate Firebase Token if not already decoded
+  if (!req.user) {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+      res.status(401).json({
+        error: "Unauthorized",
+        message: "Missing or invalid Authorization header. Expected 'Bearer <token>'."
+      });
+      return;
+    }
+
+    const token = authHeader.split("Bearer ")[1]?.trim();
+    if (!token) {
+      res.status(401).json({
+        error: "Unauthorized",
+        message: "Authentication token missing from Authorization header."
+      });
+      return;
+    }
+
+    try {
+      const decodedToken = await admin.auth().verifyIdToken(token);
+      const userClaims: any = { ...decodedToken };
+      if (decodedToken.orgRole) {
+        userClaims.orgRole = normalizeOrgRole(decodedToken.orgRole as string);
+      }
+      req.user = userClaims;
+    } catch (error: any) {
+      console.error("🔒 [requirePlatformAdmin] Token verification failed:", error?.message || error);
+      res.status(401).json({
+        error: "Unauthorized",
+        message: "Invalid, expired, or revoked authentication token.",
+        code: error?.code || "auth/invalid-token"
+      });
+      return;
+    }
+  }
+
+  // 2. Authoritative check: verified server-side custom claim
+  const hasPlatformAdminClaim = Boolean(
+    req.user.platform_admin === true ||
+    req.user.role === "admin" ||
+    (req.user as any)?.claims?.platform_admin === true
+  );
+
+  if (hasPlatformAdminClaim) {
+    next();
+    return;
+  }
+
+  // 3. Fallback: Authoritative server database lookup in Firestore /users/{uid}
+  try {
+    const db = admin.firestore();
+    const userDoc = await db.collection("users").doc(req.user.uid).get();
+    if (userDoc.exists) {
+      const userData = userDoc.data() || {};
+      if (userData.role === "admin" || userData.platform_admin === true) {
+        req.user.role = "admin";
+        req.user.platform_admin = true;
+        // Background sync claims for subsequent requests
+        syncUserCustomClaims(req.user.uid, db, { role: "admin" }).catch(err => {
+          console.warn("Background admin claim sync notice:", err?.message);
+        });
+        next();
+        return;
+      }
+    }
+  } catch (dbErr: any) {
+    console.warn("🔒 [requirePlatformAdmin] Firestore lookup error:", dbErr?.message);
+  }
+
+  // 4. Unauthorized
+  console.warn(`🔒 [requirePlatformAdmin] Unauthorized platform admin attempt by ${req.user.uid} (${req.user.email || 'unknown'}) on ${req.originalUrl || req.path}`);
+  res.status(403).json({
+    error: "Forbidden",
+    message: "Access denied. Platform administrator privileges required."
+  });
+}
+

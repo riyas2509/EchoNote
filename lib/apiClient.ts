@@ -2,9 +2,12 @@ import { auth } from '../firebase';
 
 /**
  * Returns the base API URL configured in the environment, or empty string for same-origin requests.
+ * Safely trims and strips trailing slashes to prevent double slashes.
  */
 export function getApiBaseUrl(): string {
-  const envUrl = import.meta.env.VITE_API_URL;
+  const envUrl = (typeof import.meta !== 'undefined' && (import.meta as any)?.env)
+    ? (import.meta as any).env.VITE_API_URL
+    : (typeof process !== 'undefined' && process.env ? process.env.VITE_API_URL : undefined);
   if (typeof envUrl === 'string') {
     const trimmed = envUrl.trim();
     if (
@@ -13,7 +16,25 @@ export function getApiBaseUrl(): string {
       trimmed.toLowerCase() !== 'undefined' &&
       trimmed.toLowerCase() !== 'null'
     ) {
-      return trimmed.replace(/\/+$/, '');
+      // Remove all trailing slashes
+      const cleanBase = trimmed.replace(/\/+$/, '');
+      
+      // Safety check: Warn if VITE_API_URL points to the frontend origin instead of the backend
+      if (typeof window !== 'undefined' && window.location.origin) {
+        try {
+          const parsed = new URL(cleanBase);
+          if (parsed.origin === window.location.origin && window.location.hostname.endsWith('.vercel.app')) {
+            console.warn(
+              "⚠️ [EchoNote Config Warning] VITE_API_URL is configured to the Vercel frontend domain itself. " +
+              "It must point to your Cloud Run Express backend URL (e.g. https://<backend-service>.run.app)."
+            );
+          }
+        } catch {
+          // Ignore invalid URL parsing here
+        }
+      }
+
+      return cleanBase;
     }
   }
   return '';
@@ -53,11 +74,27 @@ export async function parseApiResponse<T = any>(response: Response): Promise<Api
     if (isOk) {
       return { ok: true, status, data: {} as T };
     }
+    
+    // Provide explicit, actionable diagnosis for HTTP 405 Method Not Allowed
+    let errorDetail = `Server returned an empty error response (HTTP ${status})`;
+    if (status === 405) {
+      const hasApiUrl = Boolean(getApiBaseUrl());
+      const isVercelHost = typeof window !== 'undefined' && window.location.hostname.endsWith('.vercel.app');
+      errorDetail = `Server returned an empty error response (HTTP 405 Method Not Allowed). ${
+        !hasApiUrl
+          ? "The request was routed to the Vercel static frontend host because VITE_API_URL is not configured. Please set VITE_API_URL in your Vercel Project Settings to your Cloud Run backend URL and redeploy."
+          : isVercelHost && getApiBaseUrl().includes('vercel.app')
+          ? "VITE_API_URL is configured to the Vercel frontend host instead of the Cloud Run backend URL. Please point VITE_API_URL to your Cloud Run backend URL."
+          : "The requested endpoint does not allow this HTTP method or was intercepted by a static web server."
+      }`;
+    }
+
     return {
       ok: false,
       status,
       data: null,
-      error: `Server returned an empty error response (HTTP ${status})`
+      error: errorDetail,
+      code: status === 405 ? 'METHOD_NOT_ALLOWED' : undefined
     };
   }
 
@@ -78,6 +115,22 @@ export async function parseApiResponse<T = any>(response: Response): Promise<Api
     };
   } catch (parseErr) {
     // Non-JSON response (e.g., HTML fallback or plaintext error)
+    if (status === 405) {
+      const hasApiUrl = Boolean(getApiBaseUrl());
+      const safeMsg = `Server returned HTTP 405 Method Not Allowed. ${
+        !hasApiUrl
+          ? "The request reached the Vercel static hosting layer because VITE_API_URL is not set. Please set VITE_API_URL to your Cloud Run backend URL in Vercel and redeploy."
+          : "The static server rejected the request method. Check that VITE_API_URL points to the Cloud Run backend."
+      }`;
+      return {
+        ok: false,
+        status,
+        data: null,
+        error: safeMsg,
+        code: "METHOD_NOT_ALLOWED"
+      };
+    }
+
     const isHtml = /<!DOCTYPE|<html/i.test(rawText);
     const preview = rawText.length > 150 ? rawText.slice(0, 150) + '...' : rawText;
 
@@ -112,12 +165,19 @@ export async function safeApiJson<T = any>(response: Response): Promise<T> {
 /**
  * Constructs a fully qualified or clean relative URL for an API endpoint.
  * Ensures consistent routing regardless of same-origin or multi-origin deployment.
+ * Completely eliminates double slashes.
  */
 export function getApiUrl(path: string): string {
   if (path.startsWith('http://') || path.startsWith('https://')) {
-    return path;
+    try {
+      const parsed = new URL(path);
+      parsed.pathname = parsed.pathname.replace(/\/+/g, '/');
+      return parsed.toString();
+    } catch {
+      return path;
+    }
   }
-  const cleanPath = path.startsWith('/') ? path : `/${path}`;
+  const cleanPath = '/' + path.replace(/^\/+/, '');
   const baseUrl = getApiBaseUrl();
   return baseUrl ? `${baseUrl}${cleanPath}` : cleanPath;
 }
@@ -199,6 +259,41 @@ export async function getAuthHeaders(extraHeaders: Record<string, string> = {}):
 }
 
 /**
+ * Safe frontend diagnostic helper that reports configuration status without leaking any secrets.
+ */
+export interface FrontendDiagnostic {
+  apiBaseUrlConfigured: boolean;
+  apiBaseUrlOrigin: string | null;
+  firebaseConfigured: boolean;
+  clientOrigin: string;
+}
+
+export function getFrontendDiagnostic(): FrontendDiagnostic {
+  const baseUrl = getApiBaseUrl();
+  let apiBaseUrlOrigin: string | null = null;
+  if (baseUrl) {
+    try {
+      apiBaseUrlOrigin = new URL(baseUrl).origin;
+    } catch {
+      apiBaseUrlOrigin = baseUrl;
+    }
+  }
+
+  const clientOrigin = typeof window !== 'undefined' ? window.location.origin : '';
+
+  return {
+    apiBaseUrlConfigured: Boolean(baseUrl && baseUrl.length > 0),
+    apiBaseUrlOrigin,
+    firebaseConfigured: Boolean(auth && auth.app),
+    clientOrigin
+  };
+}
+
+if (typeof window !== 'undefined') {
+  (window as any).__ECHONOTE_DIAGNOSTICS__ = getFrontendDiagnostic;
+}
+
+/**
  * Wrapper around standard fetch that:
  * 1. Automatically resolves relative endpoints via getApiUrl()
  * 2. Automatically attaches the Firebase ID token in Authorization header
@@ -208,9 +303,11 @@ export async function apiFetch(input: RequestInfo | URL, init: RequestInit = {})
   let finalInput = input;
   let targetUrlStr = typeof input === 'string' ? input : input.toString();
 
-  if (typeof input === 'string' && input.startsWith('/')) {
-    finalInput = getApiUrl(input);
-    targetUrlStr = finalInput;
+  if (typeof input === 'string') {
+    if (input.startsWith('/') || (!input.startsWith('http://') && !input.startsWith('https://'))) {
+      finalInput = getApiUrl(input);
+      targetUrlStr = finalInput;
+    }
   }
 
   const token = await getAuthToken();

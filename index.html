@@ -242,22 +242,50 @@
     color: #0F172A !important;
   }
 
+  /* Standardized Custom Scrollbar Utility */
+  .custom-scrollbar {
+    overflow-y: auto;
+    scrollbar-width: thin !important;
+    scrollbar-color: var(--divider, #CBD5E1) transparent !important;
+    -webkit-overflow-scrolling: touch;
+  }
   .custom-scrollbar::-webkit-scrollbar {
-    width: 6px;
+    width: 6px !important;
+    height: 6px !important;
   }
   .custom-scrollbar::-webkit-scrollbar-track {
-    background: transparent;
+    background: transparent !important;
   }
   .custom-scrollbar::-webkit-scrollbar-thumb {
-    background: var(--divider);
-    border-radius: 8px;
+    background-color: var(--divider, #CBD5E1) !important;
+    border-radius: 8px !important;
   }
-  .scrollbar-hide::-webkit-scrollbar {
-    display: none;
+  .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+    background-color: #94A3B8 !important;
   }
-  .scrollbar-hide {
-    -ms-overflow-style: none;
-    scrollbar-width: none;
+  .custom-scrollbar::-webkit-scrollbar-thumb:active {
+    background-color: #64748B !important;
+  }
+
+  /* Ensure main content area and navigation sidebar adhere strictly to overflow-y: auto */
+  main.flex-1,
+  nav.custom-scrollbar,
+  nav .custom-scrollbar {
+    overflow-y: auto;
+  }
+
+  /* Scrollbar Hide Utility (scrollbar-hide and scrollbar-none aliases) */
+  .scrollbar-hide,
+  .scrollbar-none {
+    -ms-overflow-style: none !important; /* IE and Edge */
+    scrollbar-width: none !important;    /* Firefox */
+    -webkit-overflow-scrolling: touch;
+  }
+  .scrollbar-hide::-webkit-scrollbar,
+  .scrollbar-none::-webkit-scrollbar {
+    display: none !important;            /* Chrome, Safari, Opera */
+    width: 0 !important;
+    height: 0 !important;
   }
   body {
     background-color: var(--background);

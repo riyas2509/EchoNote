@@ -10,6 +10,7 @@ import {
   onSnapshot 
 } from '../firebase';
 import { UserProfile } from '../types';
+import { apiFetch } from '../lib/apiClient';
 
 const SUB_REVENUE_MAPPING: Record<string, number> = {
   "guest": 0,
@@ -219,8 +220,8 @@ export const AdminTrackerView: React.FC<AdminTrackerViewProps> = ({ userProfile,
     if (!firestoreLoaded) {
       try {
         const [overviewRes, logsRes] = await Promise.all([
-          fetch('/api/admin/analytics/overview'),
-          fetch('/api/admin/analytics/logs?limit=150')
+          apiFetch('/api/admin/analytics/overview'),
+          apiFetch('/api/admin/analytics/logs?limit=150')
         ]);
         if (overviewRes.ok) {
           const overviewJson = await overviewRes.json();

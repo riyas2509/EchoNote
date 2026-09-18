@@ -24,12 +24,15 @@ import {
   checkProjectAccess, 
   checkOrgAccess, 
   requireOrgRole, 
+  requireAdmin,
+  requirePlatformAdmin,
   syncUserCustomClaims, 
   recordOrgAuditEvent, 
   normalizeOrgRole, 
   ROLE_HIERARCHY, 
   AuthenticatedRequest 
 } from "./middleware/auth.ts";
+import { admitExpensiveOperation } from "./middleware/runtimeLimiter.ts";
 import { 
   processEnterpriseJitOrSync, 
   evaluateIdentityMappings 
@@ -41,6 +44,16 @@ import {
   OrgAllowedAuthMethod, 
   OrgSecurityHealthSummary 
 } from "./types.js";
+import {
+  SERVER_PLAN_LIMITS,
+  MINUTE_TOPUP_PACKAGES,
+  AI_REQUEST_TOPUP_PACKAGES,
+  fulfillTopupOrder,
+  fulfillSubscriptionPayment,
+  recordPendingSubscription,
+  recordPendingOrder,
+  isProductionEnvironment
+} from "./middleware/billingFulfillment.ts";
 
 // Initialize Firebase Admin
 let firebaseConfig: any = {};
@@ -59,11 +72,13 @@ if (!getApps().length) {
     appAdmin = initializeApp({ 
       credential: admin.credential.applicationDefault(),
       projectId: firebaseConfig.projectId || process.env.GOOGLE_CLOUD_PROJECT || "echonote-2509",
+      storageBucket: firebaseConfig.storageBucket || "echonote-2509.firebasestorage.app"
     });
   } catch (err) {
     console.warn("⚠️ Firebase Admin default credential init failed, falling back without explicit credential:", err);
     appAdmin = initializeApp({ 
       projectId: firebaseConfig.projectId || process.env.GOOGLE_CLOUD_PROJECT || "echonote-2509",
+      storageBucket: firebaseConfig.storageBucket || "echonote-2509.firebasestorage.app"
     });
   }
 } else {
@@ -101,6 +116,15 @@ checkIdentity();
 
 import { Resend } from "resend";
 import Razorpay from "razorpay";
+
+// Cryptographically secure constant-time string comparison to prevent timing analysis attacks
+function timingSafeStringCompare(a?: string | null, b?: string | null): boolean {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  const bufA = Buffer.from(a);
+  const bufB = Buffer.from(b);
+  if (bufA.length !== bufB.length) return false;
+  return crypto.timingSafeEqual(bufA, bufB);
+}
 
 const resendKey = process.env.RESEND_API_KEY;
 const resend = resendKey ? new Resend(resendKey) : null;
@@ -193,7 +217,7 @@ function getRazorpayClient(): Razorpay {
 async function startServer() {
   console.log("🚀 SERVER RESTARTED AT:", new Date().toISOString());
   const app = express();
-  const PORT = Number(process.env.PORT) || 3000;
+  const PORT = 3000;
   
   let _aiGenInstance: GoogleGenAI | null = null;
   const aiGen = {
@@ -225,6 +249,9 @@ async function startServer() {
     .filter(Boolean);
 
   const defaultAllowedOrigins = [
+    "https://echonote-25.ai.studio",
+    "https://ai.studio",
+    "https://echonote-25.vercel.app",
     "https://echotechai.in",
     "https://www.echotechai.in",
     "http://localhost:3000",
@@ -244,13 +271,24 @@ async function startServer() {
         return callback(null, true);
       }
 
-      // Allow Vercel deployments (production, previews, branch deploys)
-      if (/\.vercel\.app$/.test(cleanOrigin)) {
+      // Allow Google AI Studio domains (published app URLs and studio hosts)
+      if (/(^|\.)ai\.studio$/.test(cleanOrigin) || /(^|\.)google\.com$/.test(cleanOrigin)) {
         return callback(null, true);
       }
 
-      // Allow Cloud Run and Firebase hosting previews
-      if (/\.run\.app$/.test(cleanOrigin) || /\.web\.app$/.test(cleanOrigin) || /\.firebaseapp\.com$/.test(cleanOrigin)) {
+      // Allow EchoNote Vercel deployments (production, previews, and branch deploys)
+      if (/^https:\/\/echonote(-[a-zA-Z0-9_-]+)?\.vercel\.app$/.test(cleanOrigin)) {
+        return callback(null, true);
+      }
+
+      // Allow EchoNote Cloud Run and Firebase hosting previews
+      if (
+        /^https:\/\/ais-(dev|pre)-[a-zA-Z0-9_-]+-[0-9]+\.[a-z0-9-]+\.run\.app$/.test(cleanOrigin) ||
+        /^https:\/\/echonote(-backend)?-[a-zA-Z0-9_-]+\.(a\.)?run\.app$/.test(cleanOrigin) ||
+        /^https:\/\/echonote(-backend)?-[0-9]+\.[a-z0-9-]+\.run\.app$/.test(cleanOrigin) ||
+        cleanOrigin === "https://echonote-2509.web.app" ||
+        cleanOrigin === "https://echonote-2509.firebaseapp.com"
+      ) {
         return callback(null, true);
       }
 
@@ -264,19 +302,21 @@ async function startServer() {
         return callback(null, true);
       }
 
-      return callback(new Error(`Origin ${origin} not allowed by CORS`));
+      // Reject disallowed origins gracefully without throwing an uncaught 500 error
+      return callback(null, false);
     },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin']
   }));
 
-  // Logging middleware for debugging
+  // Logging middleware for debugging (sanitizes query parameters to prevent token/secret leakage in logs)
   app.use((req, res, next) => {
     const start = Date.now();
     res.on('finish', () => {
       const duration = Date.now() - start;
-      console.log(`[${new Date().toISOString()}] ${req.method} ${req.url} ${res.statusCode} - ${duration}ms`);
+      const sanitizedPath = (req.originalUrl || req.url || '').split('?')[0];
+      console.log(`[${new Date().toISOString()}] ${req.method} ${sanitizedPath} ${res.statusCode} - ${duration}ms`);
     });
     next();
   });
@@ -286,7 +326,7 @@ async function startServer() {
     res.json({ 
       status: "ok", 
       time: new Date().toISOString(),
-      service: "echonote-backend"
+      service: process.env.K_SERVICE || "echonote"
     });
   });
 
@@ -333,37 +373,32 @@ async function startServer() {
     });
   });
 
-  // User identity resolver for AI & general endpoints
-  async function resolveUserContext(req: AuthenticatedRequest, fallbackEmail?: string, fallbackPlan?: string) {
-    if (req.user) {
-      const uid = req.user.uid;
-      const email = req.user.email || fallbackEmail || "user@echotechai.in";
-      let plan = "free";
+  // User identity resolver for AI & general endpoints - strictly authoritatively derived from verified auth token and Firestore
+  async function resolveUserContext(req: AuthenticatedRequest) {
+    if (!req.user || !req.user.uid) {
+      throw new Error("Authentication required");
+    }
+    const uid = req.user.uid;
+    const email = (req.user.email || "").trim().toLowerCase();
+    let plan = "free";
+    let userData: any = {};
 
-      try {
-        const userDoc = await db.collection("users").doc(uid).get();
-        if (userDoc.exists) {
-          const userData = userDoc.data() || {};
-          plan = userData.plan || "free";
-        }
-      } catch (e: any) {
-        // Fallback gracefully on permission limits
-        console.warn("⚠️ Could not read user profile for plan verification:", e.message);
+    try {
+      const userDoc = await db.collection("users").doc(uid).get();
+      if (userDoc.exists) {
+        userData = userDoc.data() || {};
+        plan = String(userData.plan || "free").toLowerCase();
       }
-
-      return {
-        userId: uid,
-        email,
-        plan: plan || fallbackPlan || "free",
-        isAuthenticated: true
-      };
+    } catch (e: any) {
+      console.warn("⚠️ Could not read user profile for plan verification:", e.message);
     }
 
     return {
-      userId: "guest",
-      email: "guest@echotechai.in",
-      plan: "guest",
-      isAuthenticated: false
+      userId: uid,
+      email,
+      plan: plan || "free",
+      userData,
+      isAuthenticated: true
     };
   }
 
@@ -4304,55 +4339,48 @@ async function startServer() {
     }
   });
 
-  // Decline/Reject Invitation
+  // Decline/Reject Invitation - Token validated & recipient verified
   app.post("/api/invite-decline", optionalAuth, async (req: AuthenticatedRequest, res) => {
     const { token } = req.body;
     const userId = req.user?.uid || null;
 
-    if (!token) {
+    if (!token || typeof token !== 'string') {
       return res.status(400).json({ error: "Missing token" });
     }
 
     try {
-      let invite: any = {
-        id: token,
-        projectId: "unknown",
-        projectName: "EchoNote Workspace",
-        email: "unknown@example.com"
-      };
-
-      try {
-        const inviteDocRef = db.collection("invites").doc(token);
-        const inviteDoc = await inviteDocRef.get();
-        if (inviteDoc.exists) {
-          invite = inviteDoc.data() || invite;
-        }
-      } catch (e: any) {
-        console.log("⚠️ Server-side invite get fallback:", e.message);
+      const inviteDocRef = db.collection("invites").doc(token);
+      const inviteDoc = await inviteDocRef.get();
+      if (!inviteDoc.exists) {
+        return res.status(404).json({ error: "NotFound", message: "Invitation not found or invalid token." });
       }
 
-      try {
-        const inviteDocRef = db.collection("invites").doc(token);
-        await inviteDocRef.update({
-          status: "rejected",
-          rejectedAt: FieldValue.serverTimestamp(),
-          rejectedBy: userId
-        });
-      } catch (e: any) {
-        console.log("⚠️ Server-side invite status reject note:", e.message);
+      const invite = inviteDoc.data() || {};
+
+      // If user is authenticated, ensure their email matches the invite recipient
+      if (req.user?.email && invite.email && req.user.email.toLowerCase().trim() !== invite.email.toLowerCase().trim()) {
+        return res.status(403).json({ error: "Forbidden", message: "This invitation was addressed to a different account." });
       }
+
+      await inviteDocRef.update({
+        status: "rejected",
+        rejectedAt: FieldValue.serverTimestamp(),
+        rejectedBy: userId
+      });
 
       // Log decline invitation activity
       try {
-        await db.collection("projectActivities").add({
-          projectId: invite.projectId,
-          userId: userId || 'unknown',
-          userEmail: invite.email,
-          userName: invite.email.split('@')[0],
-          actionType: "decline_invite",
-          description: `${invite.email.split('@')[0]} declined invitation to join "${invite.projectName}"`,
-          createdAt: FieldValue.serverTimestamp()
-        });
+        if (invite.projectId) {
+          await db.collection("projectActivities").add({
+            projectId: invite.projectId,
+            userId: userId || 'anonymous_invitee',
+            userEmail: invite.email || 'unknown',
+            userName: (invite.email || 'guest').split('@')[0],
+            actionType: "decline_invite",
+            description: `${(invite.email || 'Guest').split('@')[0]} declined invitation to join "${invite.projectName || 'Workspace'}"`,
+            createdAt: FieldValue.serverTimestamp()
+          });
+        }
       } catch (e: any) {
         console.log("⚠️ Server-side decline projectActivities add note:", e.message);
       }
@@ -4400,14 +4428,6 @@ async function startServer() {
       res.status(500).json({ error: "Failed to expire invitation", details: error.message });
     }
   });
-
-  // Server-authoritative plan limits
-  const SERVER_PLAN_LIMITS: Record<string, { minutes: number; thinking: number }> = {
-    free: { minutes: 60, thinking: 10 },
-    pro: { minutes: 1200, thinking: 250 },
-    team: { minutes: 5000, thinking: 1500 },
-    enterprise: { minutes: 25000, thinking: 10000 }
-  };
 
   // Razorpay: Create Subscription (Recurring PRO & TEAM plans) - Protected with requireAuth
   app.post("/api/create-subscription", requireAuth, async (req: AuthenticatedRequest, res) => {
@@ -4492,9 +4512,39 @@ async function startServer() {
           status: "created",
           createdAt: FieldValue.serverTimestamp()
         }, { merge: true });
-      } catch (dbErr) {
-        console.warn("⚠️ Failed to store pending subscription in Firestore:", dbErr);
+      } catch (dbErr: any) {
+        if (isProductionEnvironment()) {
+          console.error("🚨 [PRODUCTION] Failed to persist pending subscription in Firestore. Failing closed:", {
+            subscriptionId: subscription.id,
+            userId,
+            error: dbErr?.message || String(dbErr)
+          });
+          return res.status(500).json({
+            success: false,
+            error: "Database initialization failed for subscription. Transaction aborted to preserve ledger consistency.",
+            code: "SUBSCRIPTION_INIT_DB_FAILED"
+          });
+        }
+        console.warn("⚠️ Failed to persist pending subscription in Firestore (continuing with non-prod in-memory store):", {
+          subscriptionId: subscription.id,
+          userId,
+          planId: normalizedPlan,
+          billingCycle: normalizedCycle,
+          error: dbErr?.message || String(dbErr)
+        });
       }
+
+      // Record in non-production fallback store (no-op in production)
+      recordPendingSubscription({
+        subscriptionId: subscription.id,
+        userId,
+        userEmail,
+        planId: normalizedPlan,
+        billingCycle: normalizedCycle,
+        razorpayPlanId: rzpPlanId,
+        status: "created",
+        createdAt: new Date()
+      });
 
       res.json({
         subscriptionId: subscription.id,
@@ -4536,40 +4586,6 @@ async function startServer() {
       });
     }
   });
-
-  // =========================================================================
-  // TOP-UP PACKAGES CONFIGURATION (SERVER-AUTHORITATIVE)
-  // =========================================================================
-  const MINUTE_TOPUP_PACKAGES = {
-    100: {
-      minutes: 100,
-      amountInPaise: 9900,
-      label: "+100 Minutes",
-    },
-    350: {
-      minutes: 350,
-      amountInPaise: 29900,
-      label: "+350 Minutes",
-    },
-  } as const;
-
-  const AI_REQUEST_TOPUP_PACKAGES = {
-    100: {
-      requests: 100,
-      amountInPaise: 9900,
-      label: "+100 AI Requests",
-    },
-    500: {
-      requests: 500,
-      amountInPaise: 39900,
-      label: "+500 AI Requests",
-    },
-    1500: {
-      requests: 1500,
-      amountInPaise: 99900,
-      label: "+1500 AI Requests",
-    },
-  } as const;
 
   // Safe public endpoint exposing current top-up packages
   app.get("/api/billing/topup-packages", (req, res) => {
@@ -4700,9 +4716,43 @@ async function startServer() {
           status: "created",
           createdAt: FieldValue.serverTimestamp()
         }, { merge: true });
-      } catch (dbErr) {
-        console.warn("⚠️ Failed to store pending order in Firestore:", dbErr);
+      } catch (dbErr: any) {
+        if (isProductionEnvironment()) {
+          console.error("🚨 [PRODUCTION] Failed to persist pending order in Firestore. Failing closed:", {
+            orderId: order.id,
+            userId,
+            type: topupType,
+            amount,
+            error: dbErr?.message || String(dbErr)
+          });
+          return res.status(500).json({
+            success: false,
+            error: "Database initialization failed for order. Transaction aborted to preserve ledger consistency.",
+            code: "ORDER_INIT_DB_FAILED"
+          });
+        }
+        console.warn("⚠️ Failed to persist pending order in Firestore (continuing with non-prod in-memory store):", {
+          orderId: order.id,
+          userId,
+          type: topupType,
+          amount,
+          error: dbErr?.message || String(dbErr)
+        });
       }
+
+      // Record in non-production fallback store (no-op in production)
+      recordPendingOrder({
+        orderId: order.id,
+        userId,
+        userEmail,
+        amount,
+        currency,
+        type: topupType,
+        minutes: topupMinutes,
+        requests: topupRequests,
+        status: "created",
+        createdAt: new Date()
+      });
 
       res.json({
         id: order.id,
@@ -4763,114 +4813,34 @@ async function startServer() {
         .update(`${razorpay_payment_id}|${razorpay_subscription_id}`)
         .digest("hex");
 
-      if (expectedSignature !== razorpay_signature) {
+      if (!timingSafeStringCompare(expectedSignature, razorpay_signature)) {
         return res.status(400).json({ error: "Invalid subscription payment signature." });
       }
 
       try {
-        // Idempotency check: prevent double-processing if already recorded
-        const existingTxn = await db.collection("transactions").doc(razorpay_payment_id).get();
-        if (existingTxn.exists && existingTxn.data()?.status === "success") {
-          console.log(`ℹ️ Subscription payment ${razorpay_payment_id} already processed.`);
-          return res.json({ success: true, message: "Payment already verified", planId: existingTxn.data()?.planId });
-        }
-
-        // Reconcile plan details from server-side subscription document or Razorpay API
-        let subData: any = {};
-        const subDoc = await db.collection("subscriptions").doc(razorpay_subscription_id).get();
-        if (subDoc.exists) {
-          subData = subDoc.data() || {};
-          // Security check: ensure caller owns this subscription
-          if (subData.userId && subData.userId !== userId) {
-            return res.status(403).json({
-              success: false,
-              error: "Forbidden: subscription belongs to another user account.",
-              code: "FORBIDDEN"
-            });
-          }
-        } else {
-          try {
-            const rzp = getRazorpayClient();
-            const rzpSub = await rzp.subscriptions.fetch(razorpay_subscription_id);
-            if (rzpSub.notes?.userId && rzpSub.notes.userId !== userId) {
-              return res.status(403).json({
-                success: false,
-                error: "Forbidden: subscription notes belong to another user account.",
-                code: "FORBIDDEN"
-              });
-            }
-            subData = {
-              planId: rzpSub.notes?.planId || "pro",
-              billingCycle: rzpSub.notes?.billingCycle || "monthly"
-            };
-          } catch (fetchErr) {
-            console.warn("⚠️ Could not fetch subscription from Razorpay:", fetchErr);
-          }
-        }
-
-        // Server-authoritative plan and cycle (never trust unverified client overrides)
-        const planId = (subData.planId || "pro").toLowerCase();
-        const billingCycle = (subData.billingCycle || "monthly").toLowerCase();
-
-        const now = new Date();
-        const subscriptionStartDate = now.toISOString();
-        const expiryDate = new Date(now);
-        if (billingCycle === "yearly") {
-          expiryDate.setFullYear(expiryDate.getFullYear() + 1);
-        } else {
-          expiryDate.setMonth(expiryDate.getMonth() + 1);
-        }
-
-        const limits = SERVER_PLAN_LIMITS[planId] || SERVER_PLAN_LIMITS.pro;
-
-        // Authoritatively update User profile in Firestore
-        await db.collection("users").doc(userId).set({
-          plan: planId,
-          billingCycle,
+        const fulfillment = await fulfillSubscriptionPayment(db, {
           subscriptionId: razorpay_subscription_id,
-          subscriptionStartDate,
-          nextRefreshDate: expiryDate.toISOString(),
-          billingStartDate: subscriptionStartDate,
-          planExpiresAt: expiryDate.toISOString(),
-          lastPaymentDate: FieldValue.serverTimestamp(),
-          monthlyMinuteLimit: limits.minutes,
-          monthlyMinutesUsed: 0,
-          monthlyThinkingLimit: limits.thinking,
-          monthlyThinkingUsed: 0,
-        }, { merge: true });
-
-        // Update Subscription document in Firestore
-        await db.collection("subscriptions").doc(razorpay_subscription_id).set({
-          status: "active",
-          userId,
-          planId,
-          billingCycle,
-          activePaymentId: razorpay_payment_id,
-          currentPeriodStart: subscriptionStartDate,
-          currentPeriodEnd: expiryDate.toISOString(),
-          updatedAt: FieldValue.serverTimestamp()
-        }, { merge: true });
-
-        // Calculate amount for ledger record
-        const isTeam = planId === "team";
-        const isYearly = billingCycle === "yearly";
-        const amountVal = isTeam ? (isYearly ? 1999 * 12 : 2499) : (isYearly ? 799 * 12 : 999);
-
-        // Record immutable Transaction document
-        await db.collection("transactions").doc(razorpay_payment_id).set({
-          userId,
           paymentId: razorpay_payment_id,
-          subscriptionId: razorpay_subscription_id,
-          type: "subscription",
-          planId,
-          billingCycle,
-          amount: amountVal,
-          status: "success",
-          createdAt: FieldValue.serverTimestamp()
+          callerUserId: userId,
+          source: "verify-payment",
+          planIdHint: req.body.planId,
+          billingCycleHint: req.body.billingCycle
         });
 
-        console.log(`✅ Subscription verified & updated for user ${userId}, plan ${planId}`);
-        return res.json({ success: true, planId, billingCycle });
+        if (!fulfillment.success) {
+          return res.status(fulfillment.statusCode || 400).json({
+            success: false,
+            error: fulfillment.error || "Subscription fulfillment failed.",
+            code: fulfillment.errorCode || "SUBSCRIPTION_FULFILLMENT_FAILED"
+          });
+        }
+
+        return res.json({
+          success: true,
+          planId: fulfillment.planId,
+          billingCycle: fulfillment.billingCycle,
+          message: fulfillment.alreadyProcessed ? "Payment already verified" : undefined
+        });
       } catch (error: any) {
         console.error("🔥 SUBSCRIPTION PAYMENT VERIFICATION ERROR:", error);
         return res.status(500).json({ error: "Failed to update profile after payment verification", details: error.message });
@@ -4886,169 +4856,33 @@ async function startServer() {
         .update(`${razorpay_order_id}|${razorpay_payment_id}`)
         .digest("hex");
 
-      if (expectedSignature !== razorpay_signature) {
+      if (!timingSafeStringCompare(expectedSignature, razorpay_signature)) {
         return res.status(400).json({ error: "Invalid order payment signature." });
       }
 
       try {
-        // Idempotency check: prevent double-crediting minutes
-        const existingTxn = await db.collection("transactions").doc(razorpay_payment_id).get();
-        if (existingTxn.exists && existingTxn.data()?.status === "success") {
-          console.log(`ℹ️ Order payment ${razorpay_payment_id} already processed.`);
-          return res.json({ success: true, message: "Order already processed" });
-        }
+        const fulfillment = await fulfillTopupOrder(db, {
+          orderId: razorpay_order_id,
+          paymentId: razorpay_payment_id,
+          callerUserId: userId,
+          source: "verify-payment"
+        });
 
-        // Reconcile purchase entitlement from server-stored order or Razorpay API
-        let orderData: any = {};
-        const orderDoc = await db.collection("orders").doc(razorpay_order_id).get();
-        if (orderDoc.exists) {
-          orderData = orderDoc.data() || {};
-          // Security check: ensure caller owns this order
-          if (orderData.userId && orderData.userId !== userId) {
-            return res.status(403).json({
-              success: false,
-              error: "Forbidden: order belongs to another user account.",
-              code: "FORBIDDEN"
-            });
-          }
-        }
-
-        // Verify and fetch directly from Razorpay API order
-        try {
-          const rzp = getRazorpayClient();
-          const rzpOrder = await rzp.orders.fetch(razorpay_order_id);
-          if (rzpOrder.notes?.userId && rzpOrder.notes.userId !== userId) {
-            return res.status(403).json({
-              success: false,
-              error: "Forbidden: order notes belong to another user account.",
-              code: "FORBIDDEN"
-            });
-          }
-          if (rzpOrder.currency && rzpOrder.currency !== "INR") {
-            return res.status(400).json({
-              success: false,
-              error: "Invalid currency on order.",
-              code: "INVALID_CURRENCY"
-            });
-          }
-          if (!orderDoc.exists) {
-            orderData = {
-              ...(rzpOrder.notes || {}),
-              amount: rzpOrder.amount,
-              currency: rzpOrder.currency
-            };
-          } else if (orderData.amount && rzpOrder.amount !== orderData.amount) {
-            return res.status(400).json({
-              success: false,
-              error: "Order amount mismatch between server and gateway.",
-              code: "AMOUNT_MISMATCH"
-            });
-          }
-        } catch (err) {
-          console.warn("⚠️ Could not fetch order from Razorpay API:", err);
-          if (!orderDoc.exists) {
-            return res.status(404).json({
-              success: false,
-              error: "Order record not found.",
-              code: "ORDER_NOT_FOUND"
-            });
-          }
-        }
-
-        // Server-authoritative entitlement calculation - NEVER trust client numbers!
-        const rawResolvedType = String(orderData.type || orderData.legacyType || "").toLowerCase().trim();
-        const verifiedAmount = Number(orderData.amount || orderData.amountInPaise || 0);
-
-        const isMinutes = rawResolvedType === "minutes" || rawResolvedType === "topup" || (!orderData.requests && (orderData.minutes || verifiedAmount === 9900 || verifiedAmount === 29900));
-        const isAiRequests = rawResolvedType === "ai_requests" || rawResolvedType === "thinking-topup" || (!isMinutes && (orderData.requests || verifiedAmount === 39900 || verifiedAmount === 99900));
-
-        let validatedMinutes = 0;
-        let validatedRequests = 0;
-
-        if (isMinutes) {
-          const candidateMins = Number(orderData.minutes || 0);
-          if (candidateMins in MINUTE_TOPUP_PACKAGES && MINUTE_TOPUP_PACKAGES[candidateMins as keyof typeof MINUTE_TOPUP_PACKAGES].amountInPaise === verifiedAmount) {
-            validatedMinutes = candidateMins;
-          } else if (verifiedAmount === 9900) {
-            validatedMinutes = 100;
-          } else if (verifiedAmount === 29900) {
-            validatedMinutes = 350;
-          } else {
-            return res.status(400).json({
-              success: false,
-              error: "Order amount does not match any valid minute top-up package.",
-              code: "INVALID_MINUTE_TOPUP_AMOUNT"
-            });
-          }
-        } else if (isAiRequests) {
-          const candidateReqs = Number(orderData.requests || 0);
-          if (candidateReqs in AI_REQUEST_TOPUP_PACKAGES && AI_REQUEST_TOPUP_PACKAGES[candidateReqs as keyof typeof AI_REQUEST_TOPUP_PACKAGES].amountInPaise === verifiedAmount) {
-            validatedRequests = candidateReqs;
-          } else if (verifiedAmount === 9900) {
-            validatedRequests = 100;
-          } else if (verifiedAmount === 39900) {
-            validatedRequests = 500;
-          } else if (verifiedAmount === 99900) {
-            validatedRequests = 1500;
-          } else {
-            return res.status(400).json({
-              success: false,
-              error: "Order amount does not match any valid AI request top-up package.",
-              code: "INVALID_AI_REQUEST_TOPUP_AMOUNT"
-            });
-          }
-        } else {
-          return res.status(400).json({
+        if (!fulfillment.success) {
+          return res.status(fulfillment.statusCode || 400).json({
             success: false,
-            error: "Unknown order type for entitlement grant.",
-            code: "UNKNOWN_ORDER_TYPE"
+            error: fulfillment.error || "Order fulfillment failed.",
+            code: fulfillment.errorCode || "ORDER_FULFILLMENT_FAILED"
           });
         }
 
-        // Authoritatively credit entitlements in Firestore
-        if (isMinutes && validatedMinutes > 0) {
-          await db.collection("users").doc(userId).set({
-            extraMinutes: FieldValue.increment(validatedMinutes),
-            minuteTopupBalance: FieldValue.increment(validatedMinutes),
-            lastPaymentDate: FieldValue.serverTimestamp()
-          }, { merge: true });
-        } else if (isAiRequests && validatedRequests > 0) {
-          await db.collection("users").doc(userId).set({
-            thinkingTopupBalance: FieldValue.increment(validatedRequests),
-            lastPaymentDate: FieldValue.serverTimestamp()
-          }, { merge: true });
-        }
-
-        // Mark order as completed
-        await db.collection("orders").doc(razorpay_order_id).set({
-          status: "paid",
-          paymentId: razorpay_payment_id,
-          paidAt: FieldValue.serverTimestamp(),
-          entitlementGranted: {
-            type: isMinutes ? "minutes" : "ai_requests",
-            minutes: validatedMinutes,
-            requests: validatedRequests
-          }
-        }, { merge: true });
-
-        const resolvedType = isMinutes ? "minutes" : "ai_requests";
-
-        // Record immutable Transaction document
-        await db.collection("transactions").doc(razorpay_payment_id).set({
-          userId,
-          paymentId: razorpay_payment_id,
-          orderId: razorpay_order_id,
-          type: resolvedType,
-          legacyType: isMinutes ? "topup" : "thinking-topup",
-          minutes: validatedMinutes,
-          requests: validatedRequests,
-          amount: verifiedAmount,
-          status: "success",
-          createdAt: FieldValue.serverTimestamp()
+        return res.json({
+          success: true,
+          type: fulfillment.type,
+          minutes: fulfillment.minutes,
+          requests: fulfillment.requests,
+          message: fulfillment.alreadyProcessed ? "Order already processed" : undefined
         });
-
-        console.log(`✅ Order payment verified & credited for user ${userId}, type: ${resolvedType}, mins: ${validatedMinutes}, reqs: ${validatedRequests}`);
-        return res.json({ success: true, type: resolvedType, minutes: validatedMinutes, requests: validatedRequests });
       } catch (error: any) {
         console.error("🔥 ORDER PAYMENT VERIFICATION ERROR:", error);
         return res.status(500).json({ error: "Failed to apply entitlement after payment verification", details: error.message });
@@ -5062,8 +4896,8 @@ async function startServer() {
     const signature = req.headers["x-razorpay-signature"] as string;
 
     if (!webhookSecret) {
-      console.warn("⚠️ RAZORPAY_WEBHOOK_SECRET not set. Skipping signature check in non-configured state.");
-      return res.status(200).json({ status: "webhook_secret_unconfigured" });
+      console.warn("⚠️ RAZORPAY_WEBHOOK_SECRET not configured on server. Rejecting webhook request.");
+      return res.status(503).json({ error: "Service Unavailable", message: "Webhook secret is not configured on server." });
     }
 
     if (!signature) {
@@ -5078,7 +4912,7 @@ async function startServer() {
       .update(rawBodyBuffer)
       .digest("hex");
 
-    if (expectedSignature !== signature) {
+    if (!timingSafeStringCompare(expectedSignature, signature)) {
       console.error("❌ Invalid Razorpay Webhook Signature.");
       return res.status(400).json({ error: "Invalid webhook signature" });
     }
@@ -5104,50 +4938,24 @@ async function startServer() {
         const sub = payload.subscription?.entity;
         const payment = payload.payment?.entity;
         const userId = sub?.notes?.userId || sub?.notes?.firebaseUid;
-        const planId = (sub?.notes?.planId || "pro").toLowerCase();
-        const billingCycle = (sub?.notes?.billingCycle || "monthly").toLowerCase();
+        const paymentId = payment?.id || `pay_${Date.now()}`;
 
-        if (userId && sub?.id) {
-          const limits = SERVER_PLAN_LIMITS[planId] || SERVER_PLAN_LIMITS.pro;
-          const expiryDate = sub.current_end ? new Date(sub.current_end * 1000).toISOString() : new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
-
-          await db.collection("users").doc(userId).set({
-            plan: planId,
-            billingCycle,
+        if (sub?.id) {
+          const fulfillment = await fulfillSubscriptionPayment(db, {
             subscriptionId: sub.id,
-            planExpiresAt: expiryDate,
-            lastPaymentDate: FieldValue.serverTimestamp(),
-            monthlyMinuteLimit: limits.minutes,
-            monthlyMinutesUsed: 0,
-            monthlyThinkingLimit: limits.thinking,
-            monthlyThinkingUsed: 0,
-          }, { merge: true });
-
-          await db.collection("subscriptions").doc(sub.id).set({
-            status: "active",
-            userId,
-            planId,
-            billingCycle,
-            currentPeriodEnd: expiryDate,
-            updatedAt: FieldValue.serverTimestamp()
-          }, { merge: true });
-
-          if (payment?.id) {
-            await db.collection("transactions").doc(payment.id).set({
-              userId,
-              paymentId: payment.id,
-              subscriptionId: sub.id,
-              type: "subscription",
-              planId,
-              billingCycle,
-              amount: payment.amount ? payment.amount / 100 : 0,
-              status: "success",
-              source: "webhook",
-              createdAt: FieldValue.serverTimestamp()
-            }, { merge: true });
+            paymentId,
+            callerUserId: userId,
+            source: "webhook",
+            planIdHint: sub?.notes?.planId,
+            billingCycleHint: sub?.notes?.billingCycle,
+            currentEndTimestamp: sub?.current_end,
+            paymentAmount: payment?.amount ? payment.amount / 100 : undefined
+          });
+          console.log(`✅ Webhook subscription fulfillment result:`, fulfillment);
+          if (!fulfillment.success && isProductionEnvironment()) {
+            console.error(`🚨 Webhook subscription fulfillment failed in PRODUCTION:`, fulfillment);
+            return res.status(500).json({ error: "Webhook subscription fulfillment failed in production", code: fulfillment.errorCode });
           }
-
-          console.log(`✅ Webhook updated subscription for user ${userId} (${planId})`);
         }
       } else if (event === "subscription.cancelled" || event === "subscription.expired" || event === "subscription.halted") {
         const sub = payload.subscription?.entity;
@@ -5172,6 +4980,28 @@ async function startServer() {
 
           console.log(`⚠️ Webhook downgraded cancelled user ${userId} to free`);
         }
+      } else if (event === "order.paid" || (event === "payment.captured" && payload.payment?.entity?.order_id)) {
+        const orderEntity = payload.order?.entity;
+        const paymentEntity = payload.payment?.entity;
+        const orderId = orderEntity?.id || paymentEntity?.order_id;
+        const paymentId = paymentEntity?.id;
+
+        if (orderId && paymentId) {
+          console.log(`🔔 Webhook processing one-time top-up: order=${orderId}, payment=${paymentId}`);
+          const fulfillment = await fulfillTopupOrder(db, {
+            orderId,
+            paymentId,
+            source: "webhook",
+            expectedAmount: orderEntity?.amount
+          });
+          console.log(`✅ Webhook top-up fulfillment result:`, fulfillment);
+          if (!fulfillment.success && isProductionEnvironment()) {
+            console.error(`🚨 Webhook top-up fulfillment failed in PRODUCTION:`, fulfillment);
+            return res.status(500).json({ error: "Webhook top-up fulfillment failed in production", code: fulfillment.errorCode });
+          }
+        } else {
+          console.warn(`⚠️ Webhook received ${event} but could not resolve orderId or paymentId:`, { orderId, paymentId });
+        }
       }
 
       // Mark event as processed
@@ -5185,7 +5015,10 @@ async function startServer() {
       return res.status(200).json({ status: "ok" });
     } catch (err: any) {
       console.error("🔥 Error processing webhook event:", err);
-      // Return 200 so Razorpay does not endlessly retry failed parsing on non-critical events
+      if (isProductionEnvironment()) {
+        return res.status(500).json({ error: "Internal error processing webhook in production", details: err.message });
+      }
+      // Return 200 so Razorpay does not endlessly retry failed parsing on non-critical events in dev
       return res.status(200).json({ status: "error", message: err.message });
     }
   });
@@ -5210,8 +5043,12 @@ async function startServer() {
           currentPlan = userData.plan || "free";
         }
       } catch (dbErr: any) {
+        if (isProductionEnvironment()) {
+          console.error("🚨 [PRODUCTION] Downgrade user lookup failed in Firestore:", dbErr);
+          return res.status(500).json({ error: "Database error during downgrade check", code: "DATABASE_ERROR" });
+        }
         if (dbErr.message?.includes("PERMISSION_DENIED") || dbErr.code === 7) {
-          console.warn("⚠️ Server-side Firestore permission denied, bypassing to client fallback.");
+          console.warn("⚠️ Server-side Firestore permission denied, bypassing to client fallback in non-prod.");
           bypassed = true;
         } else {
           throw dbErr;
@@ -5248,7 +5085,11 @@ async function startServer() {
             lastDowngradedAt: FieldValue.serverTimestamp()
           });
         } catch (dbErr: any) {
-          console.info("ℹ️ Server-side downgrade sync handled by client fallback.");
+          if (isProductionEnvironment()) {
+            console.error("🚨 [PRODUCTION] Downgrade user update failed in Firestore:", dbErr);
+            return res.status(500).json({ error: "Database update error during downgrade", code: "DATABASE_ERROR" });
+          }
+          console.info("ℹ️ Server-side downgrade sync handled by client fallback in non-prod.");
         }
       }
 
@@ -5281,6 +5122,10 @@ async function startServer() {
         code: "FFMPEG_UNAVAILABLE" 
       });
     }
+
+    // Step 8.1A: Admit FFmpeg rate limit and acquire concurrency slot after authentication & input validation
+    const slot = admitExpensiveOperation(req as AuthenticatedRequest, res, 'ffmpeg');
+    if (!slot) return;
 
     // Robust MIME and extension determination
     const normalized = normalizeAudioMimeType(mimeType, fileName);
@@ -5324,6 +5169,8 @@ async function startServer() {
         code: "AUDIO_CONVERSION_FAILED" 
       });
     } finally {
+      // Step 8.1A: Ensure concurrency slot is always released on success or failure
+      slot.release();
       // Safe cleanup of temporary files
       try {
         if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
@@ -5338,42 +5185,1108 @@ async function startServer() {
     }
   };
 
-  app.post("/api/convert-opus", handleAudioConversion);
-  app.post("/api/convert-audio", handleAudioConversion);
+  app.post("/api/convert-opus", requireAuth, handleAudioConversion);
+  app.post("/api/convert-audio", requireAuth, handleAudioConversion);
 
-  // Admin AI Analytics Endpoints
-  app.get("/api/admin/analytics/overview", async (req, res) => {
+  // ==============================================================================
+  // Secure Audio Playback & Streaming Architecture
+  // ==============================================================================
+  // Ephemeral cryptographic secret generated in memory if not explicitly provided in environment
+  const EPHEMERAL_PLAYBACK_SECRET = crypto.randomBytes(32).toString('hex');
+  const PLAYBACK_SECRET = process.env.PLAYBACK_SECRET || process.env.SESSION_SECRET || EPHEMERAL_PLAYBACK_SECRET;
+
+  function generatePlaybackToken(payload: { uid: string; recId: string; email?: string; platform_admin?: boolean; role?: string }, expiresIn = 900): { token: string; expiresIn: number } {
+    const exp = Math.floor(Date.now() / 1000) + expiresIn;
+    const tokenData = { ...payload, exp };
+    const encodedData = Buffer.from(JSON.stringify(tokenData)).toString("base64url");
+    const signature = crypto.createHmac("sha256", PLAYBACK_SECRET).update(encodedData).digest("base64url");
+    return {
+      token: `${encodedData}.${signature}`,
+      expiresIn
+    };
+  }
+
+  function verifyPlaybackToken(tokenString: string): { valid: boolean; data?: any; error?: string } {
+    try {
+      const parts = tokenString.split(".");
+      if (parts.length !== 2) {
+        return { valid: false, error: "Malformed token format" };
+      }
+      const [encodedData, signature] = parts;
+      const expectedSig = crypto.createHmac("sha256", PLAYBACK_SECRET).update(encodedData).digest("base64url");
+      const sigBuf = Buffer.from(signature);
+      const expBuf = Buffer.from(expectedSig);
+      if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
+        return { valid: false, error: "Invalid token signature" };
+      }
+      const data = JSON.parse(Buffer.from(encodedData, "base64url").toString("utf8"));
+      if (Date.now() / 1000 > data.exp) {
+        return { valid: false, error: "Playback token expired" };
+      }
+      return { valid: true, data };
+    } catch (err: any) {
+      return { valid: false, error: err?.message || "Verification failed" };
+    }
+  }
+
+  async function authorizeRecordingAccess(
+    user: { uid: string; email?: string; platform_admin?: boolean; role?: string; orgRole?: string },
+    recordingId: string,
+    options?: { allowDeleted?: boolean }
+  ): Promise<{ authorized: boolean; record?: any; status: number; message: string }> {
+    if (!user || !user.uid) {
+      return { authorized: false, status: 401, message: "Authentication required" };
+    }
+
+    const isPlatformAdmin = Boolean(
+      user.platform_admin === true ||
+      user.role === 'admin' ||
+      (user as any)?.claims?.platform_admin === true
+    );
+
+    // 1. Fetch record from 'recordings' or fallback to 'transcriptions'
+    let recordDoc = await db.collection("recordings").doc(recordingId).get();
+    if (!recordDoc.exists) {
+      recordDoc = await db.collection("transcriptions").doc(recordingId).get();
+    }
+
+    if (!recordDoc.exists) {
+      return { authorized: false, status: 404, message: "Recording not found" };
+    }
+
+    const record = recordDoc.data() || {};
+    record.id = recordDoc.id;
+
+    // Block access to soft-deleted recordings unless explicitly allowed (e.g. for hard-delete or restore)
+    if (record.deletedAt && !options?.allowDeleted) {
+      return { authorized: false, status: 410, message: "Recording has been deleted and cannot be accessed." };
+    }
+
+    if (isPlatformAdmin) {
+      return { authorized: true, record, status: 200, message: "Authorized as platform admin" };
+    }
+
+    // 2. Direct ownership
+    if (record.userId === user.uid) {
+      return { authorized: true, record, status: 200, message: "Authorized as owner" };
+    }
+
+    // 3. Project-level membership / owner
+    const projectId = record.projectId;
+    if (projectId) {
+      const projectAccess = await checkProjectAccess(db, user.uid, projectId, ["owner", "admin", "member", "viewer"]);
+      if (projectAccess.hasAccess) {
+        return { authorized: true, record, status: 200, message: "Authorized via project membership" };
+      }
+
+      const projectDoc = await db.collection("projects").doc(projectId).get();
+      if (projectDoc.exists) {
+        const projectData = projectDoc.data() || {};
+        if (projectData.userId === user.uid) {
+          return { authorized: true, record, status: 200, message: "Authorized as project creator" };
+        }
+        const orgId = projectData.orgId || projectData.organizationId;
+        if (orgId && user.email) {
+          const orgAccess = await checkOrgAccess(db, user.email, orgId, ["owner", "org_admin", "team_manager", "member", "viewer"]);
+          if (orgAccess.hasAccess) {
+            return { authorized: true, record, status: 200, message: "Authorized via organization project affiliation" };
+          }
+        }
+      }
+    }
+
+    // 4. Direct organization membership
+    const recordOrgId = record.orgId || record.organizationId;
+    if (recordOrgId && user.email) {
+      const orgAccess = await checkOrgAccess(db, user.email, recordOrgId, ["owner", "org_admin", "team_manager", "member", "viewer"]);
+      if (orgAccess.hasAccess) {
+        return { authorized: true, record, status: 200, message: "Authorized via organization membership" };
+      }
+    }
+
+    // 5. Explicit collaborators list
+    if (Array.isArray(record.collaborators)) {
+      const isCollaborator = record.collaborators.some((c: any) => 
+        c === user.uid ||
+        c?.userId === user.uid ||
+        (c?.email && user.email && c.email.toLowerCase() === user.email.toLowerCase())
+      );
+      if (isCollaborator) {
+        return { authorized: true, record, status: 200, message: "Authorized as collaborator" };
+      }
+    }
+
+    return { authorized: false, status: 403, message: "Access denied. You do not have permission to access this recording." };
+  }
+
+  function resolveStoragePath(record: any): string | null {
+    if (record.storagePath && typeof record.storagePath === 'string') {
+      return record.storagePath;
+    }
+    const url = record.originalAudioUrl || record.audioUrl;
+    if (url && typeof url === 'string') {
+      const match = url.match(/\/o\/([^?]+)/);
+      if (match && match[1]) {
+        return decodeURIComponent(match[1]);
+      }
+    }
+    if (record.userId && record.id) {
+      const fileName = record.fileName || (record.audioUrl?.includes('.mp3') ? `synthesis_${record.id}.mp3` : 'audio.webm');
+      return `recordings/${record.userId}/${record.id}/${fileName}`;
+    }
+    return null;
+  }
+
+  // Generate short-lived, signed playback URL & token validating user authorization against Firestore metadata
+  const handlePlaybackToken = async (req: AuthenticatedRequest, res: express.Response) => {
+    try {
+      const recordingId = req.params.id || req.params.recordingId;
+      if (!recordingId) {
+        return res.status(400).json({ error: "Bad Request", message: "Recording ID is required." });
+      }
+
+      // Validate authorization against Firestore record metadata
+      const authResult = await authorizeRecordingAccess(req.user, recordingId);
+      if (!authResult.authorized) {
+        return res.status(authResult.status).json({
+          error: authResult.status === 404 ? "Not Found" : "Forbidden",
+          message: authResult.message
+        });
+      }
+
+      const record = authResult.record;
+      const storagePath = resolveStoragePath(record);
+      const expiresIn = 900; // 15 minutes time limit
+      const expiresAt = new Date(Date.now() + expiresIn * 1000).toISOString();
+
+      let signedStorageUrl: string | null = null;
+
+      // Attempt Google Cloud Storage signed URL if environment credentials permit
+      if (storagePath) {
+        try {
+          const bucketName = firebaseConfig.storageBucket || "echonote-2509.firebasestorage.app";
+          const bucket = admin.storage().bucket(bucketName);
+          const file = bucket.file(storagePath);
+          const [gcsUrl] = await file.getSignedUrl({
+            version: 'v4',
+            action: 'read',
+            expires: Date.now() + expiresIn * 1000
+          });
+          if (gcsUrl) {
+            signedStorageUrl = gcsUrl;
+          }
+        } catch (gcsErr: any) {
+          // Cloud Run / container default credentials may lack signBlob; fallback to secure server-signed streaming URL
+          console.info("[Storage Signed URL]: Using authenticated server streaming URL fallback:", gcsErr?.message || gcsErr);
+        }
+      }
+
+      const { token } = generatePlaybackToken({
+        uid: req.user.uid,
+        recId: recordingId,
+        email: req.user.email,
+        platform_admin: req.user.platform_admin,
+        role: req.user.role
+      }, expiresIn);
+
+      const serverStreamUrl = `/api/recordings/${encodeURIComponent(recordingId)}/audio?token=${token}`;
+      const effectiveUrl = signedStorageUrl || serverStreamUrl;
+
+      return res.json({
+        success: true,
+        signedUrl: effectiveUrl,
+        playbackUrl: effectiveUrl,
+        url: effectiveUrl,
+        token,
+        expiresIn,
+        expiresAt,
+        storagePath: storagePath || undefined,
+        fileName: record.fileName || undefined,
+        mimeType: record.mimeType || undefined
+      });
+    } catch (err: any) {
+      console.error("[Playback Token Error]:", err?.message || err);
+      return res.status(500).json({ error: "Internal Server Error", message: "Failed to generate playback token." });
+    }
+  };
+
+  // Bind /api/recordings/:id/playback-token and aliases
+  app.post("/api/recordings/:id/playback-token", requireAuth, handlePlaybackToken);
+  app.get("/api/recordings/:id/playback-token", requireAuth, handlePlaybackToken);
+  app.post("/api/recordings/:recordingId/playback-token", requireAuth, handlePlaybackToken);
+  app.get("/api/recordings/:recordingId/playback-token", requireAuth, handlePlaybackToken);
+
+  // Helper function to safely delete a recording's Cloud Storage assets and Firestore documents
+  async function purgeRecordingStorageAndDocs(
+    firestoreDb: admin.firestore.Firestore,
+    storageBucketObj: any,
+    record: any
+  ): Promise<{ storageDeleted: boolean; firestoreDeleted: boolean }> {
+    const recordingId = record.id;
+    let storageDeleted = false;
+
+    // 1. Delete associated Cloud Storage object(s) if storage exists
+    try {
+      if (storageBucketObj) {
+        const storagePath = resolveStoragePath(record);
+        if (storagePath) {
+          const file = storageBucketObj.file(storagePath);
+          const [exists] = await file.exists();
+          if (exists) {
+            await file.delete();
+            storageDeleted = true;
+          }
+        }
+        if (record.userId && record.id) {
+          const prefix = `recordings/${record.userId}/${record.id}/`;
+          const [files] = await storageBucketObj.getFiles({ prefix });
+          for (const f of files) {
+            await f.delete();
+            storageDeleted = true;
+          }
+        }
+      }
+    } catch (storageErr: any) {
+      console.warn(`[Storage Cleanup Warning for ${recordingId}]:`, storageErr?.message || storageErr);
+    }
+
+    // 2. Delete Firestore documents and linked decision records
+    const batch = firestoreDb.batch();
+    batch.delete(firestoreDb.collection("recordings").doc(recordingId));
+    batch.delete(firestoreDb.collection("transcriptions").doc(recordingId));
+    try {
+      const decQuery = await firestoreDb.collection("decisionHistory").where("recordingId", "==", recordingId).get();
+      for (const d of decQuery.docs) {
+        batch.delete(d.ref);
+      }
+    } catch {
+      // Non-fatal if collection doesn't exist
+    }
+    await batch.commit();
+
+    return { storageDeleted, firestoreDeleted: true };
+  }
+
+  // Permanently delete a recording: validates ownership, server-coordinated delete of Storage objects & Firestore docs
+  app.delete("/api/recordings/:id", requireAuth, async (req: AuthenticatedRequest, res: express.Response) => {
+    try {
+      const recordingId = req.params.id;
+      if (!recordingId) {
+        return res.status(400).json({ error: "Bad Request", message: "Recording ID is required." });
+      }
+
+      // Check access allowing deletedAt records to be permanently deleted
+      const authResult = await authorizeRecordingAccess(req.user, recordingId, { allowDeleted: true });
+      if (!authResult.authorized) {
+        if (authResult.status === 404 && req.query.idempotent === 'true') {
+          return res.json({
+            success: true,
+            message: "Recording already deleted or does not exist.",
+            recordingId
+          });
+        }
+        return res.status(authResult.status).json({
+          error: authResult.status === 404 ? "Not Found" : (authResult.status === 410 ? "Gone" : "Forbidden"),
+          message: authResult.message
+        });
+      }
+
+      const record = authResult.record;
+      const isOwner = record.userId === req.user.uid;
+      const isPlatformAdmin = Boolean(
+        req.user.platform_admin === true ||
+        req.user.role === 'admin' ||
+        (req.user as any)?.claims?.platform_admin === true
+      );
+
+      // Only the recording owner or platform admin can permanently delete
+      if (!isOwner && !isPlatformAdmin) {
+        return res.status(403).json({
+          error: "Forbidden",
+          message: "Only the recording owner or platform administrator can permanently delete this recording."
+        });
+      }
+
+      const bucketName = firebaseConfig.storageBucket || "echonote-2509.firebasestorage.app";
+      const bucket = admin.storage().bucket(bucketName);
+      await purgeRecordingStorageAndDocs(db, bucket, record);
+
+      return res.json({
+        success: true,
+        message: "Recording and associated storage assets permanently deleted via server-coordinated deletion.",
+        recordingId
+      });
+    } catch (err: any) {
+      console.error("[Permanent Delete Error]:", err);
+      return res.status(500).json({ error: "Internal Server Error", message: "Failed to permanently delete recording." });
+    }
+  });
+
+  // Safe Server-Authoritative Project Deletion
+  app.delete("/api/projects/:projectId", requireAuth, async (req: AuthenticatedRequest, res: express.Response) => {
+    try {
+      const { projectId } = req.params;
+      if (!projectId) {
+        return res.status(400).json({ error: "Bad Request", message: "Project ID is required." });
+      }
+
+      const projectDoc = await db.collection("projects").doc(projectId).get();
+      if (!projectDoc.exists) {
+        return res.status(404).json({ error: "Not Found", message: "Project not found." });
+      }
+      const projectData = projectDoc.data() || {};
+
+      const isPlatformAdmin = Boolean(
+        req.user.platform_admin === true ||
+        req.user.role === 'admin' ||
+        (req.user as any)?.claims?.platform_admin === true
+      );
+      const isProjectOwner = projectData.userId === req.user.uid;
+
+      let hasAdminPrivilege = isProjectOwner || isPlatformAdmin;
+
+      if (!hasAdminPrivilege) {
+        const projectAccess = await checkProjectAccess(db, req.user.uid, projectId, ["owner", "admin"]);
+        if (projectAccess.hasAccess && (projectAccess.isOwner || projectAccess.role === 'admin')) {
+          hasAdminPrivilege = true;
+        }
+      }
+
+      if (!hasAdminPrivilege && projectData.organizationId) {
+        const orgAccess = await checkOrgAccess(db, req.user.email, projectData.organizationId, ["owner", "org_admin"]);
+        if (orgAccess.hasAccess) {
+          hasAdminPrivilege = true;
+        }
+      }
+
+      if (!hasAdminPrivilege) {
+        return res.status(403).json({
+          error: "Forbidden",
+          message: "Only the project owner, organization administrator, or platform administrator can delete this project."
+        });
+      }
+
+      const cascadeRecordings = req.query.cascadeRecordings === 'true' || req.body?.cascadeRecordings === true;
+      const bucketName = firebaseConfig.storageBucket || "echonote-2509.firebasestorage.app";
+      const bucket = admin.storage().bucket(bucketName);
+
+      // 1. Handle child recordings:
+      // When ambiguous or default, detach to preserve customer voice assets rather than destructively wiping them
+      const recSnap = await db.collection("recordings").where("projectId", "==", projectId).get();
+      let affectedRecordingsCount = 0;
+
+      for (const recDoc of recSnap.docs) {
+        affectedRecordingsCount++;
+        const recData = recDoc.data() || {};
+        recData.id = recDoc.id;
+
+        if (cascadeRecordings) {
+          await purgeRecordingStorageAndDocs(db, bucket, recData);
+        } else {
+          // Detach from deleted project container, preserving user content in 'General' space
+          await db.collection("recordings").doc(recDoc.id).update({
+            projectId: FieldValue.delete(),
+            group: "General",
+            updatedAt: FieldValue.serverTimestamp()
+          });
+          try {
+            await db.collection("transcriptions").doc(recDoc.id).update({
+              projectId: FieldValue.delete(),
+              group: "General",
+              updatedAt: FieldValue.serverTimestamp()
+            });
+          } catch {}
+        }
+      }
+
+      // 2. Clean up project members
+      const membersSnap = await db.collection("projectMembers").where("projectId", "==", projectId).get();
+      const memberBatch = db.batch();
+      membersSnap.docs.forEach(d => memberBatch.delete(d.ref));
+      if (membersSnap.docs.length > 0) {
+        await memberBatch.commit();
+      }
+
+      // 3. Clean up project invitations
+      const invitesSnap = await db.collection("invites").where("projectId", "==", projectId).get();
+      const inviteBatch = db.batch();
+      invitesSnap.docs.forEach(d => inviteBatch.delete(d.ref));
+      if (invitesSnap.docs.length > 0) {
+        await inviteBatch.commit();
+      }
+
+      // 4. Clean up project activities
+      const actSnap = await db.collection("projectActivities").where("projectId", "==", projectId).get();
+      const actBatch = db.batch();
+      actSnap.docs.forEach(d => actBatch.delete(d.ref));
+      if (actSnap.docs.length > 0) {
+        await actBatch.commit();
+      }
+
+      // 5. Detach or clean up decision history
+      try {
+        const decSnap = await db.collection("decisionHistory").where("projectId", "==", projectId).get();
+        const decBatch = db.batch();
+        decSnap.docs.forEach(d => {
+          if (cascadeRecordings) {
+            decBatch.delete(d.ref);
+          } else {
+            decBatch.update(d.ref, { projectId: FieldValue.delete() });
+          }
+        });
+        if (decSnap.docs.length > 0) {
+          await decBatch.commit();
+        }
+      } catch {}
+
+      // 6. Delete the project document itself
+      await db.collection("projects").doc(projectId).delete();
+
+      // 7. Audit log if linked to an organization
+      if (projectData.organizationId) {
+        await recordOrgAuditEvent(db, {
+          organizationId: projectData.organizationId,
+          actorUserId: req.user.uid,
+          actorEmail: req.user.email || "unknown",
+          action: "PROJECT_DELETED",
+          timestamp: new Date().toISOString(),
+          source: "api",
+          details: `Project "${projectData.name || projectId}" deleted. Child recordings ${cascadeRecordings ? 'cascaded' : 'detached'}. Members cleaned: ${membersSnap.docs.length}.`
+        });
+      }
+
+      return res.json({
+        success: true,
+        message: "Project and dependent resources safely cleaned up via server-authoritative workflow.",
+        projectId,
+        recordingsHandled: affectedRecordingsCount,
+        recordingsCascaded: cascadeRecordings,
+        membersPurged: membersSnap.docs.length,
+        invitesPurged: invitesSnap.docs.length,
+        activitiesPurged: actSnap.docs.length
+      });
+    } catch (err: any) {
+      console.error("[Project Deletion Error]:", err);
+      return res.status(500).json({ error: "Internal Server Error", message: "Failed to delete project safely." });
+    }
+  });
+
+  // Project Ownership Transfer
+  app.post("/api/projects/:projectId/transfer-ownership", requireAuth, async (req: AuthenticatedRequest, res: express.Response) => {
+    try {
+      const { projectId } = req.params;
+      const { newOwnerId } = req.body;
+
+      if (!projectId || !newOwnerId) {
+        return res.status(400).json({ error: "Bad Request", message: "projectId and newOwnerId are required." });
+      }
+
+      const projectDoc = await db.collection("projects").doc(projectId).get();
+      if (!projectDoc.exists) {
+        return res.status(404).json({ error: "Not Found", message: "Project not found." });
+      }
+      const projectData = projectDoc.data() || {};
+
+      const isPlatformAdmin = Boolean(
+        req.user.platform_admin === true ||
+        req.user.role === 'admin' ||
+        (req.user as any)?.claims?.platform_admin === true
+      );
+      const isOwner = projectData.userId === req.user.uid;
+
+      if (!isOwner && !isPlatformAdmin) {
+        return res.status(403).json({ error: "Forbidden", message: "Only the current project owner or platform admin can transfer ownership." });
+      }
+
+      // Verify target user exists
+      const targetUserDoc = await db.collection("users").doc(newOwnerId).get();
+      if (!targetUserDoc.exists) {
+        return res.status(404).json({ error: "Not Found", message: "Target owner user not found." });
+      }
+      const targetUserData = targetUserDoc.data() || {};
+
+      // Verify target user is affiliated (project member or organization member)
+      const targetMemberDoc = await db.collection("projectMembers").doc(`${newOwnerId}_${projectId}`).get();
+      let isAffiliated = targetMemberDoc.exists;
+
+      if (!isAffiliated && projectData.organizationId) {
+        const orgMemberDoc = await db.collection("orgMembers").doc(`${projectData.organizationId}_${newOwnerId}`).get();
+        if (orgMemberDoc.exists) isAffiliated = true;
+      }
+
+      if (!isAffiliated) {
+        return res.status(400).json({
+          error: "Bad Request",
+          message: "Target user must be a member of the project or organization to receive ownership."
+        });
+      }
+
+      // Execute transfer
+      const batch = db.batch();
+      batch.update(db.collection("projects").doc(projectId), {
+        userId: newOwnerId,
+        ownerEmail: targetUserData.email || null,
+        updatedAt: FieldValue.serverTimestamp()
+      });
+
+      // Update project members
+      batch.set(db.collection("projectMembers").doc(`${newOwnerId}_${projectId}`), {
+        projectId,
+        userId: newOwnerId,
+        email: targetUserData.email || null,
+        role: "owner",
+        updatedAt: FieldValue.serverTimestamp()
+      }, { merge: true });
+
+      // Demote previous owner to admin
+      batch.set(db.collection("projectMembers").doc(`${req.user.uid}_${projectId}`), {
+        projectId,
+        userId: req.user.uid,
+        email: req.user.email,
+        role: "admin",
+        updatedAt: FieldValue.serverTimestamp()
+      }, { merge: true });
+
+      await batch.commit();
+
+      // Log activity
+      try {
+        await db.collection("projectActivities").add({
+          projectId,
+          userId: req.user.uid,
+          userEmail: req.user.email,
+          actionType: "ownership_transferred",
+          description: `Ownership transferred to ${targetUserData.email || newOwnerId}`,
+          createdAt: FieldValue.serverTimestamp()
+        });
+      } catch {}
+
+      if (projectData.organizationId) {
+        await recordOrgAuditEvent(db, {
+          organizationId: projectData.organizationId,
+          actorUserId: req.user.uid,
+          actorEmail: req.user.email || "unknown",
+          targetUserId: newOwnerId,
+          targetUserEmail: targetUserData.email || null,
+          action: "PROJECT_OWNERSHIP_TRANSFERRED",
+          timestamp: new Date().toISOString(),
+          source: "api",
+          details: `Project "${projectData.name || projectId}" ownership transferred to ${targetUserData.email || newOwnerId}.`
+        });
+      }
+
+      return res.json({
+        success: true,
+        message: "Project ownership successfully transferred.",
+        projectId,
+        newOwnerId
+      });
+    } catch (err: any) {
+      console.error("[Ownership Transfer Error]:", err);
+      return res.status(500).json({ error: "Internal Server Error", message: "Failed to transfer project ownership." });
+    }
+  });
+
+  // User Account Closure Workflow
+  app.post("/api/user/close-account", requireAuth, async (req: AuthenticatedRequest, res: express.Response) => {
+    try {
+      const callerUid = req.user.uid;
+      const callerEmail = req.user.email;
+      const { confirmPhrase, confirmEmail } = req.body;
+
+      if (confirmEmail !== callerEmail && confirmPhrase !== "CLOSE MY ACCOUNT") {
+        return res.status(400).json({
+          error: "Bad Request",
+          message: "Explicit confirmation required: provide confirmPhrase: 'CLOSE MY ACCOUNT' or confirmEmail matching your account email."
+        });
+      }
+
+      // 1. Check for sole ownership of organizations with other members
+      const ownedOrgsSnap = await db.collection("organizations").where("ownerId", "==", callerUid).get();
+      for (const orgDoc of ownedOrgsSnap.docs) {
+        const orgData = orgDoc.data() || {};
+        const otherMembersSnap = await db.collection("orgMembers")
+          .where("orgId", "==", orgDoc.id)
+          .where("userId", "!=", callerUid)
+          .limit(1)
+          .get();
+
+        if (!otherMembersSnap.empty) {
+          return res.status(409).json({
+            error: "Conflict",
+            code: "ORGANIZATION_OWNERSHIP_TRANSFER_REQUIRED",
+            message: `Cannot close account: you are the primary owner of organization "${orgData.name || orgDoc.id}" which has active members. Transfer ownership or remove the organization first.`,
+            organizationId: orgDoc.id
+          });
+        }
+      }
+
+      // 2. Check for sole ownership of multi-member projects
+      const ownedProjectsSnap = await db.collection("projects").where("userId", "==", callerUid).get();
+      for (const projDoc of ownedProjectsSnap.docs) {
+        const projData = projDoc.data() || {};
+        const otherMembersSnap = await db.collection("projectMembers")
+          .where("projectId", "==", projDoc.id)
+          .where("userId", "!=", callerUid)
+          .limit(1)
+          .get();
+
+        if (!otherMembersSnap.empty) {
+          return res.status(409).json({
+            error: "Conflict",
+            code: "PROJECT_OWNERSHIP_TRANSFER_REQUIRED",
+            message: `Cannot close account: you are the primary owner of collaborative project "${projData.name || projDoc.id}" with other team members. Transfer project ownership before account closure.`,
+            projectId: projDoc.id
+          });
+        }
+      }
+
+      const bucketName = firebaseConfig.storageBucket || "echonote-2509.firebasestorage.app";
+      const bucket = admin.storage().bucket(bucketName);
+
+      // 3. Purge personal recordings (and associated Storage objects)
+      const personalRecSnap = await db.collection("recordings").where("userId", "==", callerUid).get();
+      let purgedRecordingsCount = 0;
+      for (const recDoc of personalRecSnap.docs) {
+        const recData = recDoc.data() || {};
+        recData.id = recDoc.id;
+        await purgeRecordingStorageAndDocs(db, bucket, recData);
+        purgedRecordingsCount++;
+      }
+
+      // 4. Purge personal decision history
+      try {
+        const decSnap = await db.collection("decisionHistory").where("userId", "==", callerUid).get();
+        const decBatch = db.batch();
+        decSnap.docs.forEach(d => decBatch.delete(d.ref));
+        if (decSnap.docs.length > 0) await decBatch.commit();
+      } catch {}
+
+      // 5. Purge solo projects (projects owned by user with no other members)
+      for (const projDoc of ownedProjectsSnap.docs) {
+        await db.collection("projects").doc(projDoc.id).delete();
+      }
+
+      // 6. Offboard from organization memberships (without destroying shared org data)
+      const orgMembersSnap = await db.collection("orgMembers").where("userId", "==", callerUid).get();
+      for (const omDoc of orgMembersSnap.docs) {
+        const omData = omDoc.data() || {};
+        if (omData.orgId) {
+          await recordOrgAuditEvent(db, {
+            organizationId: omData.orgId,
+            actorUserId: callerUid,
+            actorEmail: callerEmail || "unknown",
+            action: "MEMBER_ACCOUNT_CLOSED",
+            timestamp: new Date().toISOString(),
+            source: "api",
+            details: `User account closed. Member removed from organization.`
+          });
+        }
+        await omDoc.ref.delete();
+      }
+
+      // 7. Remove from project memberships
+      const projMembersSnap = await db.collection("projectMembers").where("userId", "==", callerUid).get();
+      const pmBatch = db.batch();
+      projMembersSnap.docs.forEach(d => pmBatch.delete(d.ref));
+      if (projMembersSnap.docs.length > 0) await pmBatch.commit();
+
+      // 8. Cancel active subscriptions (preserving billing ledger in /transactions for tax/legal compliance)
+      const subSnap = await db.collection("subscriptions")
+        .where("userId", "==", callerUid)
+        .where("status", "==", "active")
+        .get();
+      for (const sDoc of subSnap.docs) {
+        await sDoc.ref.update({
+          status: "cancelled_account_closed",
+          closedAt: FieldValue.serverTimestamp()
+        });
+      }
+
+      // 9. Sanitize user profile in /users
+      await db.collection("users").doc(callerUid).set({
+        accountStatus: "closed",
+        displayName: "Closed Account",
+        email: `closed_${callerUid}@echonote.internal`,
+        closedAt: new Date().toISOString()
+      }, { merge: true });
+
+      // 10. Finally, delete user in Firebase Authentication
+      try {
+        await admin.auth().deleteUser(callerUid);
+      } catch (authErr: any) {
+        console.warn("[Firebase Auth Delete Warning]:", authErr?.message);
+      }
+
+      return res.json({
+        success: true,
+        message: "Account closed, personal data purged, and authentication revoked.",
+        purgedRecordings: purgedRecordingsCount
+      });
+    } catch (err: any) {
+      console.error("[Account Closure Error]:", err);
+      return res.status(500).json({ error: "Internal Server Error", message: "Failed to close account." });
+    }
+  });
+
+  // Organization Deletion Request Workflow (Controlled state)
+  app.post("/api/organizations/:organizationId/request-deletion", requireAuth, async (req: AuthenticatedRequest, res: express.Response) => {
+    try {
+      const { organizationId } = req.params;
+      const { confirmName } = req.body;
+
+      const orgDoc = await db.collection("organizations").doc(organizationId).get();
+      if (!orgDoc.exists) {
+        return res.status(404).json({ error: "Not Found", message: "Organization not found." });
+      }
+      const orgData = orgDoc.data() || {};
+
+      const isOwner = orgData.ownerId === req.user.uid;
+      const isPlatformAdmin = Boolean(
+        req.user.platform_admin === true ||
+        req.user.role === 'admin' ||
+        (req.user as any)?.claims?.platform_admin === true
+      );
+
+      if (!isOwner && !isPlatformAdmin) {
+        return res.status(403).json({ error: "Forbidden", message: "Only the organization primary owner or platform admin can request organization deletion." });
+      }
+
+      if (confirmName !== orgData.name) {
+        return res.status(400).json({
+          error: "Bad Request",
+          message: `Confirmation required: provide confirmName matching exact organization name "${orgData.name}".`
+        });
+      }
+
+      // Check active subscription status
+      const hasActiveSubscription = orgData.plan && orgData.plan !== 'free' && orgData.plan !== 'starter';
+
+      // Place in safe "deletion requested / pending review" state to avoid accidental multi-tenant data loss
+      await db.collection("organizations").doc(organizationId).update({
+        deletionRequest: {
+          requestedBy: req.user.uid,
+          requestedByEmail: req.user.email,
+          requestedAt: new Date().toISOString(),
+          status: "pending_review",
+          hasActiveSubscription: Boolean(hasActiveSubscription),
+          gracePeriodDays: 14
+        },
+        updatedAt: FieldValue.serverTimestamp()
+      });
+
+      await recordOrgAuditEvent(db, {
+        organizationId,
+        actorUserId: req.user.uid,
+        actorEmail: req.user.email || "unknown",
+        action: "ORGANIZATION_DELETION_REQUESTED",
+        timestamp: new Date().toISOString(),
+        source: "api",
+        details: `Organization deletion requested by owner. Placed in 14-day pending review state.`
+      });
+
+      return res.json({
+        success: true,
+        message: "Organization deletion requested. The workspace is placed in a 14-day pending review status.",
+        organizationId,
+        status: "pending_review",
+        gracePeriodDays: 14
+      });
+    } catch (err: any) {
+      console.error("[Org Deletion Request Error]:", err);
+      return res.status(500).json({ error: "Internal Server Error", message: "Failed to request organization deletion." });
+    }
+  });
+
+  // Safe Retention Purge Job (Configurable policy, bounded batch, idempotent)
+  app.post("/api/admin/retention/purge-expired", async (req: express.Request, res: express.Response) => {
+    try {
+      const cronKey = req.headers["x-cron-key"];
+      const configuredCronSecret = (process.env.CRON_SECRET || "").trim();
+      const hasValidCronKey = Boolean(
+        typeof cronKey === "string" &&
+        configuredCronSecret &&
+        timingSafeStringCompare(cronKey, configuredCronSecret)
+      );
+
+      let isAuthorized = hasValidCronKey;
+
+      if (!isAuthorized) {
+        // Check platform admin bearer token
+        const authHeader = req.headers.authorization;
+        if (authHeader && authHeader.startsWith("Bearer ")) {
+          try {
+            const token = authHeader.split("Bearer ")[1];
+            const decoded = await admin.auth().verifyIdToken(token);
+            if (decoded.role === 'admin' || decoded.platform_admin === true) {
+              isAuthorized = true;
+            }
+          } catch {}
+        }
+      }
+
+      if (!isAuthorized) {
+        return res.status(403).json({ error: "Forbidden", message: "Platform admin or valid x-cron-key required." });
+      }
+
+      const retentionDays = Number(req.body?.retentionDays || req.query?.retentionDays);
+      if (isNaN(retentionDays) || retentionDays < 1) {
+        return res.status(400).json({
+          error: "Bad Request",
+          message: "Configurable retentionDays parameter (>= 1) must be explicitly provided. Business retention policy must not be assumed."
+        });
+      }
+
+      const dryRun = req.body?.dryRun === true || req.query?.dryRun === 'true';
+      const maxBatch = Math.min(Number(req.body?.maxBatch || 50), 100);
+
+      const thresholdTimestamp = Date.now() - (retentionDays * 86400000);
+      const snapshot = await db.collection("recordings")
+        .where("deletedAt", "!=", null)
+        .limit(maxBatch * 2)
+        .get();
+
+      const candidateDocs = snapshot.docs.filter(d => {
+        const deletedAt = d.data()?.deletedAt;
+        if (!deletedAt) return false;
+        const deletedTime = new Date(deletedAt).getTime();
+        return !isNaN(deletedTime) && deletedTime <= thresholdTimestamp;
+      }).slice(0, maxBatch);
+
+      if (dryRun) {
+        return res.json({
+          success: true,
+          dryRun: true,
+          retentionDays,
+          scanned: snapshot.docs.length,
+          eligibleCount: candidateDocs.length,
+          eligibleRecordingIds: candidateDocs.map(d => d.id)
+        });
+      }
+
+      const bucketName = firebaseConfig.storageBucket || "echonote-2509.firebasestorage.app";
+      const bucket = admin.storage().bucket(bucketName);
+      let purgedCount = 0;
+      let failedCount = 0;
+
+      for (const d of candidateDocs) {
+        try {
+          const recData = d.data() || {};
+          recData.id = d.id;
+          await purgeRecordingStorageAndDocs(db, bucket, recData);
+          purgedCount++;
+        } catch (purgeErr) {
+          failedCount++;
+          console.error(`[Retention Purge Error for ${d.id}]:`, purgeErr);
+        }
+      }
+
+      return res.json({
+        success: true,
+        dryRun: false,
+        retentionDays,
+        scanned: snapshot.docs.length,
+        eligibleCount: candidateDocs.length,
+        purgedCount,
+        failedCount
+      });
+    } catch (err: any) {
+      console.error("[Retention Purge Job Error]:", err);
+      return res.status(500).json({ error: "Internal Server Error", message: "Failed to execute retention purge job." });
+    }
+  });
+
+  // Stream authorized audio object with HTTP Range request support
+  const handleAudioStreaming = async (req: express.Request, res: express.Response) => {
+    try {
+      const recordingId = req.params.id || req.params.recordingId;
+      if (!recordingId) {
+        return res.status(400).json({ error: "Bad Request", message: "Recording ID is required." });
+      }
+      let user: any = null;
+
+      // Check Authorization Bearer header
+      const authHeader = req.headers.authorization;
+      if (authHeader && authHeader.startsWith("Bearer ")) {
+        const idToken = authHeader.split("Bearer ")[1]?.trim();
+        if (idToken) {
+          try {
+            user = await admin.auth().verifyIdToken(idToken);
+          } catch (tokenErr: any) {
+            return res.status(401).json({ error: "Unauthorized", message: "Invalid or expired Firebase ID token." });
+          }
+        }
+      }
+
+      // Check query playback token if not authenticated via header
+      if (!user && req.query.token && typeof req.query.token === "string") {
+        const tokenResult = verifyPlaybackToken(req.query.token);
+        if (!tokenResult.valid) {
+          return res.status(401).json({ error: "Unauthorized", message: `Playback token verification failed: ${tokenResult.error}` });
+        }
+        if (tokenResult.data.recId !== recordingId) {
+          return res.status(403).json({ error: "Forbidden", message: "Playback token does not match requested recording." });
+        }
+        user = tokenResult.data;
+      }
+
+      if (!user) {
+        return res.status(401).json({ error: "Unauthorized", message: "Authentication required for audio streaming." });
+      }
+
+      // Authoritative tenant & record permission verification
+      const authResult = await authorizeRecordingAccess(user, recordingId);
+      if (!authResult.authorized) {
+        return res.status(authResult.status).json({ error: authResult.status === 404 ? "Not Found" : "Forbidden", message: authResult.message });
+      }
+
+      const record = authResult.record;
+      const storagePath = resolveStoragePath(record);
+      if (!storagePath) {
+        return res.status(404).json({ error: "Not Found", message: "Storage path could not be resolved for this recording." });
+      }
+
+      const bucketName = firebaseConfig.storageBucket || "echonote-2509.firebasestorage.app";
+      const bucket = admin.storage().bucket(bucketName);
+      let file = bucket.file(storagePath);
+      let [exists] = await file.exists();
+
+      if (!exists && record.userId && record.id) {
+        const prefix = `recordings/${record.userId}/${record.id}/`;
+        try {
+          const [files] = await bucket.getFiles({ prefix, maxResults: 1 });
+          if (files && files.length > 0) {
+            file = files[0];
+            exists = true;
+          }
+        } catch (listErr) {
+          console.warn("[Storage Lookup Warn]:", listErr);
+        }
+      }
+
+      if (!exists) {
+        return res.status(404).json({ error: "Not Found", message: "Audio file not found in storage bucket." });
+      }
+
+      const [metadata] = await file.getMetadata();
+      const fileSize = parseInt(metadata.size as string, 10) || 0;
+      const contentType = metadata.contentType || record.mimeType || 'audio/webm';
+
+      res.setHeader('Accept-Ranges', 'bytes');
+      res.setHeader('Cache-Control', 'private, no-cache, no-store, must-revalidate');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
+
+      const range = req.headers.range;
+      if (range && fileSize > 0) {
+        const parts = range.replace(/bytes=/, "").split("-");
+        const start = parseInt(parts[0], 10);
+        const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+        const chunkSize = (end - start) + 1;
+
+        res.status(206);
+        res.setHeader('Content-Range', `bytes ${start}-${end}/${fileSize}`);
+        res.setHeader('Content-Length', chunkSize);
+        res.setHeader('Content-Type', contentType);
+
+        const stream = file.createReadStream({ start, end });
+        stream.on('error', (err) => {
+          console.error("[Stream Range Error]:", err);
+          if (!res.headersSent) res.status(500).end();
+        });
+        stream.pipe(res);
+      } else {
+        res.status(200);
+        if (fileSize > 0) {
+          res.setHeader('Content-Length', fileSize);
+        }
+        res.setHeader('Content-Type', contentType);
+
+        const stream = file.createReadStream();
+        stream.on('error', (err) => {
+          console.error("[Stream Error]:", err);
+          if (!res.headersSent) res.status(500).end();
+        });
+        stream.pipe(res);
+      }
+    } catch (err: any) {
+      console.error("[Audio Streaming Error]:", err?.message || err);
+      if (!res.headersSent) {
+        return res.status(500).json({ error: "Internal Server Error", message: "Failed to stream audio file." });
+      }
+    }
+  };
+
+  app.get("/api/recordings/:id/audio", handleAudioStreaming);
+  app.get("/api/recordings/:recordingId/audio", handleAudioStreaming);
+
+  // Admin AI Analytics Endpoints - Strictly Protected (Requires Platform Administrator)
+  app.get("/api/admin/analytics/overview", requirePlatformAdmin, async (req: AuthenticatedRequest, res) => {
     try {
       const overview = getAiUsageOverview();
       res.json({ success: true, data: overview });
     } catch (err: any) {
-      res.status(500).json({ error: "Failed to fetch analytics overview", message: err.message });
+      console.error("Failed to fetch analytics overview:", err?.message || err);
+      res.status(500).json({ error: "Internal Server Error", message: "Failed to fetch analytics overview" });
     }
   });
 
-  app.get("/api/admin/analytics/logs", async (req, res) => {
+  app.get("/api/admin/analytics/logs", requirePlatformAdmin, async (req: AuthenticatedRequest, res) => {
     try {
-      const limitParam = parseInt(req.query.limit as string) || 100;
+      const rawLimit = parseInt(req.query.limit as string, 10);
+      const limitParam = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 500) : 100;
       const logs = getRecentAiUsageLogs(limitParam);
       res.json({ success: true, logs });
     } catch (err: any) {
-      res.status(500).json({ error: "Failed to fetch AI logs", message: err.message });
+      console.error("Failed to fetch AI logs:", err?.message || err);
+      res.status(500).json({ error: "Internal Server Error", message: "Failed to fetch AI logs" });
     }
   });
 
-  // AI Tracking & Execution Endpoints
-  app.post("/api/ai/transcribe-audio", optionalAuth, async (req: AuthenticatedRequest, res) => {
-    const { base64Data, mimeType, targetLanguage, email: bodyEmail, plan: bodyPlan } = req.body;
-    const userCtx = await resolveUserContext(req, bodyEmail, bodyPlan);
+  // Helper to sanitize error messages from AI provider calls to prevent credentials or stack traces from leaking
+  function sanitizeAiErrorMessage(errMsg: any): string {
+    if (!errMsg || typeof errMsg !== 'string') return "AI processing failed. Please try again.";
+    let sanitized = errMsg
+      .replace(/AIza[0-9A-Za-z-_]{35}/g, '[REDACTED]')
+      .replace(/(?:key|apiKey|token|secret|authorization)=[^&\s]+/gi, '$1=[REDACTED]')
+      .replace(/Bearer\s+[A-Za-z0-9._-]+/gi, 'Bearer [REDACTED]');
+    if (sanitized.includes('at ') && sanitized.includes('(')) {
+      sanitized = sanitized.split('\n')[0];
+    }
+    return sanitized;
+  }
+
+  // AI Tracking & Execution Endpoints - strictly requireAuth & server-authoritative context
+  app.post("/api/ai/transcribe-audio", requireAuth, async (req: AuthenticatedRequest, res) => {
+    const { base64Data, mimeType, targetLanguage, recordingId, projectId } = req.body;
+    const userCtx = await resolveUserContext(req);
     const userId = userCtx.userId;
     const email = userCtx.email;
     const plan = userCtx.plan;
+
+    // Authorize resource identifiers if provided
+    if (recordingId && typeof recordingId === 'string' && recordingId.trim()) {
+      const authResult = await authorizeRecordingAccess(req.user, recordingId.trim());
+      if (!authResult.authorized) {
+        return res.status(authResult.status).json({ error: "Forbidden", message: authResult.message });
+      }
+    }
+    if (projectId && typeof projectId === 'string' && projectId.trim()) {
+      const projectAccess = await checkProjectAccess(db, userId, projectId.trim(), ["owner", "admin", "member", "viewer"]);
+      if (!projectAccess.hasAccess) {
+        return res.status(403).json({ error: "Forbidden", message: "Access denied to requested project." });
+      }
+    }
 
     const start = Date.now();
     const model = 'gemini-3.5-flash';
     const featureName = "Intelligence Transcription";
 
     if (!base64Data) return res.status(400).json({ error: "Missing sound data" });
+
+    // Step 8.1A: Admit AI rate limit and acquire concurrency slot after input validation
+    const slot = admitExpensiveOperation(req, res, 'ai');
+    if (!slot) return;
 
     // Normalize and clean MIME type so Gemini receives valid pure MIME (e.g. 'audio/webm' instead of 'audio/webm;codecs=opus')
     const normalized = normalizeAudioMimeType(mimeType);
@@ -5494,16 +6407,33 @@ async function startServer() {
         requestDuration: duration,
         status: "failure",
       });
-      res.status(500).json({ error: error.message || "Execution failed" });
+      res.status(500).json({ error: sanitizeAiErrorMessage(error?.message) || "Execution failed" });
+    } finally {
+      // Step 8.1A: Always release concurrency slot on completion or failure
+      slot.release();
     }
   });
 
-  app.post("/api/ai/summarize-transcript", optionalAuth, async (req: AuthenticatedRequest, res) => {
-    const { transcript, tier, email: bodyEmail, plan: bodyPlan } = req.body;
-    const userCtx = await resolveUserContext(req, bodyEmail, bodyPlan);
+  app.post("/api/ai/summarize-transcript", requireAuth, async (req: AuthenticatedRequest, res) => {
+    const { transcript, recordingId, projectId } = req.body;
+    const userCtx = await resolveUserContext(req);
     const userId = userCtx.userId;
     const email = userCtx.email;
     const plan = userCtx.plan;
+
+    // Authorize resource identifiers if provided
+    if (recordingId && typeof recordingId === 'string' && recordingId.trim()) {
+      const authResult = await authorizeRecordingAccess(req.user, recordingId.trim());
+      if (!authResult.authorized) {
+        return res.status(authResult.status).json({ error: "Forbidden", message: authResult.message });
+      }
+    }
+    if (projectId && typeof projectId === 'string' && projectId.trim()) {
+      const projectAccess = await checkProjectAccess(db, userId, projectId.trim(), ["owner", "admin", "member", "viewer"]);
+      if (!projectAccess.hasAccess) {
+        return res.status(403).json({ error: "Forbidden", message: "Access denied to requested project." });
+      }
+    }
 
     const start = Date.now();
     const model = 'gemini-3-flash-preview';
@@ -5511,7 +6441,12 @@ async function startServer() {
 
     if (!transcript) return res.status(400).json({ error: "Missing transcript data" });
 
-    const isAdvanced = tier !== 'guest';
+    // Step 8.1A: Admit AI rate limit and acquire concurrency slot after input validation
+    const slot = admitExpensiveOperation(req, res, 'ai');
+    if (!slot) return;
+
+    // Server-authoritative plan level determines insight depth (never trust client-supplied tier)
+    const isAdvanced = ['pro', 'team', 'enterprise'].includes(plan.toLowerCase());
     const transcriptText = Array.isArray(transcript) 
       ? transcript.map((s: any) => `${s.speaker}: ${s.text}`).join('\n')
       : String(transcript);
@@ -5598,12 +6533,15 @@ async function startServer() {
         status: "failure",
       });
       res.status(500).json({ error: error.message || "Execution failed" });
+    } finally {
+      // Step 8.1A: Always release concurrency slot on completion or failure
+      slot.release();
     }
   });
 
-  app.post("/api/ai/synthesize-speech", optionalAuth, async (req: AuthenticatedRequest, res) => {
-    const { text, gender, email: bodyEmail, plan: bodyPlan } = req.body;
-    const userCtx = await resolveUserContext(req, bodyEmail, bodyPlan);
+  app.post("/api/ai/synthesize-speech", requireAuth, async (req: AuthenticatedRequest, res) => {
+    const { text, gender } = req.body;
+    const userCtx = await resolveUserContext(req);
     const userId = userCtx.userId;
     const email = userCtx.email;
     const plan = userCtx.plan;
@@ -5613,6 +6551,10 @@ async function startServer() {
     const featureName = "Speech Synthesis";
 
     if (!text) return res.status(400).json({ error: "Missing text to synthesize" });
+
+    // Step 8.1A: Admit AI rate limit and acquire concurrency slot after input validation
+    const slot = admitExpensiveOperation(req, res, 'ai');
+    if (!slot) return;
 
     const voiceName = gender === 'male' ? 'Fenrir' : 'Puck';
     const genderDescriptor = gender === 'male' 
@@ -5671,23 +6613,46 @@ async function startServer() {
         requestDuration: duration,
         status: "failure",
       });
-      res.status(500).json({ error: error.message || "Speech synthesis failed" });
+      res.status(500).json({ error: sanitizeAiErrorMessage(error?.message) || "Speech synthesis failed" });
+    } finally {
+      // Step 8.1A: Always release concurrency slot on completion or failure
+      slot.release();
     }
   });
 
-  app.post("/api/ai/analyze-strategically", optionalAuth, async (req: AuthenticatedRequest, res) => {
-    const { input, inputType, tier, email: bodyEmail, plan: bodyPlan } = req.body;
-    const userCtx = await resolveUserContext(req, bodyEmail, bodyPlan);
+  app.post("/api/ai/analyze-strategically", requireAuth, async (req: AuthenticatedRequest, res) => {
+    const { input, inputType, recordingId, projectId } = req.body;
+    const userCtx = await resolveUserContext(req);
     const userId = userCtx.userId;
     const email = userCtx.email;
     const plan = userCtx.plan;
+
+    // Authorize resource identifiers if provided
+    if (recordingId && typeof recordingId === 'string' && recordingId.trim()) {
+      const authResult = await authorizeRecordingAccess(req.user, recordingId.trim());
+      if (!authResult.authorized) {
+        return res.status(authResult.status).json({ error: "Forbidden", message: authResult.message });
+      }
+    }
+    if (projectId && typeof projectId === 'string' && projectId.trim()) {
+      const projectAccess = await checkProjectAccess(db, userId, projectId.trim(), ["owner", "admin", "member", "viewer"]);
+      if (!projectAccess.hasAccess) {
+        return res.status(403).json({ error: "Forbidden", message: "Access denied to requested project." });
+      }
+    }
 
     const start = Date.now();
     const model = 'gemini-3-flash-preview';
     const featureName = "Strategic Thinking Partner";
 
     if (!input) return res.status(400).json({ error: "Missing input content" });
-    const isAdvanced = tier !== 'guest';
+
+    // Step 8.1A: Admit AI rate limit and acquire concurrency slot after input validation
+    const slot = admitExpensiveOperation(req, res, 'ai');
+    if (!slot) return;
+
+    // Server-authoritative plan level determines insight depth (never trust client-supplied tier)
+    const isAdvanced = ['pro', 'team', 'enterprise'].includes(plan.toLowerCase());
 
     const prompt = `
       You are the EchoNote Strategic Intelligence engine. Your goal is to transform the provided ${inputType} into deep, strategic insights that reveal the "thinking" behind the conversation.
@@ -5802,23 +6767,46 @@ async function startServer() {
         requestDuration: duration,
         status: "failure",
       });
-      res.status(500).json({ error: error.message || "Execution failed" });
+      res.status(500).json({ error: sanitizeAiErrorMessage(error?.message) || "Execution failed" });
+    } finally {
+      // Step 8.1A: Always release concurrency slot on completion or failure
+      slot.release();
     }
   });
 
-  app.post("/api/ai/decision-intelligence", optionalAuth, async (req: AuthenticatedRequest, res) => {
-    const { input, inputType, tier, email: bodyEmail, plan: bodyPlan } = req.body;
-    const userCtx = await resolveUserContext(req, bodyEmail, bodyPlan);
+  app.post("/api/ai/decision-intelligence", requireAuth, async (req: AuthenticatedRequest, res) => {
+    const { input, inputType, recordingId, projectId } = req.body;
+    const userCtx = await resolveUserContext(req);
     const userId = userCtx.userId;
     const email = userCtx.email;
     const plan = userCtx.plan;
+
+    // Authorize resource identifiers if provided
+    if (recordingId && typeof recordingId === 'string' && recordingId.trim()) {
+      const authResult = await authorizeRecordingAccess(req.user, recordingId.trim());
+      if (!authResult.authorized) {
+        return res.status(authResult.status).json({ error: "Forbidden", message: authResult.message });
+      }
+    }
+    if (projectId && typeof projectId === 'string' && projectId.trim()) {
+      const projectAccess = await checkProjectAccess(db, userId, projectId.trim(), ["owner", "admin", "member", "viewer"]);
+      if (!projectAccess.hasAccess) {
+        return res.status(403).json({ error: "Forbidden", message: "Access denied to requested project." });
+      }
+    }
 
     const start = Date.now();
     const model = 'gemini-3-flash-preview';
     const featureName = "Decision Intelligence";
 
     if (!input) return res.status(400).json({ error: "Missing input content" });
-    const isAdvanced = tier !== 'guest';
+
+    // Step 8.1A: Admit AI rate limit and acquire concurrency slot after input validation
+    const slot = admitExpensiveOperation(req, res, 'ai');
+    if (!slot) return;
+
+    // Server-authoritative plan level determines insight depth (never trust client-supplied tier)
+    const isAdvanced = ['pro', 'team', 'enterprise'].includes(plan.toLowerCase());
 
     const prompt = `
       You are the EchoNote Decision Intelligence engine. Your goal is to transform the provided ${inputType} into structured, actionable insights that help users move from conversation to clarity.
@@ -5921,23 +6909,46 @@ async function startServer() {
         requestDuration: duration,
         status: "failure",
       });
-      res.status(500).json({ error: error.message || "Execution failed" });
+      res.status(500).json({ error: sanitizeAiErrorMessage(error?.message) || "Execution failed" });
+    } finally {
+      // Step 8.1A: Always release concurrency slot on completion or failure
+      slot.release();
     }
   });
 
-  app.post("/api/ai/unified-meeting-intelligence", optionalAuth, async (req: AuthenticatedRequest, res) => {
-    const { transcript, tier, email: bodyEmail, plan: bodyPlan } = req.body;
-    const userCtx = await resolveUserContext(req, bodyEmail, bodyPlan);
+  app.post("/api/ai/unified-meeting-intelligence", requireAuth, async (req: AuthenticatedRequest, res) => {
+    const { transcript, recordingId, projectId } = req.body;
+    const userCtx = await resolveUserContext(req);
     const userId = userCtx.userId;
     const email = userCtx.email;
     const plan = userCtx.plan;
+
+    // Authorize resource identifiers if provided
+    if (recordingId && typeof recordingId === 'string' && recordingId.trim()) {
+      const authResult = await authorizeRecordingAccess(req.user, recordingId.trim());
+      if (!authResult.authorized) {
+        return res.status(authResult.status).json({ error: "Forbidden", message: authResult.message });
+      }
+    }
+    if (projectId && typeof projectId === 'string' && projectId.trim()) {
+      const projectAccess = await checkProjectAccess(db, userId, projectId.trim(), ["owner", "admin", "member", "viewer"]);
+      if (!projectAccess.hasAccess) {
+        return res.status(403).json({ error: "Forbidden", message: "Access denied to requested project." });
+      }
+    }
 
     const start = Date.now();
     const model = 'gemini-3-flash-preview';
     const featureName = "Meeting Intelligence";
 
     if (!transcript) return res.status(400).json({ error: "Missing transcript content" });
-    const isAdvanced = tier !== 'guest';
+
+    // Step 8.1A: Admit AI rate limit and acquire concurrency slot after input validation
+    const slot = admitExpensiveOperation(req, res, 'ai');
+    if (!slot) return;
+
+    // Server-authoritative plan level determines insight depth (never trust client-supplied tier)
+    const isAdvanced = ['pro', 'team', 'enterprise'].includes(plan.toLowerCase());
 
     const prompt = `
       You are the EchoNote Decision Intelligence workspace engine. 
@@ -6269,22 +7280,43 @@ async function startServer() {
         requestDuration: duration,
         status: "failure",
       });
-      res.status(500).json({ error: error.message || "Execution failed" });
+      res.status(500).json({ error: sanitizeAiErrorMessage(error?.message) || "Execution failed" });
+    } finally {
+      // Step 8.1A: Always release concurrency slot on completion or failure
+      slot.release();
     }
   });
 
-  app.post("/api/ai/process-audio-transcription", optionalAuth, async (req: AuthenticatedRequest, res) => {
-    const { audioBase64, mimeType, email: bodyEmail, plan: bodyPlan } = req.body;
-    const userCtx = await resolveUserContext(req, bodyEmail, bodyPlan);
+  app.post("/api/ai/process-audio-transcription", requireAuth, async (req: AuthenticatedRequest, res) => {
+    const { audioBase64, mimeType, recordingId, projectId } = req.body;
+    const userCtx = await resolveUserContext(req);
     const userId = userCtx.userId;
     const email = userCtx.email;
     const plan = userCtx.plan;
+
+    // Authorize resource identifiers if provided
+    if (recordingId && typeof recordingId === 'string' && recordingId.trim()) {
+      const authResult = await authorizeRecordingAccess(req.user, recordingId.trim());
+      if (!authResult.authorized) {
+        return res.status(authResult.status).json({ error: "Forbidden", message: authResult.message });
+      }
+    }
+    if (projectId && typeof projectId === 'string' && projectId.trim()) {
+      const projectAccess = await checkProjectAccess(db, userId, projectId.trim(), ["owner", "admin", "member", "viewer"]);
+      if (!projectAccess.hasAccess) {
+        return res.status(403).json({ error: "Forbidden", message: "Access denied to requested project." });
+      }
+    }
 
     const start = Date.now();
     const model = "gemini-2.5-flash-native-audio-preview-12-2025";
     const featureName = "Intelligence Transcription";
 
     if (!audioBase64) return res.status(400).json({ error: "Missing audio base64 content" });
+
+    // Step 8.1A: Admit AI rate limit and acquire concurrency slot after input validation
+    const slot = admitExpensiveOperation(req, res, 'ai');
+    if (!slot) return;
 
     const prompt = `
       Analyze this audio. Provide a speaker-wise transcript. 
@@ -6369,7 +7401,144 @@ async function startServer() {
         requestDuration: duration,
         status: "failure",
       });
-      res.status(500).json({ error: error.message || "Execution failed" });
+      res.status(500).json({ error: sanitizeAiErrorMessage(error?.message) || "Execution failed" });
+    } finally {
+      // Step 8.1A: Always release concurrency slot on completion or failure
+      slot.release();
+    }
+  });
+
+  // Assistant Chat Endpoint (Server-Side EchoNote Assistant) - strictly requireAuth & server-authoritative context
+  app.post("/api/ai/assistant-chat", requireAuth, async (req: AuthenticatedRequest, res) => {
+    const { message, context } = req.body;
+    if (!message || typeof message !== 'string') {
+      return res.status(400).json({ error: "Missing or invalid message parameter" });
+    }
+
+    const userCtx = await resolveUserContext(req);
+    const userId = userCtx.userId;
+    const email = userCtx.email;
+    const plan = userCtx.plan;
+    const userData = userCtx.userData || {};
+
+    // IDOR check: if caller specifies recording or project context, verify ownership/membership
+    const candidateRecId = context?.recordingId || context?.selected_recording_id;
+    if (candidateRecId && typeof candidateRecId === 'string' && candidateRecId !== 'none') {
+      const authResult = await authorizeRecordingAccess(req.user, candidateRecId.trim());
+      if (!authResult.authorized) {
+        return res.status(authResult.status).json({ error: "Forbidden", message: authResult.message });
+      }
+    }
+
+    const candidateProjId = context?.projectId || context?.current_project_id;
+    if (candidateProjId && typeof candidateProjId === 'string' && candidateProjId !== 'none') {
+      const projectAccess = await checkProjectAccess(db, userId, candidateProjId.trim(), ["owner", "admin", "member", "viewer"]);
+      if (!projectAccess.hasAccess) {
+        return res.status(403).json({ error: "Forbidden", message: "Access denied to requested project." });
+      }
+    }
+
+    // Step 8.1A: Admit AI rate limit and acquire concurrency slot after input validation and IDOR checks
+    const slot = admitExpensiveOperation(req, res, 'ai');
+    if (!slot) return;
+
+    const start = Date.now();
+    const model = "gemini-3-flash-preview";
+    const featureName = "EchoNote Assistant";
+
+    const systemInstruction = `You are EchoNote Assistant, an AI embedded inside an audio intelligence platform.
+Your role is NOT just to answer questions, but to help users take actions on their audio data.
+You have access to:
+* transcripts
+* summaries
+* projects
+* user usage data
+
+Current Context:
+- Page: ${context?.current_page || 'unknown'}
+- Project: ${context?.current_project || 'none'}
+- Selected File: ${context?.selected_file_name || 'none'}
+- User Plan: ${plan}
+- Minutes Used: ${userData.minutes_used || userData.audioMinutesUsed || 0}
+- Minutes Remaining: ${userData.minutes_remaining || (plan === 'free' ? 60 : 300)}
+
+You must:
+1. Understand user intent
+2. If the request is actionable → suggest or trigger an action
+3. If unclear → ask a clarifying question
+4. Keep responses short, clear, and actionable (2-5 lines)
+
+You can perform:
+* Summarization
+* Thinking analysis
+* Decision extraction
+* Project assignment
+* Usage explanation
+
+Always prioritize helping the user move forward, not just explaining things.
+
+If you detect an intent, specify it in the JSON response.
+Intents: "summarize", "analyze thinking", "decisions", "add to project", "usage / minutes", "none".`;
+
+    try {
+      const response = await aiGen.models.generateContent({
+        model,
+        contents: [
+          { role: 'user', parts: [{ text: message }] }
+        ],
+        config: {
+          systemInstruction,
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              reply: { type: Type.STRING },
+              intent: { 
+                type: Type.STRING, 
+                enum: ["summarize", "analyze thinking", "decisions", "add to project", "usage / minutes", "none"] 
+              }
+            },
+            required: ["reply", "intent"]
+          }
+        }
+      });
+
+      const inputTokens = response.usageMetadata?.promptTokenCount || 0;
+      const outputTokens = response.usageMetadata?.candidatesTokenCount || 0;
+      const duration = Date.now() - start;
+
+      await trackAIUsage({
+        userId,
+        email,
+        plan,
+        featureName,
+        modelUsed: model,
+        inputTokens,
+        outputTokens,
+        requestDuration: duration,
+        status: "success",
+      });
+
+      const parsed = JSON.parse(response.text || '{"reply": "I am here to help.", "intent": "none"}');
+      res.json(parsed);
+    } catch (error: any) {
+      console.error(`[AI Endpoint Error] ${featureName}:`, error);
+      const duration = Date.now() - start;
+      await trackAIUsage({
+        userId,
+        email,
+        plan,
+        featureName,
+        modelUsed: model,
+        inputTokens: 0,
+        outputTokens: 0,
+        requestDuration: duration,
+        status: "failure",
+      });
+      res.status(500).json({ error: sanitizeAiErrorMessage(error?.message) || "Execution failed" });
+    } finally {
+      // Step 8.1A: Always release concurrency slot on completion or failure
+      slot.release();
     }
   });
 
@@ -6382,7 +7551,51 @@ async function startServer() {
     });
   });
 
-  // Global Express Error Handler - returns JSON for all unhandled errors
+  // Strictly deny HTTP access to server bundle, source maps, and server source
+  app.use((req, res, next) => {
+    const normalizedPath = req.path.toLowerCase();
+    if (
+      normalizedPath === "/server.cjs" ||
+      normalizedPath.startsWith("/server.cjs") ||
+      normalizedPath === "/server.ts" ||
+      normalizedPath.startsWith("/server.") ||
+      normalizedPath.endsWith(".map") ||
+      normalizedPath.endsWith(".cjs")
+    ) {
+      return res.status(404).json({ error: "Asset not found", code: "NOT_FOUND" });
+    }
+    next();
+  });
+
+  // Frontend serving: Vite middleware for development or pre-built static bundle in production
+  if (process.env.NODE_ENV !== "production") {
+    const { createServer: createViteServer } = await import("vite");
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: "spa",
+    });
+    app.use(vite.middlewares);
+  } else {
+    const distPath = path.join(process.cwd(), "dist");
+
+    // Serve static assets with Access-Control-Allow-Origin header for module scripts
+    app.use(express.static(distPath, {
+      setHeaders: (res) => {
+        res.setHeader("Access-Control-Allow-Origin", "*");
+      }
+    }));
+    // Correct catch-all for SPA in Express
+    app.get("*all", (req, res) => {
+      // If the request was for a file (has an extension) but reached here, 
+      // it means the file is missing in dist. We should return 404 rather than index.html.
+      if (req.path.includes('.')) {
+        return res.status(404).json({ error: "Asset not found" });
+      }
+      res.sendFile(path.join(distPath, "index.html"));
+    });
+  }
+
+  // Global Express Error Handler - returns JSON for all unhandled errors (must be defined LAST)
   app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
     console.error("🔥 Global Unhandled Server Error:", err);
     if (res.headersSent) {
@@ -6395,29 +7608,6 @@ async function startServer() {
       code: err?.code || "INTERNAL_SERVER_ERROR"
     });
   });
-
-  // Vite middleware for development
-  if (process.env.NODE_ENV !== "production") {
-    const { createServer: createViteServer } = await import("vite");
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: "spa",
-    });
-    app.use(vite.middlewares);
-  } else {
-    const distPath = path.join(process.cwd(), "dist");
-    app.use(express.static(distPath));
-    // Correct catch-all for SPA in Express
-    app.get("*all", (req, res) => {
-      // If the request was for a file (has an extension) but reached here, 
-      // it means the file is missing in dist. We should probably NOT send index.html 
-      // for missing assets as it leads to confusing 200 OK HTML responses.
-      if (req.path.includes('.')) {
-        return res.status(404).json({ error: "Asset not found" });
-      }
-      res.sendFile(path.join(distPath, "index.html"));
-    });
-  }
 
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);

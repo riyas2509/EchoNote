@@ -59,6 +59,7 @@ export interface CustomClaims {
   orgId?: string;
   orgRole?: AuthoritativeOrgRole;
   role?: 'admin' | 'user';
+  platform_admin?: boolean;
   isOwner?: boolean;
 }
 
@@ -115,7 +116,11 @@ export interface OrgAuditEvent {
     | 'JIT_USER_REACTIVATED' 
     | 'IDENTITY_MAPPING_CREATED' 
     | 'IDENTITY_MAPPING_UPDATED' 
-    | 'IDENTITY_MAPPING_DELETED';
+    | 'IDENTITY_MAPPING_DELETED'
+    | 'PROJECT_DELETED'
+    | 'PROJECT_OWNERSHIP_TRANSFERRED'
+    | 'MEMBER_ACCOUNT_CLOSED'
+    | 'ORGANIZATION_DELETION_REQUESTED';
   timestamp: string;
   source: string;
   details?: string;
@@ -272,6 +277,7 @@ export interface AudioToTextRecord {
   collaborators: ProjectMember[];
   group: string; 
   projectId?: string;
+  storagePath?: string;
   deletedAt?: string; // ISO string when moved to trash
   _file?: Blob | File;
 }
@@ -286,6 +292,7 @@ export interface TextToAudioRecord {
   gender: VoiceGender;
   group: string;
   projectId?: string;
+  storagePath?: string;
   collaborators: ProjectMember[];
   deletedAt?: string; // ISO string when moved to trash
 }

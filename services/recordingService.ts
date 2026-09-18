@@ -10,8 +10,7 @@ import {
 } from 'firebase/firestore';
 import { 
   ref, 
-  uploadBytesResumable, 
-  getDownloadURL 
+  uploadBytesResumable
 } from 'firebase/storage';
 import { Recording, Transcript, Usage } from '../types';
 import { processAudioTranscription } from './aiService';
@@ -20,8 +19,9 @@ export const uploadAudioToStorage = async (file: File | Blob, userId: string, re
   const actualFileName = fileName || (file instanceof File ? file.name : `live_recording_${Date.now()}.webm`);
   const storagePath = `recordings/${userId}/${recordId}/${actualFileName}`;
   const storageRef = ref(storage, storagePath);
-  const uploadTask = await uploadBytesResumable(storageRef, file);
-  return await getDownloadURL(uploadTask.ref);
+  await uploadBytesResumable(storageRef, file);
+  // Return the authorized API audio endpoint instead of an unrestricted public bearer download token
+  return `/api/recordings/${recordId}/audio`;
 };
 
 export const uploadAndProcessRecording = async (

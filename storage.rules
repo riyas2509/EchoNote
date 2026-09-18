@@ -1,0 +1,77 @@
+rules_version = '2';
+
+// ==============================================================================
+// EchoNote Production Firebase Cloud Storage Security Rules
+// ==============================================================================
+// Project ID: echonote-2509
+// Bucket: echonote-2509.firebasestorage.app
+//
+// Access Model:
+// 1. Default Deny: All unmapped paths are strictly closed (read/write false).
+// 2. Authentication: Anonymous / unauthenticated access is completely disallowed.
+// 3. Tenant & User Isolation: Recordings are partitioned by userId (recordings/{userId}/...).
+//    Users can ONLY read, list, create, or delete objects within their own directory.
+// 4. Overwrite Protection: Updates / overwrites are unconditionally forbidden (immutable recordings).
+// 5. Validation: Enforces audio MIME types and maximum file size limits (100MB).
+// 6. Platform Administrators: Explicitly permitted emergency operational access based on
+//    verified admin claims or whitelisted administrative identity.
+// ==============================================================================
+
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    // Helper functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isPlatformAdmin() {
+      return isAuthenticated() && (
+        request.auth.token.platform_admin == true ||
+        request.auth.token.role == 'admin'
+      );
+    }
+
+    function isValidAudioContentType() {
+      return request.resource.contentType.matches('audio/(webm|ogg|opus|mpeg|mp3|wav|x-wav|wave|aac|x-aac|mp4|m4a|x-m4a|flac|x-flac)(;.*)?') ||
+             request.resource.contentType.matches('video/webm(;.*)?');
+    }
+
+    function isValidFileSize() {
+      // Audio recordings must be non-empty and not exceed 100MB
+      return request.resource.size > 0 && request.resource.size <= 100 * 1024 * 1024;
+    }
+
+    function isValidAudioUpload() {
+      return isValidAudioContentType() && isValidFileSize();
+    }
+
+    // Explicit path for audio recordings: recordings/{userId}/{allPaths=**}
+    // Encapsulates recordings/{userId}/{recordId}/{fileName}
+    match /recordings/{userId}/{allPaths=**} {
+      // Read access: owner of the recording or platform administrator
+      allow get: if isOwner(userId) || isPlatformAdmin();
+
+      // List access: only the owner or platform administrator can list within this folder
+      allow list: if isOwner(userId) || isPlatformAdmin();
+
+      // Create: only the owner can upload to their path; must be a new file and valid audio
+      allow create: if isOwner(userId) && resource == null && isValidAudioUpload();
+
+      // Overwrite/Update: STRICTLY FORBIDDEN (audio recordings are immutable)
+      allow update: if false;
+
+      // Delete: only owner or platform administrator
+      allow delete: if isOwner(userId) || isPlatformAdmin();
+    }
+
+    // Default Deny-All fallback for any unmapped paths
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

@@ -19,7 +19,8 @@ import {
   Activity, 
   ArrowRight,
   ShieldAlert,
-  Sparkles
+  Sparkles,
+  BarChart3
 } from 'lucide-react';
 import { 
   db, 
@@ -46,6 +47,7 @@ import {
   OrgRole
 } from '../types';
 import { Toaster, toast } from 'sonner';
+import { SummaryStatsWidget } from './SummaryStatsWidget';
 
 interface CollaborationDashboardProps {
   projects: Project[];
@@ -54,6 +56,7 @@ interface CollaborationDashboardProps {
   userProfile: UserProfile | undefined;
   audioHistory: AudioToTextRecord[];
   textHistory: TextToAudioRecord[];
+  transcriptions?: TextToAudioRecord[];
   addNotification: (notif: any) => void;
   onInviteToProject: (projectName: string, email: string, role: CollaborationRole) => Promise<any>;
   userOrgRole?: OrgRole;
@@ -66,10 +69,12 @@ export const CollaborationDashboard: React.FC<CollaborationDashboardProps> = ({
   userProfile,
   audioHistory,
   textHistory,
+  transcriptions,
   addNotification,
   onInviteToProject,
   userOrgRole
 }) => {
+  const effectiveTranscriptions = transcriptions || textHistory || [];
   // Active Project Selection
   const activeProject = projects.find(p => p.name === selectedProjectName) || projects[0] || {
     id: 'general',
@@ -238,10 +243,10 @@ export const CollaborationDashboard: React.FC<CollaborationDashboardProps> = ({
   };
 
   // Metrics computation based on permissions
-  const projectAudioRecords = audioHistory.filter(
+  const projectAudioRecords = (audioHistory || []).filter(
     r => r.projectId === activeProject.id || r.group === activeProject.name
   );
-  const projectTextRecords = textHistory.filter(
+  const projectTextRecords = (effectiveTranscriptions || []).filter(
     r => r.projectId === activeProject.id || r.group === activeProject.name
   );
 
@@ -257,26 +262,62 @@ export const CollaborationDashboard: React.FC<CollaborationDashboardProps> = ({
   const transcriptCount = filteredAudioRecords.length;
   const filesUploaded = filteredAudioRecords.length + filteredTextRecords.length;
   const bookmarkCount = filteredAudioRecords.reduce((sum, r) => sum + (r.bookmarks?.length || 0), 0);
-  
-  // Real-time decision intelligence count
+
+  // Active recordings for the selected project (excluding soft-deleted items)
+  const activeRecordings = filteredAudioRecords.filter(r => !r.deletedAt);
+  const trashedAudioRecordings = filteredAudioRecords.filter(r => !!r.deletedAt);
+  const activeRecordingsCount = activeRecordings.length;
+  const readyRecordingsCount = activeRecordings.filter(
+    r => r.status === 'completed' || (!r.status && (r.transcript?.length || 0) > 0)
+  ).length;
+  const inProgressRecordingsCount = activeRecordings.filter(
+    r => r.status === 'processing' || r.status === 'pending' || r.status === 'draft' || r.status === 'uploading'
+  ).length;
+
+  // Real-time decision intelligence count & key decisions list
+  const [decisionHistoryList, setDecisionHistoryList] = useState<any[]>([]);
   const [decisionCount, setDecisionCount] = useState(0);
+
   useEffect(() => {
     if (!activeProject?.id) return;
-    const fetchDecisions = async () => {
-      try {
-        const qDecisions = query(
-          collection(db, 'decisionHistory'),
-          where('projectId', '==', activeProject.id)
-        );
-        const snap = await getDocs(qDecisions);
-        setDecisionCount(snap.size);
-      } catch (err) {
-        // Fallback or old items count
-        setDecisionCount(activeProject.name.toLowerCase() === 'general' ? 2 : 0);
-      }
-    };
-    fetchDecisions();
+    
+    // Listen for decision history in this project in real-time
+    const qDecisions = query(
+      collection(db, 'decisionHistory'),
+      where('projectId', '==', activeProject.id)
+    );
+
+    const unsubscribe = onSnapshot(qDecisions, (snapshot) => {
+      const docs = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
+      setDecisionHistoryList(docs);
+      setDecisionCount(snapshot.size);
+    }, (err) => {
+      console.warn("Could not listen to decisionHistory, fallback count:", err);
+      // Fallback for demo or offline state
+      setDecisionCount(activeProject.name.toLowerCase() === 'general' ? 2 : 0);
+    });
+
+    return () => unsubscribe();
   }, [activeProject?.id, activeProject.name]);
+
+  // Completed decisions calculation for selected project:
+  // 1. Decisions extracted from active meeting/audio recordings (CallSummary + UnifiedIntelligence)
+  const decisionsFromRecordings = activeRecordings.reduce((sum, r) => {
+    const unifiedCount = r.unifiedIntelligence?.decisions?.length || 0;
+    const summaryCount = r.summary?.decisions?.length || 0;
+    return sum + (unifiedCount > 0 ? unifiedCount : summaryCount);
+  }, 0);
+
+  // 2. Concluded strategic decisions saved in Decision Intelligence engine
+  const decisionsFromIntelligence = decisionHistoryList.reduce((acc, doc) => {
+    const keyDecisions = doc.output?.keyDecisions || doc.keyDecisions;
+    if (Array.isArray(keyDecisions) && keyDecisions.length > 0) {
+      return acc + keyDecisions.length;
+    }
+    return acc + 1;
+  }, 0);
+
+  const completedDecisionsCount = decisionsFromRecordings + (decisionsFromIntelligence > 0 ? decisionsFromIntelligence : decisionCount);
 
   // Synthesize Activity Timeline events (Combine real Firestore logged actions + dynamic client ones)
   const getMergedTimeline = (): any[] => {
@@ -485,6 +526,21 @@ export const CollaborationDashboard: React.FC<CollaborationDashboardProps> = ({
 
       <div className="max-w-7xl mx-auto px-6 sm:px-8 mt-8 space-y-8">
         
+        {/* Selected Project Summary Stats Widget Component */}
+        <SummaryStatsWidget 
+          projectName={activeProject.name}
+          projectId={activeProject.id}
+          activeRecordingsCount={activeRecordingsCount}
+          completedDecisionsCount={completedDecisionsCount}
+          readyRecordingsCount={readyRecordingsCount}
+          inProgressRecordingsCount={inProgressRecordingsCount}
+          totalRecordingsCount={filteredAudioRecords.length + filteredTextRecords.length}
+          trashedRecordingsCount={trashedAudioRecordings.length}
+          decisionsFromRecordings={decisionsFromRecordings}
+          decisionsFromIntelligence={decisionsFromIntelligence > 0 ? decisionsFromIntelligence : decisionCount}
+          isLiveSyncing={true}
+        />
+
         {/* Bento Grid Metrics Dashboard */}
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6">
           

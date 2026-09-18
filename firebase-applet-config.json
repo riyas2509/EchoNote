@@ -6,5 +6,7 @@
   "firestoreDatabaseId": "ai-studio-eb588566-0d1e-4ef9-bca0-1194fd2bb6d5",
   "storageBucket": "echonote-2509.firebasestorage.app",
   "messagingSenderId": "200551109142",
-  "measurementId": ""
+  "measurementId": "",
+  "oAuthClientId": "200551109142-anlpvv0vhq584b95d7lntutv1361dnbb.apps.googleusercontent.com",
+  "recaptchaSiteKey": ""
 }

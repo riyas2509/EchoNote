@@ -705,14 +705,14 @@ const App: React.FC = () => {
     audio.addEventListener('timeupdate', checkEnd);
   };
 
-  const handleGlobalPlay = (metadata: PlaybackMetadata, startTime: number = 0, endTime?: number) => {
+  const handleGlobalPlay = async (metadata: PlaybackMetadata, startTime: number = 0, endTime?: number) => {
     const audio = initAudio();
     if (!audio || !metadata || !metadata.url) {
       console.warn("Skipping play: No audio element or invalid metadata URL", metadata);
       return;
     }
     
-    const isSameSource = playbackMetadata?.url === metadata.url;
+    const isSameSource = playbackMetadata?.url === metadata.url || (metadata.id && playbackMetadata?.id === metadata.id);
     const isSameSegment = metadata.segmentIndex === playbackMetadata?.segmentIndex;
     
     if (isSameSource && playbackStatus === 'paused' && isSameSegment) {
@@ -727,11 +727,45 @@ const App: React.FC = () => {
     // New playback or different segment
     audio.pause();
     clearSegmentListener();
+
+    let playUrl = metadata.url;
+
+    // Secure playback: For logged-in users playing saved recordings, obtain a short-lived authorized playback token
+    if (!playUrl.startsWith('blob:') && authStatus === AuthStatus.LOGGED_IN && metadata.id) {
+      try {
+        const idToken = await auth.currentUser?.getIdToken();
+        if (idToken) {
+          const res = await fetch(`/api/recordings/${encodeURIComponent(metadata.id)}/playback-token`, {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${idToken}`,
+              'Content-Type': 'application/json'
+            }
+          });
+          if (res.ok) {
+            const data = await res.json();
+            const retrievedUrl = data.signedUrl || data.playbackUrl || data.url;
+            if (retrievedUrl) {
+              playUrl = retrievedUrl;
+            }
+          } else if (res.status === 403 || res.status === 401) {
+            addNotification({
+              title: 'Playback Denied',
+              message: 'You are not authorized to play this recording.',
+              type: 'error'
+            });
+            return;
+          }
+        }
+      } catch (tokenErr) {
+        console.warn("Could not acquire authorized playback token, attempting direct playback:", tokenErr);
+      }
+    }
     
-    audio.src = metadata.url;
+    audio.src = playUrl;
     audio.currentTime = startTime;
     
-    setPlaybackMetadata(metadata);
+    setPlaybackMetadata({ ...metadata, url: playUrl });
     setPlaybackStatus('playing');
 
     // Trigger play after src update
@@ -883,6 +917,7 @@ const App: React.FC = () => {
         userId: user.uid,
         group: groupName,
         projectId: project?.id || null,
+        storagePath: record.storagePath || `recordings/${user.uid}/${record.id}/${record.fileName || 'audio.webm'}`,
         createdAt: serverTimestamp(),
         transcriptText,
         speakers,
@@ -933,6 +968,7 @@ const App: React.FC = () => {
         userId: user.uid,
         group: groupName,
         projectId: project?.id || null,
+        storagePath: record.storagePath || `recordings/${user.uid}/${record.id}/synthesis_${record.id}.mp3`,
         createdAt: serverTimestamp()
       });
       try {
@@ -1035,9 +1071,25 @@ const App: React.FC = () => {
   const permanentlyDeleteAudioRecord = async (id: string) => {
     if (authStatus === AuthStatus.LOGGED_IN && user) {
       try {
-        await deleteDoc(doc(db, 'recordings', id));
+        const idToken = await user.getIdToken();
+        const res = await fetch(`/api/recordings/${encodeURIComponent(id)}`, {
+          method: 'DELETE',
+          headers: {
+            'Authorization': `Bearer ${idToken}`
+          }
+        });
+        if (!res.ok) {
+          // Fallback to client Firestore deletion
+          await deleteDoc(doc(db, 'recordings', id));
+          await deleteDoc(doc(db, 'transcriptions', id));
+        }
       } catch (error) {
-        handleFirestoreError(error, OperationType.DELETE, `recordings/${id}`);
+        try {
+          await deleteDoc(doc(db, 'recordings', id));
+          await deleteDoc(doc(db, 'transcriptions', id));
+        } catch (innerErr) {
+          handleFirestoreError(innerErr, OperationType.DELETE, `recordings/${id}`);
+        }
       }
     } else if (authStatus === AuthStatus.GUEST) {
       setAudioHistory(prev => prev.filter(r => r.id !== id));
@@ -1185,9 +1237,20 @@ const App: React.FC = () => {
     const project = projects.find(p => p.name === name);
     if (project?.isDefault) return;
     
-    if (project && authStatus === AuthStatus.LOGGED_IN) {
+    if (project && authStatus === AuthStatus.LOGGED_IN && user) {
       try {
-        await deleteDoc(doc(db, 'projects', project.id));
+        const idToken = await user.getIdToken();
+        const response = await fetch(`/api/projects/${encodeURIComponent(project.id)}?cascadeRecordings=${deleteAssets}`, {
+          method: 'DELETE',
+          headers: {
+            'Authorization': `Bearer ${idToken}`
+          }
+        });
+
+        if (!response.ok) {
+          const errData = await response.json().catch(() => ({}));
+          throw new Error(errData.message || 'Failed to delete project on server');
+        }
 
         if (currentOrg) {
           await logAction(currentOrg.id, {
@@ -1198,8 +1261,11 @@ const App: React.FC = () => {
             organizationName: currentOrg.name
           });
         }
-      } catch (error) {
-        handleFirestoreError(error, OperationType.DELETE, `projects/${project.id}`);
+        addToast('Project Removed', `Project "${name}" and its workspace resources were safely cleaned up.`, 'info');
+      } catch (error: any) {
+        console.error("Project deletion error:", error);
+        addToast('Deletion Failed', error.message || 'Could not delete project.', 'error');
+        return;
       }
     }
     
@@ -1511,6 +1577,7 @@ const App: React.FC = () => {
             userProfile={userProfile}
             audioHistory={audioHistory}
             textHistory={textHistory}
+            transcriptions={textHistory}
             addNotification={addNotification}
             onInviteToProject={inviteToProject}
             userOrgRole={userOrgRole}
@@ -1532,7 +1599,7 @@ const App: React.FC = () => {
 
   const renderDashboard = () => {
     return (
-      <div className="flex flex-col md:flex-row md:h-screen bg-brand-background text-brand-primary overflow-hidden">
+      <div className="flex flex-col md:flex-row md:h-screen md:h-[100dvh] bg-brand-background text-brand-primary overflow-hidden">
         {showSettings && (
           <AuthView onAuth={handleAuth} isSettingsMode onCloseSettings={() => setShowSettings(false)} onLogout={handleLogout} userProfile={userProfile} onBackToHome={handleBackToHome} />
         )}
@@ -1625,7 +1692,7 @@ const App: React.FC = () => {
           userOrgRole={userOrgRole}
         />
         
-        <main className={`flex-1 overflow-y-auto custom-scrollbar bg-brand-background relative transition-all duration-300 ${isCollapsed ? 'lg:ml-20' : 'lg:ml-64 xl:ml-72'}`}>
+        <main className={`flex-1 min-h-0 min-w-0 overflow-y-auto custom-scrollbar bg-brand-background relative transition-all duration-300 ${isCollapsed ? 'lg:ml-20' : 'lg:ml-64 xl:ml-72'}`}>
           <Topbar 
             usageStats={usageStats} 
             userProfile={userProfile} 
