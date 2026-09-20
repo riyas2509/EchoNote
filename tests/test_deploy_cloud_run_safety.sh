@@ -113,8 +113,24 @@ assert_test() {
   fi
 }
 
+# Helper to assert forbidden text is absent
+assert_absent() {
+  local test_name="$1"
+  local forbidden_text="$2"
+  local actual_output="$3"
+
+  if echo "$actual_output" | grep -q -F -- "$forbidden_text"; then
+    echo "  ❌ $test_name ... FAILED"
+    echo "     Forbidden text '$forbidden_text' was found in output!"
+    FAILED_COUNT=$((FAILED_COUNT + 1))
+  else
+    echo "  ✅ $test_name ... PASSED"
+    PASSED_COUNT=$((PASSED_COUNT + 1))
+  fi
+}
+
 echo "======================================================================"
-echo "🚀 RUNNING STEP 1J DEPLOYMENT SAFETY & TARGET LOCKING TESTS"
+echo "🚀 RUNNING STEP 1J & 1L-A DEPLOYMENT SAFETY & SECRET MANAGER TESTS"
 echo "======================================================================"
 
 # Default mock npm to successful pre-flight
@@ -234,6 +250,143 @@ assert_test "Test I2: Command uses --update-env-vars (preserving existing env)" 
 
 assert_test "Test I3: Summary logs only VALID status without secret exposure" \
   "0" "Razorpay Pro Monthly Plan: VALID" "$EXIT_CODE" "$OUT"
+
+# ----------------------------------------------------------------------------
+# Test J: Step 1L-A Deploy Action Secret Manager Integration
+# ----------------------------------------------------------------------------
+assert_test "Test J1: Deploy specifies --set-secrets flag" \
+  "0" "--set-secrets=" "$EXIT_CODE" "$OUT"
+
+assert_test "Test J2: Deploy maps GEMINI_API_KEY to echonote-gemini-api-key:latest" \
+  "0" "GEMINI_API_KEY=echonote-gemini-api-key:latest" "$EXIT_CODE" "$OUT"
+
+assert_test "Test J3: Deploy maps RAZORPAY_KEY_SECRET to echonote-razorpay-key-secret:latest" \
+  "0" "RAZORPAY_KEY_SECRET=echonote-razorpay-key-secret:latest" "$EXIT_CODE" "$OUT"
+
+assert_test "Test J4: Deploy maps RAZORPAY_WEBHOOK_SECRET to echonote-razorpay-webhook-secret:latest" \
+  "0" "RAZORPAY_WEBHOOK_SECRET=echonote-razorpay-webhook-secret:latest" "$EXIT_CODE" "$OUT"
+
+assert_test "Test J5: Deploy maps RESEND_API_KEY to echonote-resend-api-key:latest" \
+  "0" "RESEND_API_KEY=echonote-resend-api-key:latest" "$EXIT_CODE" "$OUT"
+
+assert_test "Test J6: Deploy maps PLAYBACK_SECRET to echonote-playback-secret:latest" \
+  "0" "PLAYBACK_SECRET=echonote-playback-secret:latest" "$EXIT_CODE" "$OUT"
+
+assert_test "Test J7: Deploy maps CRON_SECRET to echonote-cron-secret:latest" \
+  "0" "CRON_SECRET=echonote-cron-secret:latest" "$EXIT_CODE" "$OUT"
+
+assert_test "Test J8: Deploy preserves NODE_ENV=production in env vars" \
+  "0" "NODE_ENV=production" "$EXIT_CODE" "$OUT"
+
+assert_test "Test J9: Deploy preserves RAZORPAY_MODE=live in env vars" \
+  "0" "RAZORPAY_MODE=live" "$EXIT_CODE" "$OUT"
+
+assert_absent "Test J10: Deploy does NOT use --set-env-vars (which would wipe unmentioned vars)" \
+  "--set-env-vars" "$OUT"
+
+# Extract the value of --update-env-vars to verify none of the 6 secret names are in it
+UPDATE_ENV_PART="$(echo "$OUT" | grep -o -- '--update-env-vars=[^ ]*' || true)"
+assert_absent "Test J11: GEMINI_API_KEY is absent from --update-env-vars" \
+  "GEMINI_API_KEY" "$UPDATE_ENV_PART"
+assert_absent "Test J12: RAZORPAY_KEY_SECRET is absent from --update-env-vars" \
+  "RAZORPAY_KEY_SECRET" "$UPDATE_ENV_PART"
+assert_absent "Test J13: RAZORPAY_WEBHOOK_SECRET is absent from --update-env-vars" \
+  "RAZORPAY_WEBHOOK_SECRET" "$UPDATE_ENV_PART"
+assert_absent "Test J14: RESEND_API_KEY is absent from --update-env-vars" \
+  "RESEND_API_KEY" "$UPDATE_ENV_PART"
+assert_absent "Test J15: PLAYBACK_SECRET is absent from --update-env-vars" \
+  "PLAYBACK_SECRET" "$UPDATE_ENV_PART"
+assert_absent "Test J16: CRON_SECRET is absent from --update-env-vars" \
+  "CRON_SECRET" "$UPDATE_ENV_PART"
+
+# ----------------------------------------------------------------------------
+# Test K: Step 1L-A Update-Env Action Secret Manager Integration
+# ----------------------------------------------------------------------------
+OUT_UPDATE=$(PATH="$MOCK_BIN:$PATH" DRY_RUN=0 "$DEPLOY_SCRIPT" update-env 2>&1)
+EXIT_CODE_UPDATE=$?
+
+assert_test "Test K1: Update-env succeeds and invokes services update" \
+  "0" "MOCK_GCLOUD_SERVICES_UPDATE_INVOKED" "$EXIT_CODE_UPDATE" "$OUT_UPDATE"
+
+assert_test "Test K2: Update-env specifies --set-secrets flag" \
+  "0" "--set-secrets=" "$EXIT_CODE_UPDATE" "$OUT_UPDATE"
+
+assert_test "Test K3: Update-env contains all 6 Secret Manager mappings" \
+  "0" "GEMINI_API_KEY=echonote-gemini-api-key:latest,RAZORPAY_KEY_SECRET=echonote-razorpay-key-secret:latest,RAZORPAY_WEBHOOK_SECRET=echonote-razorpay-webhook-secret:latest,RESEND_API_KEY=echonote-resend-api-key:latest,PLAYBACK_SECRET=echonote-playback-secret:latest,CRON_SECRET=echonote-cron-secret:latest" \
+  "$EXIT_CODE_UPDATE" "$OUT_UPDATE"
+
+assert_test "Test K4: Update-env uses --update-env-vars to preserve other non-secret env vars" \
+  "0" "--update-env-vars=RAZORPAY_MODE=live" "$EXIT_CODE_UPDATE" "$OUT_UPDATE"
+
+assert_absent "Test K5: Update-env does NOT use --set-env-vars" \
+  "--set-env-vars" "$OUT_UPDATE"
+
+UPDATE_ENV_PART_K="$(echo "$OUT_UPDATE" | grep -o -- '--update-env-vars=[^ ]*' || true)"
+assert_absent "Test K6: Update-env does NOT place GEMINI_API_KEY in --update-env-vars" \
+  "GEMINI_API_KEY" "$UPDATE_ENV_PART_K"
+assert_absent "Test K7: Update-env does NOT place RAZORPAY_KEY_SECRET in --update-env-vars" \
+  "RAZORPAY_KEY_SECRET" "$UPDATE_ENV_PART_K"
+assert_absent "Test K8: Update-env does NOT place RAZORPAY_WEBHOOK_SECRET in --update-env-vars" \
+  "RAZORPAY_WEBHOOK_SECRET" "$UPDATE_ENV_PART_K"
+assert_absent "Test K9: Update-env does NOT place RESEND_API_KEY in --update-env-vars" \
+  "RESEND_API_KEY" "$UPDATE_ENV_PART_K"
+assert_absent "Test K10: Update-env does NOT place PLAYBACK_SECRET in --update-env-vars" \
+  "PLAYBACK_SECRET" "$UPDATE_ENV_PART_K"
+assert_absent "Test K11: Update-env does NOT place CRON_SECRET in --update-env-vars" \
+  "CRON_SECRET" "$UPDATE_ENV_PART_K"
+
+# Test K12: Update-env with DRY_RUN=1 does not invoke gcloud
+OUT_UPDATE_DRY=$(PATH="$MOCK_BIN:$PATH" DRY_RUN=1 "$DEPLOY_SCRIPT" update-env 2>&1)
+if echo "$OUT_UPDATE_DRY" | grep -q "MOCK_GCLOUD_SERVICES_UPDATE_INVOKED"; then
+  echo "  ❌ Test K12: gcloud services update was unexpectedly invoked during dry run!"
+  FAILED_COUNT=$((FAILED_COUNT + 1))
+else
+  echo "  ✅ Test K12: Confirmed update-env with DRY_RUN=1 does not execute remote gcloud update"
+  PASSED_COUNT=$((PASSED_COUNT + 1))
+fi
+
+# ----------------------------------------------------------------------------
+# Test L: Static Security & Hardening Invariants
+# ----------------------------------------------------------------------------
+# Check that scripts/deploy-cloud-run.sh does not contain raw secret values
+assert_test "Test L1: Summary displays Secret Manager References header" \
+  "0" "Secret Manager References (6 production secrets):" "$EXIT_CODE" "$OUT"
+
+assert_test "Test L2: Summary lists GEMINI_API_KEY mapping" \
+  "0" "GEMINI_API_KEY -> echonote-gemini-api-key:latest" "$EXIT_CODE" "$OUT"
+
+assert_test "Test L3: Summary lists RAZORPAY_KEY_SECRET mapping" \
+  "0" "RAZORPAY_KEY_SECRET -> echonote-razorpay-key-secret:latest" "$EXIT_CODE" "$OUT"
+
+# Helper to assert that a regex pattern matching raw credentials is absent
+assert_pattern_absent() {
+  local test_name="$1"
+  local pattern="$2"
+  local target_file="$3"
+  local pattern_description="$4"
+
+  if grep -E -q "$pattern" "$target_file"; then
+    echo "  ❌ $test_name ... FAILED"
+    echo "     Detected raw credential pattern: $pattern_description"
+    FAILED_COUNT=$((FAILED_COUNT + 1))
+  else
+    echo "  ✅ $test_name ... PASSED"
+    PASSED_COUNT=$((PASSED_COUNT + 1))
+  fi
+}
+
+# Verify no plaintext secret values or recognizable credential patterns in deploy script file
+assert_pattern_absent "Test L4: No Razorpay live/test secret-like values in deploy script" \
+  "(rzp_(live|test)_[A-Za-z0-9]{10,}|RAZORPAY_KEY_SECRET=[A-Za-z0-9]{16,})" "$DEPLOY_SCRIPT" "Razorpay key/secret format"
+
+assert_pattern_absent "Test L5: No Gemini API-key-like values in deploy script" \
+  "AIza[0-9A-Za-z_-]{30,}" "$DEPLOY_SCRIPT" "Gemini/Google API key format"
+
+assert_pattern_absent "Test L6: No Resend API-key-like values in deploy script" \
+  "re_[A-Za-z0-9_]{16,}" "$DEPLOY_SCRIPT" "Resend API key format"
+
+assert_pattern_absent "Test L7: No raw 64-character hex secret tokens in deploy script" \
+  "[0-9a-fA-F]{64}" "$DEPLOY_SCRIPT" "Raw 64-character hex secret format"
 
 # ----------------------------------------------------------------------------
 # Summary

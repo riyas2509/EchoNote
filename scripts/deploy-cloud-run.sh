@@ -44,6 +44,17 @@ PLAN_PRO_YEARLY="${RAZORPAY_PRO_YEARLY_PLAN_ID-plan_Tamd1Ef89GKQNk}"
 PLAN_TEAM_MONTHLY="${RAZORPAY_TEAM_MONTHLY_PLAN_ID-plan_TamdizBJ9W7kJo}"
 PLAN_TEAM_YEARLY="${RAZORPAY_TEAM_YEARLY_PLAN_ID-plan_TameI4cjPUzRpn}"
 
+# Production Secret Manager Mappings (Cloud Run Secret Integration)
+# References use Secret Manager secret names and versions only; no plaintext secret values.
+readonly SECRET_GEMINI_API_KEY="GEMINI_API_KEY=echonote-gemini-api-key:latest"
+readonly SECRET_RAZORPAY_KEY_SECRET="RAZORPAY_KEY_SECRET=echonote-razorpay-key-secret:latest"
+readonly SECRET_RAZORPAY_WEBHOOK_SECRET="RAZORPAY_WEBHOOK_SECRET=echonote-razorpay-webhook-secret:latest"
+readonly SECRET_RESEND_API_KEY="RESEND_API_KEY=echonote-resend-api-key:latest"
+readonly SECRET_PLAYBACK_SECRET="PLAYBACK_SECRET=echonote-playback-secret:latest"
+readonly SECRET_CRON_SECRET="CRON_SECRET=echonote-cron-secret:latest"
+
+readonly CLOUD_RUN_SECRETS="${SECRET_GEMINI_API_KEY},${SECRET_RAZORPAY_KEY_SECRET},${SECRET_RAZORPAY_WEBHOOK_SECRET},${SECRET_RESEND_API_KEY},${SECRET_PLAYBACK_SECRET},${SECRET_CRON_SECRET}"
+
 TARGET_RAZORPAY_MODE="live"
 ACTION="${1:-update-env}"
 
@@ -183,6 +194,13 @@ print_deployment_summary() {
   echo "  Razorpay Pro Yearly Plan: VALID"
   echo "  Razorpay Team Monthly Plan: VALID"
   echo "  Razorpay Team Yearly Plan: VALID"
+  echo "  Secret Manager References (6 production secrets):"
+  echo "    - GEMINI_API_KEY -> echonote-gemini-api-key:latest"
+  echo "    - RAZORPAY_KEY_SECRET -> echonote-razorpay-key-secret:latest"
+  echo "    - RAZORPAY_WEBHOOK_SECRET -> echonote-razorpay-webhook-secret:latest"
+  echo "    - RESEND_API_KEY -> echonote-resend-api-key:latest"
+  echo "    - PLAYBACK_SECRET -> echonote-playback-secret:latest"
+  echo "    - CRON_SECRET -> echonote-cron-secret:latest"
   echo "  Rollback Reference Revision: $LAST_KNOWN_PROD_REVISION"
   echo "======================================================================"
 }
@@ -195,9 +213,9 @@ case "$ACTION" in
     validate_razorpay_mode
     print_deployment_summary
 
-    echo "Updating Cloud Run Service Environment Variables"
+    echo "Updating Cloud Run Service Environment Variables & Secret References"
     echo "Service: $SERVICE_NAME (Region: $REGION, Project: $PROJECT_ID)"
-    
+
     if [ "${DRY_RUN:-0}" = "1" ]; then
       echo "DRY RUN: Validation passed. Skipping remote gcloud execution."
       exit 0
@@ -211,7 +229,8 @@ NODE_ENV=production,\
 RAZORPAY_PRO_MONTHLY_PLAN_ID=$PLAN_PRO_MONTHLY,\
 RAZORPAY_PRO_YEARLY_PLAN_ID=$PLAN_PRO_YEARLY,\
 RAZORPAY_TEAM_MONTHLY_PLAN_ID=$PLAN_TEAM_MONTHLY,\
-RAZORPAY_TEAM_YEARLY_PLAN_ID=$PLAN_TEAM_YEARLY"
+RAZORPAY_TEAM_YEARLY_PLAN_ID=$PLAN_TEAM_YEARLY" \
+      --set-secrets="$CLOUD_RUN_SECRETS"
 
     echo "✅ Cloud Run environment variables successfully updated."
     echo "100% of traffic is automatically routed to the newly deployed revision."
@@ -227,7 +246,7 @@ RAZORPAY_TEAM_YEARLY_PLAN_ID=$PLAN_TEAM_YEARLY"
 
     echo "Building and Deploying New Image to Cloud Run"
     echo "Service: $SERVICE_NAME (Region: $REGION, Project: $PROJECT_ID)"
-    
+
     if [ "${DRY_RUN:-0}" = "1" ]; then
       echo "DRY RUN: Pre-flight and safety validations passed. Skipping remote gcloud execution."
       exit 0
@@ -245,7 +264,8 @@ NODE_ENV=production,\
 RAZORPAY_PRO_MONTHLY_PLAN_ID=$PLAN_PRO_MONTHLY,\
 RAZORPAY_PRO_YEARLY_PLAN_ID=$PLAN_PRO_YEARLY,\
 RAZORPAY_TEAM_MONTHLY_PLAN_ID=$PLAN_TEAM_MONTHLY,\
-RAZORPAY_TEAM_YEARLY_PLAN_ID=$PLAN_TEAM_YEARLY"
+RAZORPAY_TEAM_YEARLY_PLAN_ID=$PLAN_TEAM_YEARLY" \
+      --set-secrets="$CLOUD_RUN_SECRETS"
 
     echo "✅ Deployment completed and active."
     ;;
