@@ -1620,7 +1620,13 @@ const App: React.FC = () => {
             onBulkDeleteText={bulkDeleteTextRecords}
             onRenameGroup={renameGroup}
             onDeleteGroup={deleteGroup}
-            onAddGroup={() => setIsCreateProjectModalOpen(true)}
+            onAddGroup={(name?: string) => {
+              if (name && typeof name === 'string' && name.trim()) {
+                addGroup(name.trim());
+              } else {
+                setIsCreateProjectModalOpen(true);
+              }
+            }}
             onInviteToProject={inviteToProject}
             projects={projects}
             activePlaybackId={playbackMetadata?.id}

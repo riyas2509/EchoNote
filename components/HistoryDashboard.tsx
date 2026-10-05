@@ -1,6 +1,6 @@
 
 import React, { useState, useMemo, useEffect, useRef } from 'react';
-import { Sparkles } from 'lucide-react';
+import { Sparkles, GripVertical, Folder, FolderInput, FolderPlus, ArrowRight } from 'lucide-react';
 import { AudioToTextRecord, TextToAudioRecord, TranscriptSegment, ReadStatus, CollaborationRole, PlaybackMetadata, PlaybackStatus, Bookmark, AuthStatus, UserProfile, Project, UsageStats, StrategicAnalysis, UnifiedMeetingIntelligence, ExecutionTracker, OrgRole, ProductEventName } from '../types';
 import { executeDownload, generateTranscriptBlob } from '../services/downloadService';
 import { analyzeStrategically, processUnifiedMeetingIntelligence, generateSmartRecap } from '../services/geminiService';
@@ -250,6 +250,15 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
   const [bulkDownloadGroup, setBulkDownloadGroup] = useState<string | null>(null);
   const [bulkFormats, setBulkFormats] = useState<string[]>([]);
 
+  // Drag-and-drop reassignment states
+  const [draggedRecord, setDraggedRecord] = useState<AudioToTextRecord | TextToAudioRecord | null>(null);
+  const [dragOverGroup, setDragOverGroup] = useState<string | null>(null);
+  const [isDragging, setIsDragging] = useState<boolean>(false);
+  const [hoveredCardId, setHoveredCardId] = useState<string | null>(null);
+  const [isOverNewProjectTarget, setIsOverNewProjectTarget] = useState<boolean>(false);
+  const [itemForNewProjectDrop, setItemForNewProjectDrop] = useState<AudioToTextRecord | TextToAudioRecord | null>(null);
+  const [newProjectDropName, setNewProjectDropName] = useState<string>('');
+
   // Filtering Logic
   const [editingFileName, setEditingFileName] = useState<{ id: string, name: string } | null>(null);
   const [isConversationMode, setIsConversationMode] = useState(false);
@@ -447,12 +456,14 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
     if (userOrgRole === 'owner' || userOrgRole === 'org_admin') return true;
     if (userOrgRole === 'viewer') return false;
 
-    if (record.group === 'General') return true;
+    // Check if record is in General (handle undefined, null, empty string, or case-insensitive 'general')
+    const isGeneral = !record.group || record.group.trim() === '' || record.group.toLowerCase() === 'general';
+    if (isGeneral) return true;
     if (authStatus === AuthStatus.GUEST) return false;
     if (!userProfile) return false;
 
     // Find the project for this record
-    const project = (projects as Project[]).find(p => p.name === record.group);
+    const project = (projects as Project[]).find(p => p.name.toLowerCase() === (record.group || '').toLowerCase());
     if (!project) return true; // Default to true for legacy or General if not found
 
     if (project.ownerEmail === userProfile.email) return true;
@@ -710,6 +721,216 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
     if (onSetFilterGroup) {
       onSetFilterGroup(value === 'all' ? null : value);
     }
+  };
+
+  // Project list with General and recording counts for drag-and-drop & filtering
+  const projectListWithGeneral = useMemo(() => {
+    const list: Array<{ id: string; name: string; isDefault?: boolean; count: number }> = [];
+
+    // Always ensure General is present as first canonical group
+    const generalProject = (projects as Project[]).find(p => p.name.toLowerCase() === 'general');
+    const generalCount = audioHistory.filter(h => !h.deletedAt && (!h.group || h.group.toLowerCase() === 'general')).length;
+    list.push({
+      id: generalProject?.id || 'general-default',
+      name: 'General',
+      isDefault: true,
+      count: generalCount
+    });
+
+    // Add other projects
+    projects.forEach(p => {
+      if (p.name.toLowerCase() !== 'general') {
+        const count = audioHistory.filter(h => !h.deletedAt && h.group?.toLowerCase() === p.name.toLowerCase()).length;
+        list.push({
+          id: p.id,
+          name: p.name,
+          isDefault: Boolean(p.isDefault),
+          count
+        });
+      }
+    });
+
+    // Also include any groups from groups prop that might not be in projects
+    groups.forEach(g => {
+      if (g.toLowerCase() !== 'general' && !list.some(p => p.name.toLowerCase() === g.toLowerCase())) {
+        const count = audioHistory.filter(h => !h.deletedAt && h.group?.toLowerCase() === g.toLowerCase()).length;
+        list.push({
+          id: `group-${g}`,
+          name: g,
+          isDefault: false,
+          count
+        });
+      }
+    });
+
+    return list;
+  }, [projects, groups, audioHistory]);
+
+  const handleDragStart = (e: React.DragEvent, item: AudioToTextRecord | TextToAudioRecord) => {
+    // If the drag originated from an interactive element (button, input, select, audio player, link), cancel drag
+    const target = e.target as HTMLElement;
+    if (target.closest('input, textarea, select, button, [role="button"], audio, [data-no-drag="true"]')) {
+      e.preventDefault();
+      return;
+    }
+
+    if (!checkPermission(item, 'edit')) {
+      e.preventDefault();
+      return;
+    }
+    setDraggedRecord(item);
+    setIsDragging(true);
+    e.dataTransfer.setData('text/plain', item.id);
+    e.dataTransfer.setData('application/json', JSON.stringify({
+      id: item.id,
+      group: item.group || 'General',
+      isAudio: 'fileName' in item
+    }));
+    e.dataTransfer.effectAllowed = 'move';
+  };
+
+  const handleGripDragStart = (e: React.DragEvent, item: AudioToTextRecord | TextToAudioRecord) => {
+    e.stopPropagation();
+    if (!checkPermission(item, 'edit')) {
+      e.preventDefault();
+      return;
+    }
+    setDraggedRecord(item);
+    setIsDragging(true);
+    e.dataTransfer.setData('text/plain', item.id);
+    e.dataTransfer.setData('application/json', JSON.stringify({
+      id: item.id,
+      group: item.group || 'General',
+      isAudio: 'fileName' in item
+    }));
+    e.dataTransfer.effectAllowed = 'move';
+  };
+
+  const handleDragEnd = () => {
+    setDraggedRecord(null);
+    setIsDragging(false);
+    setDragOverGroup(null);
+    setHoveredCardId(null);
+    setIsOverNewProjectTarget(false);
+  };
+
+  const handleConfirmNewProjectMove = () => {
+    if (!itemForNewProjectDrop || !newProjectDropName.trim()) return;
+    const projName = newProjectDropName.trim();
+    
+    // Create the project via onAddGroup
+    onAddGroup(projName);
+
+    // Reassign the recording
+    if ('fileName' in itemForNewProjectDrop) {
+      onUpdateAudio({
+        ...itemForNewProjectDrop,
+        group: projName
+      });
+      addNotification({
+        title: 'Project Created & Recording Reassigned',
+        message: `Created project "${projName}" and moved "${itemForNewProjectDrop.fileName}".`,
+        type: 'success'
+      });
+    } else {
+      onUpdateText({
+        ...itemForNewProjectDrop,
+        group: projName
+      });
+      addNotification({
+        title: 'Project Created & Synthesis Reassigned',
+        message: `Created project "${projName}" and moved synthesis.`,
+        type: 'success'
+      });
+    }
+
+    setItemForNewProjectDrop(null);
+    setNewProjectDropName('');
+    handleDragEnd();
+  };
+
+  const handleDropOnProject = (targetGroupName: string) => {
+    if (!draggedRecord) return;
+    const currentGroup = draggedRecord.group || 'General';
+
+    if (currentGroup.toLowerCase() === targetGroupName.toLowerCase()) {
+      addNotification({
+        title: 'Already in Project',
+        message: `Recording "${'fileName' in draggedRecord ? draggedRecord.fileName : draggedRecord.textPreview}" is already in "${targetGroupName}".`,
+        type: 'info'
+      });
+      handleDragEnd();
+      return;
+    }
+
+    // Permission check for target project
+    const targetProject = (projects as Project[]).find(p => p.name.toLowerCase() === targetGroupName.toLowerCase());
+    if (targetProject && targetProject.ownerEmail !== userProfile?.email) {
+      const member = targetProject.members?.find(m => m.email === userProfile?.email);
+      if (member && member.role === 'viewer') {
+        addNotification({
+          title: 'Permission Denied',
+          message: `You do not have permission to move assets into "${targetGroupName}".`,
+          type: 'error'
+        });
+        handleDragEnd();
+        return;
+      }
+    }
+
+    // Check if dragging an item that is part of a multi-select
+    if (selectedIds.has(draggedRecord.id) && selectedIds.size > 1) {
+      const audiosToMove = audioHistory.filter(h => selectedIds.has(h.id) && checkPermission(h, 'edit'));
+      audiosToMove.forEach(item => {
+        onUpdateAudio({
+          ...item,
+          group: targetGroupName,
+          projectId: targetProject?.id || null
+        });
+      });
+
+      const textsToMove = textHistory.filter(h => selectedIds.has(h.id) && checkPermission(h, 'edit'));
+      textsToMove.forEach(item => {
+        onUpdateText({
+          ...item,
+          group: targetGroupName
+        });
+      });
+
+      const totalCount = audiosToMove.length + textsToMove.length;
+      setSelectedIds(new Set());
+      addNotification({
+        title: 'Recordings Reassigned',
+        message: `Successfully moved ${totalCount} recordings from "${currentGroup}" to "${targetGroupName}".`,
+        type: 'success'
+      });
+    } else {
+      // Single record move
+      if ('fileName' in draggedRecord) {
+        onUpdateAudio({
+          ...draggedRecord,
+          group: targetGroupName,
+          projectId: targetProject?.id || null
+        });
+        addNotification({
+          title: 'Recording Reassigned',
+          message: `Moved "${draggedRecord.fileName}" from "${currentGroup}" to "${targetGroupName}".`,
+          type: 'success'
+        });
+      } else {
+        onUpdateText({
+          ...draggedRecord,
+          group: targetGroupName
+        });
+        addNotification({
+          title: 'Synthesis Reassigned',
+          message: `Moved "${draggedRecord.textPreview || 'Synthesis'}" from "${currentGroup}" to "${targetGroupName}".`,
+          type: 'success'
+        });
+      }
+    }
+
+    handleDragEnd();
   };
 
   const toggleTextExpansion = (id: string) => {
@@ -1233,6 +1454,64 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
         </div>
       )}
 
+      {/* Modal for Creating New Project and Moving Dropped Recording */}
+      {itemForNewProjectDrop && (
+        <div className="fixed inset-0 bg-brand-primary/80 backdrop-blur-md z-[300] flex items-center justify-center p-6 text-left">
+          <div className="bg-white rounded-2xl p-8 max-w-md w-full space-y-6 shadow-2xl animate-in zoom-in-95 border border-slate-100">
+            <div className="flex items-center gap-3.5">
+              <div className="w-12 h-12 bg-amber-100 text-amber-700 rounded-xl flex items-center justify-center text-xl shrink-0 shadow-xs">
+                <FolderPlus className="w-6 h-6 text-amber-600" />
+              </div>
+              <div>
+                <h2 className="text-lg font-black text-brand-primary tracking-tight">Create Project & Reassign</h2>
+                <p className="text-xs text-slate-500 font-medium">
+                  Move <span className="font-bold text-slate-700">{('fileName' in itemForNewProjectDrop ? itemForNewProjectDrop.fileName : itemForNewProjectDrop.textPreview)}</span> from 'General' into a new project group.
+                </p>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-[11px] font-bold text-slate-700 uppercase tracking-wider">New Project Name</label>
+              <input
+                type="text"
+                autoFocus
+                placeholder="e.g. Product Strategy, Marketing 2026, Q3 Reviews"
+                value={newProjectDropName}
+                onChange={(e) => setNewProjectDropName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && newProjectDropName.trim()) {
+                    handleConfirmNewProjectMove();
+                  }
+                }}
+                className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-semibold text-brand-primary outline-none focus:ring-2 focus:ring-brand-primary focus:border-brand-primary transition-all"
+              />
+            </div>
+
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setItemForNewProjectDrop(null);
+                  setNewProjectDropName('');
+                }}
+                className="px-5 py-2.5 text-xs font-bold text-slate-500 hover:text-slate-800 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={!newProjectDropName.trim()}
+                onClick={handleConfirmNewProjectMove}
+                className="px-6 py-2.5 bg-brand-primary hover:bg-brand-primary/90 text-white rounded-xl text-xs font-bold shadow-lg disabled:opacity-40 transition-all flex items-center gap-2"
+              >
+                <FolderPlus className="w-4 h-4" />
+                <span>Create & Move Recording</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Page Header */}
       <header className="space-y-6 text-left border-b border-brand-divider/20 pb-8">
         <div className="space-y-2">
@@ -1434,6 +1713,204 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
         </div>
       )}
 
+      {/* Project Groups & Drag-and-Drop Reassignment Tray */}
+      {activeTab !== 'trash' && (
+        <div className={`p-4 md:p-5 rounded-xl border transition-all duration-300 ${
+          isDragging 
+            ? 'bg-amber-50/90 border-amber-300 shadow-lg ring-2 ring-amber-400/30 sticky top-3 z-30 backdrop-blur-md' 
+            : 'bg-white border-brand-divider/20 shadow-sm'
+        }`}>
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-3.5">
+            <div className="flex items-center gap-2.5">
+              {isDragging ? (
+                <div className="flex items-center gap-2 text-amber-900 font-bold text-xs sm:text-sm animate-pulse">
+                  <span className="w-2.5 h-2.5 rounded-full bg-amber-500 animate-ping"></span>
+                  <FolderInput className="w-4 h-4 text-amber-600 shrink-0" />
+                  <span>
+                    Reassigning <strong className="underline font-black">{draggedRecord && ('fileName' in draggedRecord ? draggedRecord.fileName : draggedRecord.textPreview)}</strong> (from {draggedRecord?.group || 'General'})
+                  </span>
+                  <span className="text-[11px] text-amber-700 font-normal hidden lg:inline">
+                    — Drop onto any target project group below to reassign:
+                  </span>
+                </div>
+              ) : (
+                <div className="flex items-center gap-2 text-xs sm:text-sm font-bold text-slate-700">
+                  <Folder className="w-4 h-4 text-brand-primary shrink-0" />
+                  <span>Project Groups & Reassignment Tray</span>
+                  <span className="text-[11px] font-normal text-slate-400 hidden md:inline">
+                    (Drag recordings from 'General' to reassign to specific projects)
+                  </span>
+                </div>
+              )}
+            </div>
+
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={() => onAddGroup('')}
+                onDragOver={(e) => {
+                  if (isDragging) {
+                    e.preventDefault();
+                    e.dataTransfer.dropEffect = 'copy';
+                    if (!isOverNewProjectTarget) setIsOverNewProjectTarget(true);
+                  }
+                }}
+                onDragEnter={(e) => {
+                  if (isDragging) {
+                    e.preventDefault();
+                    setIsOverNewProjectTarget(true);
+                  }
+                }}
+                onDragLeave={(e) => {
+                  if (e.currentTarget.contains(e.relatedTarget as Node)) return;
+                  setIsOverNewProjectTarget(false);
+                }}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  setIsOverNewProjectTarget(false);
+                  if (draggedRecord) {
+                    setItemForNewProjectDrop(draggedRecord);
+                    setNewProjectDropName('');
+                  }
+                }}
+                className={`text-[11px] font-bold transition-all flex items-center gap-1.5 px-3 py-1.5 rounded-lg border shadow-2xs ${
+                  isOverNewProjectTarget
+                    ? 'bg-emerald-600 text-white border-emerald-600 ring-4 ring-emerald-200 scale-105 animate-pulse'
+                    : isDragging
+                    ? 'border-dashed border-2 border-brand-primary/70 bg-brand-primary/5 text-brand-primary hover:bg-brand-primary/10'
+                    : 'text-brand-primary hover:text-brand-secondary border-brand-primary/20 hover:bg-brand-primary/5'
+                }`}
+                title="Create a new project group or drop a recording here to create and move"
+              >
+                <FolderPlus className="w-3.5 h-3.5 shrink-0" />
+                <span>{isOverNewProjectTarget ? 'Drop to Create & Move' : isDragging ? '+ Drop for New Project' : 'New Project'}</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Project Group Pills / Drop Targets */}
+          <div className="flex items-center gap-2.5 overflow-x-auto pb-1 scrollbar-thin">
+            {/* "All" Filter Pill */}
+            <button
+              type="button"
+              onClick={() => handleProjectDropdownChange('all')}
+              className={`px-3.5 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2 shrink-0 border ${
+                projectFilter === 'all'
+                  ? 'bg-brand-primary text-white border-brand-primary shadow-sm'
+                  : 'bg-slate-50 text-slate-600 border-slate-200/80 hover:bg-white hover:border-slate-300'
+              }`}
+            >
+              <span>All Projects</span>
+              <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono font-bold ${
+                projectFilter === 'all' ? 'bg-white/20 text-white' : 'bg-slate-200 text-slate-600'
+              }`}>
+                {audioHistory.filter(h => !h.deletedAt).length}
+              </span>
+            </button>
+
+            {/* Project Group Drop Target Pills */}
+            {projectListWithGeneral.map((proj) => {
+              const isCurrentGroup = (draggedRecord?.group || 'General').toLowerCase() === proj.name.toLowerCase();
+              const isDropTargetHovered = dragOverGroup?.toLowerCase() === proj.name.toLowerCase();
+              const isFilterActive = projectFilter.toLowerCase() === proj.name.toLowerCase();
+              const isGeneral = proj.name.toLowerCase() === 'general';
+
+              return (
+                <div
+                  key={proj.id}
+                  onDragOver={(e) => {
+                    if (isDragging && !isCurrentGroup) {
+                      e.preventDefault();
+                      e.dataTransfer.dropEffect = 'move';
+                      if (dragOverGroup !== proj.name) setDragOverGroup(proj.name);
+                    }
+                  }}
+                  onDragEnter={(e) => {
+                    if (isDragging && !isCurrentGroup) {
+                      e.preventDefault();
+                      setDragOverGroup(proj.name);
+                    }
+                  }}
+                  onDragLeave={(e) => {
+                    if (e.currentTarget.contains(e.relatedTarget as Node)) return;
+                    if (dragOverGroup === proj.name) {
+                      setDragOverGroup(null);
+                    }
+                  }}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    handleDropOnProject(proj.name);
+                  }}
+                  onClick={() => handleProjectDropdownChange(proj.name)}
+                  className={`group/pill px-3.5 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2 shrink-0 cursor-pointer select-none border ${
+                    isDropTargetHovered
+                      ? 'bg-emerald-600 text-white border-emerald-600 ring-4 ring-emerald-200 scale-105 shadow-md z-10'
+                      : isDragging
+                      ? isCurrentGroup
+                        ? 'bg-slate-100 text-slate-400 border-slate-200 opacity-60 cursor-not-allowed'
+                        : 'bg-white text-slate-800 border-dashed border-2 border-brand-primary/60 hover:border-brand-primary hover:bg-brand-primary/10 hover:scale-[1.02] shadow-sm'
+                      : isFilterActive
+                      ? 'bg-brand-primary text-white border-brand-primary shadow-sm'
+                      : isGeneral
+                      ? 'bg-amber-50/70 text-amber-900 border-amber-200/80 hover:bg-amber-50 hover:border-amber-300'
+                      : 'bg-slate-50 text-slate-700 border-slate-200/80 hover:bg-white hover:border-brand-primary/40'
+                  }`}
+                  title={
+                    isDragging
+                      ? isCurrentGroup
+                        ? `Currently in ${proj.name}`
+                        : `Drop to move recording to ${proj.name}`
+                      : `Filter by ${proj.name}`
+                  }
+                >
+                  <div className="flex items-center gap-2 pointer-events-none">
+                    {isDropTargetHovered ? (
+                      <FolderInput className="w-4 h-4 animate-bounce text-white shrink-0" />
+                    ) : (
+                      <Folder className={`w-3.5 h-3.5 shrink-0 ${
+                        isFilterActive || isDropTargetHovered
+                          ? 'text-white'
+                          : isGeneral
+                          ? 'text-amber-600'
+                          : 'text-slate-400 group-hover/pill:text-brand-primary'
+                      }`} />
+                    )}
+
+                    <span>{proj.name}</span>
+
+                    {isDragging ? (
+                      isCurrentGroup ? (
+                        <span className="text-[9px] uppercase font-mono px-1.5 py-0.5 rounded bg-slate-200 text-slate-600">
+                          Current
+                        </span>
+                      ) : isDropTargetHovered ? (
+                        <span className="text-[9px] uppercase font-bold px-1.5 py-0.5 rounded bg-white text-emerald-800 animate-pulse">
+                          Drop Here
+                        </span>
+                      ) : (
+                        <span className="text-[9px] uppercase font-bold px-1.5 py-0.5 rounded bg-brand-primary/10 text-brand-primary group-hover/pill:bg-brand-primary group-hover/pill:text-white transition-colors">
+                          Move
+                        </span>
+                      )
+                    ) : (
+                      <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono font-bold ${
+                        isFilterActive
+                          ? 'bg-white/20 text-white'
+                          : isGeneral
+                          ? 'bg-amber-200/80 text-amber-900'
+                          : 'bg-slate-200/70 text-slate-600 group-hover/pill:bg-slate-200'
+                      }`}>
+                        {proj.count}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {/* Data List */}
       <div className="space-y-4">
         {isLoading ? (
@@ -1495,28 +1972,106 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
           filteredData.map(item => {
             const isAudio = 'fileName' in item;
             const isSelected = selectedIds.has(item.id);
+            const canEdit = checkPermission(item, 'edit');
+            const isCurrentlyDragged = draggedRecord?.id === item.id;
+            const isCardHovered = hoveredCardId === item.id;
+            const itemGroup = item.group || 'General';
+            const isGeneral = !item.group || itemGroup.toLowerCase() === 'general';
+            const canDropOnThisCard = isDragging && draggedRecord && (draggedRecord.group || 'General').toLowerCase() !== itemGroup.toLowerCase();
 
             return (
               <div 
                 key={item.id} 
-                className={`bg-white rounded-xl p-6 border transition-all flex flex-col gap-6 relative group ${isSelected ? 'border-brand-primary ring-1 ring-brand-primary shadow-sm' : 'border-brand-divider/20 shadow-sm hover:shadow-md'}`}
+                draggable={canEdit}
+                onDragStart={(e) => handleDragStart(e, item)}
+                onDragEnd={handleDragEnd}
+                onDragOver={(e) => {
+                  if (canDropOnThisCard) {
+                    e.preventDefault();
+                    e.dataTransfer.dropEffect = 'move';
+                    if (hoveredCardId !== item.id) setHoveredCardId(item.id);
+                  }
+                }}
+                onDragLeave={(e) => {
+                  if (e.currentTarget.contains(e.relatedTarget as Node)) return;
+                  if (hoveredCardId === item.id) setHoveredCardId(null);
+                }}
+                onDrop={(e) => {
+                  if (canDropOnThisCard) {
+                    e.preventDefault();
+                    handleDropOnProject(itemGroup);
+                    setHoveredCardId(null);
+                  }
+                }}
+                className={`bg-white rounded-xl p-6 border transition-all flex flex-col gap-6 relative group ${
+                  isCurrentlyDragged
+                    ? 'opacity-40 border-dashed border-2 border-brand-primary bg-slate-50 scale-[0.99] shadow-inner'
+                    : isCardHovered
+                    ? 'border-2 border-emerald-500 ring-4 ring-emerald-100 bg-emerald-50/40 shadow-lg'
+                    : isSelected
+                    ? 'border-brand-primary ring-1 ring-brand-primary shadow-sm'
+                    : 'border-brand-divider/20 shadow-sm hover:shadow-md'
+                }`}
               >
-                {/* Selection Checkbox */}
-                <div 
-                  onClick={() => toggleSelect(item.id)}
-                  className={`absolute top-6 left-6 w-6 h-6 rounded-lg border-2 flex items-center justify-center cursor-pointer transition-all z-10 ${isSelected ? 'bg-brand-primary border-brand-primary' : 'bg-white border-brand-divider/30 hover:border-brand-primary'}`}
-                >
-                  {isSelected && <i className="fa-solid fa-check text-brand-accent text-[10px]"></i>}
+                {/* Selection Checkbox & Drag Handle */}
+                <div className="absolute top-6 left-6 flex items-center space-x-1.5 z-10">
+                  <div 
+                    onClick={() => toggleSelect(item.id)}
+                    className={`w-6 h-6 rounded-lg border-2 flex items-center justify-center cursor-pointer transition-all ${isSelected ? 'bg-brand-primary border-brand-primary' : 'bg-white border-brand-divider/30 hover:border-brand-primary'}`}
+                    title={isSelected ? "Deselect recording" : "Select recording"}
+                  >
+                    {isSelected && <i className="fa-solid fa-check text-brand-accent text-[10px]"></i>}
+                  </div>
+
+                  {canEdit && (
+                    <div 
+                      draggable={true}
+                      onDragStart={(e) => handleGripDragStart(e, item)}
+                      onDragEnd={handleDragEnd}
+                      className="w-6 h-6 flex items-center justify-center text-slate-400 hover:text-brand-primary cursor-grab active:cursor-grabbing hover:bg-slate-100 rounded transition-colors"
+                      title={isGeneral ? "Drag to reassign from 'General' to another project" : `Drag to reassign project from '${itemGroup}'`}
+                    >
+                      <GripVertical className="w-3.5 h-3.5" />
+                    </div>
+                  )}
                 </div>
 
-                <div className="flex-1 lg:pl-10 space-y-4 md:space-y-6 text-left">
+                {/* Drop indication banner on hovered card */}
+                {isCardHovered && canDropOnThisCard && (
+                  <div className="absolute -top-3 left-1/2 -translate-x-1/2 bg-emerald-600 text-white text-[11px] font-bold px-3 py-1 rounded-full shadow-lg flex items-center gap-1.5 z-20 animate-bounce pointer-events-none">
+                    <FolderInput className="w-3.5 h-3.5" />
+                    <span>Drop to move into project "{itemGroup}"</span>
+                  </div>
+                )}
+
+                <div className="flex-1 pl-12 lg:pl-16 space-y-4 md:space-y-6 text-left">
                   {isAudio ? (
                     // Audio Item Layout
                     <div className="flex flex-col gap-4 md:gap-8">
                       <div className="flex flex-col lg:flex-row gap-4 md:gap-8">
                         <div className="lg:w-1/3 space-y-3 md:space-y-5">
                           <div className="flex justify-between items-center">
-                            <span className="text-[10px] md:text-[11px] font-medium text-slate-400 uppercase tracking-widest font-mono">{item.date}</span>
+                            <div className="flex items-center gap-2">
+                              <span className="text-[10px] md:text-[11px] font-medium text-slate-400 uppercase tracking-widest font-mono">{item.date}</span>
+                              {isGeneral ? (
+                                <span 
+                                  draggable={canEdit}
+                                  onDragStart={(e) => handleGripDragStart(e, item)}
+                                  onDragEnd={handleDragEnd}
+                                  className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded text-[10px] font-bold bg-amber-50 text-amber-800 border border-amber-300 shadow-2xs hover:bg-amber-100/80 hover:border-amber-400 cursor-grab active:cursor-grabbing transition-all select-none"
+                                  title="In 'General' project. Drag this badge or the grip handle to drop onto any project group above."
+                                >
+                                  <FolderInput className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                                  <span className="font-semibold">General</span>
+                                  <span className="hidden sm:inline text-amber-700 font-medium">• Drag to reassign</span>
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[9px] font-bold bg-slate-100 text-slate-700 border border-slate-200 shadow-2xs">
+                                  <Folder className="w-3 h-3 text-slate-500" />
+                                  <span>{itemGroup}</span>
+                                </span>
+                              )}
+                            </div>
                             <div className="flex items-center space-x-2">
                                <div className={`px-2 py-1 rounded text-[9px] md:text-[11px] font-medium uppercase tracking-tighter ${item.status === 'completed' ? 'bg-emerald-50 text-emerald-600' : item.status === 'error' ? 'bg-red-50 text-red-600' : 'bg-brand-background text-brand-primary'}`}>
                                  {item.status}
@@ -1593,11 +2148,12 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
                               <div className="flex flex-col min-w-[100px]">
                                 <label className="text-[8px] font-black text-slate-400 mb-1 ml-1 uppercase tracking-tighter">Project Group</label>
                                 <select 
-                                  value={item.group} 
+                                  value={item.group || 'General'} 
                                   onChange={(e) => {
                                     const value = e.target.value;
                                     if (value === 'new') {
-                                      onAddGroup(''); // This should open the modal in App.tsx
+                                      setItemForNewProjectDrop(item);
+                                      setNewProjectDropName('');
                                       return;
                                     }
                                     
@@ -2373,11 +2929,12 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
                            <div className="flex flex-col min-w-[100px]">
                               <label className="text-[8px] font-black text-slate-400 mb-1 ml-1 uppercase tracking-tighter">Project Group</label>
                               <select 
-                                value={item.group} 
+                                value={item.group || 'General'} 
                                 onChange={(e) => {
                                   const value = e.target.value;
                                   if (value === 'new') {
-                                    onAddGroup(''); // This should open the modal in App.tsx
+                                    setItemForNewProjectDrop(item);
+                                    setNewProjectDropName('');
                                     return;
                                   }
                                   
