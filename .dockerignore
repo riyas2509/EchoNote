@@ -9,3 +9,8 @@ dist
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+*.yaml
+*.yml
+*.tmp
+/tmp*
+tmp/

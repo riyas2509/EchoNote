@@ -3,7 +3,7 @@ import { useSearchParams, useNavigate } from 'react-router-dom';
 import { useFirebase } from '../components/FirebaseProvider';
 import { motion, AnimatePresence } from 'motion/react';
 import { ArrowRight, UserPlus, CheckCircle2, AlertCircle, Loader2, Folder, Shield, XCircle, Clock, Home, X } from 'lucide-react';
-import { db, doc, getDoc, setDoc, updateDoc, serverTimestamp, collection, addDoc } from '../firebase';
+import { db, doc, getDoc } from '../firebase';
 import { apiFetch } from '../lib/apiClient';
 
 interface InviteDetails {
@@ -14,14 +14,14 @@ interface InviteDetails {
   projectName: string;
   role: string;
   invitedBy?: string;
-  status: 'pending' | 'accepted' | 'rejected' | 'expired';
+  status: 'pending' | 'accepted' | 'rejected' | 'cancelled' | 'revoked' | 'expired';
 }
 
 const JoinPage: React.FC = () => {
   const [searchParams] = useSearchParams();
   const token = searchParams.get('token');
   const navigate = useNavigate();
-  const { user, isAuthReady } = useFirebase();
+  const { user, isAuthReady, refreshClaims } = useFirebase();
 
   const [invite, setInvite] = useState<InviteDetails | null>(null);
   const [loading, setLoading] = useState(true);
@@ -31,28 +31,34 @@ const JoinPage: React.FC = () => {
   const [success, setSuccess] = useState<boolean | 'declined'>(false);
 
   useEffect(() => {
-    if (!token) {
+    if (!token || !token.trim()) {
       setError('Missing invitation token');
       setLoading(false);
       return;
     }
 
+    const cleanToken = token.trim();
+
     const fetchInvite = async () => {
       try {
         // Fetch invite details directly from client Firestore SDK (read rule is allow read: if true)
-        const inviteDoc = await getDoc(doc(db, 'invites', token));
+        const inviteDoc = await getDoc(doc(db, 'invites', cleanToken));
         if (inviteDoc.exists()) {
-          setInvite(inviteDoc.data() as InviteDetails);
+          const data = inviteDoc.data() as InviteDetails;
+          setInvite({
+            ...data,
+            id: data.id || inviteDoc.id
+          });
         } else {
-          throw new Error('Invitation not found');
+          throw new Error('Invitation document not found by token ID, trying backend API');
         }
       } catch (err: any) {
-        console.warn('Direct client Firestore fetch failed, trying fallback API:', err.message);
+        console.warn('Direct client Firestore fetch note, trying fallback API:', err?.message || err);
         try {
-          const response = await apiFetch(`/api/invite-details/${token}`);
+          const response = await apiFetch(`/api/invite-details/${encodeURIComponent(cleanToken)}`);
           if (!response.ok) {
-            const data = await response.json();
-            throw new Error(data.error || 'Failed to load invitation');
+            const data = await response.json().catch(() => ({}));
+            throw new Error(data.message || data.error || 'Failed to load invitation');
           }
           const data = await response.json();
           setInvite(data);
@@ -69,61 +75,64 @@ const JoinPage: React.FC = () => {
 
   const handleJoin = async () => {
     if (!user) {
-      // Save redirect in state or local storage for after login
-      localStorage.setItem('redirectAfterLogin', `/join?token=${token}`);
+      // Save redirect in session/local storage for after login
+      if (token) {
+        sessionStorage.setItem('redirectAfterLogin', `/join?token=${token}`);
+        localStorage.setItem('redirectAfterLogin', `/join?token=${token}`);
+      }
       navigate('/auth');
       return;
     }
 
     if (!invite) return;
 
+    // Client-side guard for obvious email mismatch before dispatching
+    if (user.email && invite.email && user.email.toLowerCase().trim() !== invite.email.toLowerCase().trim()) {
+      setError(`This invitation was issued to ${invite.email}. You are currently authenticated as ${user.email}. Please switch accounts to accept.`);
+      return;
+    }
+
     setJoining(true);
+    setError(null);
+
     try {
-      // 1. Create project member record directly in Firestore from client
-      const memberId = `${user.uid}_${invite.projectId}`;
-      await setDoc(doc(db, "projectMembers", memberId), {
-        userId: user.uid,
-        email: user.email,
-        displayName: user.displayName || user.email?.split('@')[0] || 'User',
-        projectId: invite.projectId,
-        ownerId: invite.ownerId || null,
-        projectName: invite.projectName,
-        role: invite.role,
-        joinedAt: serverTimestamp()
-      });
+      const cleanToken = (invite.id || token || '').trim();
+      if (!cleanToken) {
+        throw new Error('Missing invitation token');
+      }
 
-      // 2. Update invite status to accepted directly in Firestore from client
-      await updateDoc(doc(db, "invites", invite.id), {
-        status: "accepted",
-        acceptedAt: serverTimestamp(),
-        acceptedBy: user.uid
-      });
-
-      // 3. Log join project activity directly in Firestore from client
-      await addDoc(collection(db, "projectActivities"), {
-        projectId: invite.projectId,
-        userId: user.uid,
-        userEmail: user.email,
-        userName: user.displayName || user.email?.split('@')[0] || 'User',
-        actionType: "join_project",
-        description: `${user.displayName || user.email?.split('@')[0] || 'User'} joined project "${invite.projectName}"`,
-        createdAt: serverTimestamp()
-      });
-
-      // 4. Trigger server API (ignoring server-side write failures because client already did it)
+      // Authoritative backend invitation acceptance
+      // Server creates membership with admin privileges, validates token & recipient, updates invite status & logs activity
       const response = await apiFetch('/api/invite-accept', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          token: invite.id,
+          token: invite.id || token,
           userDisplayName: user.displayName || user.email?.split('@')[0] || 'User'
         })
       });
 
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.message || errorData.error || `Failed to accept invitation (HTTP ${response.status})`);
+      }
+
+      // Refresh claims / custom role context if available
+      if (typeof refreshClaims === 'function') {
+        try {
+          await refreshClaims();
+        } catch (claimsErr) {
+          console.warn('ℹ️ Claims refresh note:', claimsErr);
+        }
+      }
+
+      // Mark local invite as accepted
+      setInvite(prev => prev ? { ...prev, status: 'accepted' } : null);
       setSuccess(true);
+
       setTimeout(() => {
         navigate('/app');
-      }, 2500);
+      }, 2000);
     } catch (err: any) {
       console.error('Join error:', err);
       setError(err.message || 'Failed to join project. You might already be a member.');
@@ -136,38 +145,34 @@ const JoinPage: React.FC = () => {
     if (!invite) return;
 
     setDeclining(true);
+    setError(null);
+
     try {
-      // 1. Update invite status directly from client
-      await updateDoc(doc(db, "invites", invite.id), {
-        status: "rejected",
-        rejectedAt: serverTimestamp(),
-        rejectedBy: user?.uid || null
-      });
+      const cleanToken = (invite.id || token || '').trim();
+      if (!cleanToken) {
+        throw new Error('Missing invitation token');
+      }
 
-      // 2. Log activity directly from client
-      await addDoc(collection(db, "projectActivities"), {
-        projectId: invite.projectId,
-        userId: user?.uid || 'unknown',
-        userEmail: invite.email,
-        userName: invite.email.split('@')[0],
-        actionType: "decline_invite",
-        description: `${invite.email.split('@')[0]} declined invitation to join "${invite.projectName}"`,
-        createdAt: serverTimestamp()
-      });
-
-      // 3. Trigger server API for background tracking (ignoring failure because client wrote first)
-      await apiFetch('/api/invite-decline', {
+      // Authoritative backend invitation decline
+      const response = await apiFetch('/api/invite-decline', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          token: invite.id
+          token: cleanToken
         })
       });
 
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.message || errorData.error || 'Failed to decline invitation.');
+      }
+
+      setInvite(prev => prev ? { ...prev, status: 'rejected' } : null);
       setSuccess('declined');
+
       setTimeout(() => {
         navigate('/');
-      }, 2500);
+      }, 2000);
     } catch (err: any) {
       console.error('Decline error:', err);
       setError(err.message || 'Failed to decline invitation.');
@@ -228,6 +233,12 @@ const JoinPage: React.FC = () => {
     } else if (invite.status === 'rejected') {
       statusTitle = "Invitation Declined";
       statusDesc = "This invitation was declined and is no longer valid.";
+      StatusIcon = XCircle;
+      iconBg = "bg-rose-50";
+      iconColor = "text-rose-500";
+    } else if ((invite.status as string) === 'cancelled' || (invite.status as string) === 'revoked') {
+      statusTitle = "Invitation Cancelled";
+      statusDesc = "This invitation was cancelled and is no longer valid.";
       StatusIcon = XCircle;
       iconBg = "bg-rose-50";
       iconColor = "text-rose-500";
@@ -320,6 +331,15 @@ const JoinPage: React.FC = () => {
                   </div>
                 </div>
               </div>
+
+              {user && user.email && invite?.email && user.email.toLowerCase().trim() !== invite.email.toLowerCase().trim() && (
+                <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 flex items-start gap-3 text-left">
+                  <AlertCircle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+                  <div className="text-xs text-amber-800 leading-relaxed">
+                    <span className="font-bold">Account Mismatch:</span> You are signed in as <span className="font-semibold underline">{user.email}</span>, but this invitation was sent to <span className="font-semibold underline">{invite.email}</span>. Please switch to the invited account to accept.
+                  </div>
+                </div>
+              )}
 
               <div className="space-y-3">
                 <button 

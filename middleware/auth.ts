@@ -1,6 +1,45 @@
 import { Request, Response, NextFunction } from "express";
 import admin from "firebase-admin";
-import { AuthoritativeOrgRole, CustomClaims, OrgAuditEvent } from "../types.js";
+import { getAdminFirestore, getFirebaseConfig } from "../lib/firebaseAdmin.ts";
+import { isProductionEnvironment } from "./billingFulfillment.ts";
+import { 
+  AuthoritativeOrgRole, 
+  CustomClaims, 
+  OrgAuditEvent,
+  TargetProjectRole,
+  ProjectPermission,
+  ProjectPermissions,
+  ProjectAccessResolution,
+  getProjectRolePermissions,
+  normalizeProjectRole
+} from "../types.js";
+
+function parseFirestoreRestFields(fields: Record<string, any>): Record<string, any> {
+  const result: Record<string, any> = {};
+  for (const [key, val] of Object.entries(fields || {})) {
+    if (!val || typeof val !== 'object') continue;
+    if (val.stringValue !== undefined) result[key] = val.stringValue;
+    else if (val.booleanValue !== undefined) result[key] = val.booleanValue;
+    else if (val.integerValue !== undefined) result[key] = Number(val.integerValue);
+    else if (val.doubleValue !== undefined) result[key] = Number(val.doubleValue);
+    else if (val.timestampValue !== undefined) result[key] = val.timestampValue;
+    else if (val.nullValue !== undefined) result[key] = null;
+    else if (val.mapValue !== undefined) result[key] = parseFirestoreRestFields(val.mapValue.fields || {});
+    else if (val.arrayValue !== undefined) {
+      result[key] = (val.arrayValue.values || []).map((v: any) => {
+        if (!v || typeof v !== 'object') return v;
+        if (v.stringValue !== undefined) return v.stringValue;
+        if (v.booleanValue !== undefined) return v.booleanValue;
+        if (v.integerValue !== undefined) return Number(v.integerValue);
+        if (v.mapValue !== undefined) return parseFirestoreRestFields(v.mapValue.fields || {});
+        return Object.values(v)[0];
+      });
+    } else {
+      result[key] = Object.values(val)[0];
+    }
+  }
+  return result;
+}
 
 export interface AuthenticatedRequest extends Request {
   user?: admin.auth.DecodedIdToken & {
@@ -9,6 +48,7 @@ export interface AuthenticatedRequest extends Request {
     role?: 'admin' | 'user';
     platform_admin?: boolean;
     isOwner?: boolean;
+    idToken?: string;
   };
 }
 
@@ -230,6 +270,7 @@ export async function requireAuth(
     
     // Normalize custom claims into request user object
     const userClaims: any = { ...decodedToken };
+    userClaims.idToken = token;
     if (decodedToken.orgRole) {
       userClaims.orgRole = normalizeOrgRole(decodedToken.orgRole as string);
     }
@@ -295,42 +336,365 @@ export async function optionalAuth(
 }
 
 /**
+ * Centralized Server-side Project Authorization Resolver.
+ * Authoritatively determines effective project role, permissions, and tenant boundaries:
+ * - Differentiates between owner, admin, commenter, and viewer
+ * - Normalizes legacy 'editor' role to 'admin' using canonical normalizeProjectRole()
+ * - Strictly prevents organization-wide access leakage: regular org members do NOT auto-inherit project access
+ * - Preserves supervisory override for Org Owner / Org Admin on organization projects
+ * - Preserves Platform Administrator operational override
+ * - Enforces tenant isolation (users from Org A cannot access projects in Org B)
+ */
+export async function resolveProjectAccess(
+  db: admin.firestore.Firestore,
+  user: { uid: string; email?: string; platform_admin?: boolean; role?: string; idToken?: string; [key: string]: any } | string,
+  projectId: string,
+  options?: {
+    requiredPermission?: ProjectPermission;
+    requiredRoles?: string[];
+    callerClaimedOwnerId?: string;
+  }
+): Promise<ProjectAccessResolution> {
+  const userId = typeof user === 'string' ? user : user?.uid;
+  let userEmail = typeof user === 'object' && user?.email ? user.email.toLowerCase().trim() : '';
+  const isPlatformAdmin = typeof user === 'object' && Boolean(
+    user?.platform_admin === true || 
+    user?.role === 'admin' || 
+    (user as any)?.claims?.platform_admin === true
+  );
+
+  const emptyResolution = (reason: string, notFound = false): ProjectAccessResolution => ({
+    hasAccess: false,
+    role: null,
+    isOwner: false,
+    isDirectCreator: false,
+    isOrgAdmin: false,
+    isPlatformAdmin: false,
+    permissions: getProjectRolePermissions(null),
+    reason,
+    notFound
+  });
+
+  if (!userId || !projectId) {
+    return emptyResolution("Missing userId or projectId");
+  }
+
+  try {
+    // 1. Fetch project document
+    let projectData: any = null;
+
+    try {
+      const projectDoc = await db.collection("projects").doc(projectId).get();
+      if (!projectDoc.exists) {
+        return emptyResolution("Project not found", true);
+      }
+      projectData = projectDoc.data() || {};
+      projectData.id = projectDoc.id;
+    } catch (docErr: any) {
+      const isPermissionDenied = docErr?.code === 7 || (docErr?.message && docErr.message.includes("PERMISSION_DENIED"));
+      if (isPermissionDenied) {
+        // Attempt REST API fetch using caller's verified ID token if available
+        const idToken = typeof user === 'object' ? user?.idToken : undefined;
+        if (idToken) {
+          try {
+            const config = getFirebaseConfig();
+            const restUrl = `https://firestore.googleapis.com/v1/projects/${config.projectId}/databases/${config.firestoreDatabaseId}/documents/projects/${projectId}`;
+            const restResp = await fetch(restUrl, {
+              headers: { Authorization: `Bearer ${idToken}` }
+            });
+            if (restResp.ok) {
+              const restJson: any = await restResp.json();
+              projectData = parseFirestoreRestFields(restJson.fields || {});
+              projectData.id = projectId;
+            } else if (restResp.status === 404) {
+              return emptyResolution("Project not found", true);
+            }
+          } catch (restErr) {
+            console.warn("⚠️ REST fallback query failed:", restErr);
+          }
+        }
+
+        // If still no projectData and we are in non-production, check callerClaimedOwnerId
+        if (!projectData && !isProductionEnvironment()) {
+          if (options?.callerClaimedOwnerId === userId) {
+            projectData = { id: projectId, userId, name: "Workspace Project" };
+          }
+        }
+      }
+
+      if (!projectData) {
+        throw docErr;
+      }
+    }
+
+    const projectOrgId = projectData.orgId || projectData.organizationId || null;
+    const isDirectCreator = projectData.userId === userId;
+
+    // 2. Platform Administrator Operational Override
+    if (isPlatformAdmin) {
+      return {
+        hasAccess: true,
+        role: 'owner',
+        isOwner: true,
+        isDirectCreator,
+        isOrgAdmin: true,
+        isPlatformAdmin: true,
+        organizationId: projectOrgId,
+        project: projectData,
+        permissions: getProjectRolePermissions('owner'),
+        reason: "Authorized as platform administrator"
+      };
+    }
+
+    // Attempt to load userEmail if not provided in user object
+    if (!userEmail) {
+      try {
+        const uDoc = await db.collection("users").doc(userId).get();
+        if (uDoc.exists) {
+          userEmail = (uDoc.data()?.email || "").toLowerCase().trim();
+        }
+      } catch (e) {
+        // Fallback gracefully
+      }
+    }
+
+    // 3. Organization Scoping & Supervisory Access Check
+    let isOrgSupervisor = false;
+    let isOrgMember = false;
+
+    if (projectOrgId) {
+      if (userEmail) {
+        // Check organization owner in Firestore
+        try {
+          const orgDoc = await db.collection("organizations").doc(projectOrgId).get();
+          if (orgDoc.exists) {
+            const oData = orgDoc.data() || {};
+            if (oData.ownerId === userId || (oData.ownerEmail && oData.ownerEmail.toLowerCase() === userEmail)) {
+              isOrgSupervisor = true;
+              isOrgMember = true;
+            }
+          }
+        } catch (e) {
+          console.warn("⚠️ Could not fetch organization doc:", e);
+        }
+
+        // Check organization membership & role
+        if (!isOrgSupervisor) {
+          const orgAccess = await checkOrgAccess(db, userEmail, projectOrgId, ["owner", "org_admin", "team_manager", "member", "viewer"]);
+          if (orgAccess.hasAccess) {
+            isOrgMember = true;
+            if (orgAccess.role === 'owner' || orgAccess.role === 'org_admin') {
+              isOrgSupervisor = true;
+            }
+          }
+        }
+      }
+
+      // Tenant boundary enforcement: If a project belongs to an organization,
+      // the user MUST belong to that organization to access it (even as creator or collaborator)
+      if (!isOrgMember) {
+        return emptyResolution("Tenant isolation: User does not belong to the organization owning this project");
+      }
+
+      // Org Owner / Org Admin retain supervisory access to all organization projects
+      if (isOrgSupervisor) {
+        const supervisoryRole: TargetProjectRole = isDirectCreator ? 'owner' : 'admin';
+        const supervisoryPermissions: ProjectPermissions = {
+          canView: true,
+          canComment: true,
+          canEditContent: true,
+          canManageProject: true,
+          canManageMembers: true,
+          canDeleteProject: true
+        };
+
+        // Validate required permission if specified
+        if (options?.requiredPermission && !supervisoryPermissions[getPermissionField(options.requiredPermission)]) {
+          return {
+            hasAccess: false,
+            role: supervisoryRole,
+            isOwner: isDirectCreator,
+            isDirectCreator,
+            isOrgAdmin: true,
+            isPlatformAdmin: false,
+            organizationId: projectOrgId,
+            project: projectData,
+            permissions: supervisoryPermissions,
+            reason: `Required permission ${options.requiredPermission} denied`
+          };
+        }
+
+        return {
+          hasAccess: true,
+          role: supervisoryRole,
+          isOwner: isDirectCreator,
+          isDirectCreator,
+          isOrgAdmin: true,
+          isPlatformAdmin: false,
+          organizationId: projectOrgId,
+          project: projectData,
+          permissions: supervisoryPermissions,
+          reason: "Authorized as organization administrator"
+        };
+      }
+    }
+
+    // 4. Direct Creator Ownership (within tenant boundary)
+    if (isDirectCreator) {
+      const creatorPermissions = getProjectRolePermissions('owner');
+      return {
+        hasAccess: true,
+        role: 'owner',
+        isOwner: true,
+        isDirectCreator: true,
+        isOrgAdmin: false,
+        isPlatformAdmin: false,
+        organizationId: projectOrgId,
+        project: projectData,
+        permissions: creatorPermissions,
+        reason: "Authorized as project creator"
+      };
+    }
+
+    // 5. Explicit Project Membership via projectMembers
+    let memberDoc: any = null;
+    try {
+      memberDoc = await db.collection("projectMembers").doc(`${userId}_${projectId}`).get();
+      if (!memberDoc.exists) {
+        // Fallback query by userId and projectId
+        const qSnap = await db.collection("projectMembers")
+          .where("projectId", "==", projectId)
+          .where("userId", "==", userId)
+          .limit(1)
+          .get();
+        if (!qSnap.empty) {
+          memberDoc = qSnap.docs[0];
+        } else if (userEmail) {
+          // Fallback query by email and projectId
+          const eSnap = await db.collection("projectMembers")
+            .where("projectId", "==", projectId)
+            .where("email", "==", userEmail)
+            .limit(1)
+            .get();
+          if (!eSnap.empty) {
+            memberDoc = eSnap.docs[0];
+          }
+        }
+      }
+    } catch (pmErr: any) {
+      console.warn("⚠️ projectMembers Firestore query failed:", pmErr?.message || pmErr);
+    }
+
+    if (memberDoc && memberDoc.exists) {
+      const memberData = memberDoc.data() || {};
+      const rawRole = memberData.role;
+      // Canonical normalization (e.g. editor -> admin, unknown -> viewer)
+      const normalizedRole = normalizeProjectRole(rawRole);
+      const permissions = getProjectRolePermissions(normalizedRole);
+
+      // Verify required permission if specified
+      if (options?.requiredPermission) {
+        const field = getPermissionField(options.requiredPermission);
+        if (!permissions[field]) {
+          return {
+            hasAccess: false,
+            role: normalizedRole,
+            rawRole,
+            isOwner: normalizedRole === 'owner',
+            isDirectCreator: false,
+            isOrgAdmin: false,
+            isPlatformAdmin: false,
+            organizationId: projectOrgId,
+            project: projectData,
+            permissions,
+            reason: `Role ${normalizedRole} lacks required permission ${options.requiredPermission}`
+          };
+        }
+      }
+
+      // Verify required roles if specified
+      if (options?.requiredRoles && options.requiredRoles.length > 0) {
+        const allowed = options.requiredRoles.map(r => normalizeProjectRole(r));
+        if (!allowed.includes(normalizedRole)) {
+          return {
+            hasAccess: false,
+            role: normalizedRole,
+            rawRole,
+            isOwner: normalizedRole === 'owner',
+            isDirectCreator: false,
+            isOrgAdmin: false,
+            isPlatformAdmin: false,
+            organizationId: projectOrgId,
+            project: projectData,
+            permissions,
+            reason: `Role ${normalizedRole} not in required roles list`
+          };
+        }
+      }
+
+      return {
+        hasAccess: true,
+        role: normalizedRole,
+        rawRole,
+        isOwner: normalizedRole === 'owner',
+        isDirectCreator: false,
+        isOrgAdmin: false,
+        isPlatformAdmin: false,
+        organizationId: projectOrgId,
+        project: projectData,
+        permissions,
+        reason: "Authorized via project membership"
+      };
+    }
+
+    // 6. User has neither direct creation, nor supervisory override, nor explicit project membership
+    return emptyResolution("User is not a member of this project");
+
+  } catch (error: any) {
+    console.error(`⚠️ resolveProjectAccess error for user ${userId} on project ${projectId}:`, error?.message);
+    return emptyResolution(`Error evaluating project access: ${error?.message}`);
+  }
+}
+
+function getPermissionField(permission: ProjectPermission): keyof ProjectPermissions {
+  switch (permission) {
+    case 'VIEW': return 'canView';
+    case 'COMMENT': return 'canComment';
+    case 'EDIT_CONTENT': return 'canEditContent';
+    case 'MANAGE_PROJECT': return 'canManageProject';
+    case 'MANAGE_MEMBERS': return 'canManageMembers';
+    case 'DELETE_PROJECT': return 'canDeleteProject';
+  }
+}
+
+/**
  * Server-side Project Authorization Helper.
+ * Backward-compatible wrapper around resolveProjectAccess.
  */
 export async function checkProjectAccess(
   db: admin.firestore.Firestore,
   userId: string,
   projectId: string,
   requiredRoles: string[] = ["owner", "admin", "member", "viewer"]
-): Promise<{ hasAccess: boolean; isOwner: boolean; role?: string }> {
+): Promise<{ 
+  hasAccess: boolean; 
+  isOwner: boolean; 
+  role?: string;
+  permissions?: ProjectPermissions;
+  resolution?: ProjectAccessResolution;
+}> {
   if (!userId || !projectId) {
     return { hasAccess: false, isOwner: false };
   }
 
-  try {
-    const projectDoc = await db.collection("projects").doc(projectId).get();
-    if (projectDoc.exists) {
-      const projectData = projectDoc.data() || {};
-      if (projectData.userId === userId) {
-        return { hasAccess: true, isOwner: true, role: "owner" };
-      }
-    }
-
-    const memberDocId = `${userId}_${projectId}`;
-    const memberDoc = await db.collection("projectMembers").doc(memberDocId).get();
-    if (memberDoc.exists) {
-      const memberData = memberDoc.data() || {};
-      const userRole = (memberData.role || "member").toLowerCase();
-      if (requiredRoles.map((r) => r.toLowerCase()).includes(userRole)) {
-        return { hasAccess: true, isOwner: userRole === "owner", role: userRole };
-      }
-    }
-
-    return { hasAccess: false, isOwner: false };
-  } catch (error: any) {
-    console.error(`⚠️ checkProjectAccess error for user ${userId} on project ${projectId}:`, error?.message);
-    return { hasAccess: false, isOwner: false };
-  }
+  const resolution = await resolveProjectAccess(db, userId, projectId, { requiredRoles });
+  return {
+    hasAccess: resolution.hasAccess,
+    isOwner: resolution.isOwner,
+    role: resolution.role || undefined,
+    permissions: resolution.permissions,
+    resolution
+  };
 }
 
 /**
@@ -608,7 +972,7 @@ export async function requirePlatformAdmin(
 
   // 3. Fallback: Authoritative server database lookup in Firestore /users/{uid}
   try {
-    const db = admin.firestore();
+    const db = getAdminFirestore();
     const userDoc = await db.collection("users").doc(req.user.uid).get();
     if (userDoc.exists) {
       const userData = userDoc.data() || {};
@@ -634,4 +998,294 @@ export async function requirePlatformAdmin(
     message: "Access denied. Platform administrator privileges required."
   });
 }
+
+/**
+ * Sanitizes incoming client claims to prevent privilege escalation in enterprise SSO & JIT flows.
+ */
+export function sanitizeSsoClaims(claims: any): Record<string, any> {
+  if (!claims || typeof claims !== 'object') return {};
+  const sanitized: Record<string, any> = {};
+  const blockedKeys = new Set([
+    'role', 'orgrole', 'platform_admin', 'admin', 'owner', 'isowner', 
+    'org_admin', 'super_admin', 'superadmin', 'is_owner', 'ownership'
+  ]);
+  for (const [k, v] of Object.entries(claims)) {
+    if (!blockedKeys.has(k.toLowerCase().trim())) {
+      sanitized[k] = v;
+    }
+  }
+  return sanitized;
+}
+
+/**
+ * Authorizes recording access for an authenticated user.
+ */
+export async function authorizeRecordingAccess(
+  db: admin.firestore.Firestore,
+  user: { uid: string; email?: string; platform_admin?: boolean; role?: string; orgRole?: string; [key: string]: any },
+  recordingId: string,
+  options?: { 
+    allowDeleted?: boolean;
+    requiredAction?: 'VIEW' | 'COMMENT' | 'EDIT_CONTENT' | 'DELETE';
+  }
+): Promise<{ 
+  authorized: boolean; 
+  record?: any; 
+  status: number; 
+  message: string;
+  role?: TargetProjectRole | null;
+  isOwner?: boolean;
+  isPlatformAdmin?: boolean;
+  isOrgAdmin?: boolean;
+  permissions?: {
+    canView: boolean;
+    canComment: boolean;
+    canEditContent: boolean;
+    canDelete: boolean;
+  };
+}> {
+  if (!user || !user.uid) {
+    return { authorized: false, status: 401, message: "Authentication required" };
+  }
+
+  const isPlatformAdmin = Boolean(
+    user.platform_admin === true ||
+    user.role === 'admin' ||
+    (user as any)?.claims?.platform_admin === true
+  );
+
+  // 1. Fetch record from 'recordings' or fallback to 'transcriptions'
+  let recordDoc = await db.collection("recordings").doc(recordingId).get();
+  if (!recordDoc.exists) {
+    recordDoc = await db.collection("transcriptions").doc(recordingId).get();
+  }
+
+  if (!recordDoc.exists) {
+    return { authorized: false, status: 404, message: "Recording not found" };
+  }
+
+  const record = recordDoc.data() || {};
+  record.id = recordDoc.id;
+
+  // Block access to soft-deleted recordings unless explicitly allowed
+  if (record.deletedAt && !options?.allowDeleted) {
+    return { authorized: false, status: 410, message: "Recording has been deleted and cannot be accessed." };
+  }
+
+  // Platform administrator operational override
+  if (isPlatformAdmin) {
+    return { 
+      authorized: true, 
+      record, 
+      status: 200, 
+      message: "Authorized as platform admin",
+      role: 'owner',
+      isOwner: true,
+      isPlatformAdmin: true,
+      permissions: { canView: true, canComment: true, canEditContent: true, canDelete: true }
+    };
+  }
+
+  const userEmail = (user.email || "").toLowerCase().trim();
+  const recordOrgId = record.orgId || record.organizationId;
+  let isOrgSupervisor = false;
+
+  // 2. Organization Scoping & Tenant Boundary Check
+  if (recordOrgId) {
+    if (userEmail) {
+      try {
+        const orgDoc = await db.collection("organizations").doc(recordOrgId).get();
+        if (orgDoc.exists) {
+          const orgData = orgDoc.data() || {};
+          if (orgData.ownerId === user.uid || (orgData.ownerEmail && orgData.ownerEmail.toLowerCase() === userEmail)) {
+            isOrgSupervisor = true;
+          }
+        }
+      } catch (e) {
+        // ignore
+      }
+
+      if (!isOrgSupervisor) {
+        const orgAccess = await checkOrgAccess(db, userEmail, recordOrgId, ["owner", "org_admin", "team_manager", "member", "viewer"]);
+        if (!orgAccess.hasAccess) {
+          // Tenant isolation: caller does not belong to the organization owning this recording!
+          return { authorized: false, status: 403, message: "Tenant isolation: Access denied to organization recording." };
+        }
+        if (orgAccess.role === 'owner' || orgAccess.role === 'org_admin') {
+          isOrgSupervisor = true;
+        }
+      }
+    } else {
+      return { authorized: false, status: 403, message: "Tenant isolation: Missing verified email for organization verification." };
+    }
+
+    // Org Owner / Org Admin retain supervisory access to all organization recordings
+    if (isOrgSupervisor) {
+      return {
+        authorized: true,
+        record,
+        status: 200,
+        message: "Authorized via organization administrative supervisor",
+        role: 'admin',
+        isOwner: record.userId === user.uid,
+        isOrgAdmin: true,
+        permissions: { canView: true, canComment: true, canEditContent: true, canDelete: true }
+      };
+    }
+  }
+
+  // 3. Project-level membership resolution
+  const projectId = record.projectId;
+  if (projectId) {
+    const projAccess = await resolveProjectAccess(db, user, projectId);
+    if (projAccess.hasAccess) {
+      const pRole = projAccess.role;
+      const isRecOwner = record.userId === user.uid;
+      const isProjOwner = projAccess.isOwner || projAccess.isDirectCreator;
+
+      const canView = true;
+      const canComment = pRole === 'owner' || pRole === 'admin' || pRole === 'commenter';
+      const canEditContent = pRole === 'owner' || pRole === 'admin' || isRecOwner;
+      const canDelete = isRecOwner || isProjOwner || projAccess.isOrgAdmin;
+
+      if (options?.requiredAction === 'DELETE' && !canDelete) {
+        return { authorized: false, status: 403, message: "Permission denied: Only the recording owner or project administrator can delete this recording." };
+      }
+      if (options?.requiredAction === 'EDIT_CONTENT' && !canEditContent) {
+        return { authorized: false, status: 403, message: "Permission denied: Your role does not allow editing or mutating this recording." };
+      }
+      if (options?.requiredAction === 'COMMENT' && !canComment) {
+        return { authorized: false, status: 403, message: "Permission denied: Your role does not allow commenting on this recording." };
+      }
+
+      return {
+        authorized: true,
+        record,
+        status: 200,
+        message: `Authorized via project ${pRole} role`,
+        role: pRole,
+        isOwner: isRecOwner || isProjOwner,
+        permissions: { canView, canComment, canEditContent, canDelete }
+      };
+    }
+  }
+
+  // 4. Direct ownership of the recording
+  if (record.userId === user.uid) {
+    return {
+      authorized: true,
+      record,
+      status: 200,
+      message: "Authorized as recording owner",
+      role: 'owner',
+      isOwner: true,
+      permissions: { canView: true, canComment: true, canEditContent: true, canDelete: true }
+    };
+  }
+
+  // 5. Explicit collaborators list (read/comment only; no edit content or deletion)
+  if (Array.isArray(record.collaborators)) {
+    const isCollaborator = record.collaborators.some((c: any) => 
+      c === user.uid ||
+      c?.userId === user.uid ||
+      (c?.email && userEmail && c.email.toLowerCase() === userEmail)
+    );
+    if (isCollaborator) {
+      if (options?.requiredAction === 'DELETE' || options?.requiredAction === 'EDIT_CONTENT') {
+        return { authorized: false, status: 403, message: "Collaborators have view and comment access only." };
+      }
+      return { 
+        authorized: true, 
+        record, 
+        status: 200, 
+        message: "Authorized as collaborator",
+        role: 'commenter',
+        isOwner: false,
+        permissions: { canView: true, canComment: true, canEditContent: false, canDelete: false }
+      };
+    }
+  }
+
+  return { authorized: false, status: 403, message: "Access denied. You do not have permission to access this recording." };
+}
+
+/**
+ * Unified resource access verification for AI inference and media conversion pipelines.
+ */
+export async function verifyAiResourceAccess(
+  db: admin.firestore.Firestore,
+  user: any,
+  options: {
+    recordingId?: string | null;
+    projectId?: string | null;
+    operationType: 'read' | 'write';
+  }
+): Promise<{
+  allowed: boolean;
+  status: number;
+  message: string;
+  record?: any;
+  project?: any;
+  role?: TargetProjectRole | null;
+}> {
+  if (!user || !user.uid) {
+    return { allowed: false, status: 401, message: "Authentication required" };
+  }
+
+  let resolvedRecord: any = null;
+  let resolvedProject: any = null;
+  let effectiveRole: TargetProjectRole | null = null;
+
+  // 1. Verify recording if supplied
+  if (options.recordingId && typeof options.recordingId === 'string' && options.recordingId.trim() !== '' && options.recordingId !== 'none') {
+    const recAuth = await authorizeRecordingAccess(db, user, options.recordingId.trim(), {
+      requiredAction: options.operationType === 'write' ? 'EDIT_CONTENT' : 'VIEW'
+    });
+    if (!recAuth.authorized) {
+      return { allowed: false, status: recAuth.status, message: recAuth.message };
+    }
+    resolvedRecord = recAuth.record;
+    effectiveRole = recAuth.role || null;
+  }
+
+  // 2. Verify project if supplied
+  if (options.projectId && typeof options.projectId === 'string' && options.projectId.trim() !== '' && options.projectId !== 'none') {
+    const projAuth = await resolveProjectAccess(db, user, options.projectId.trim(), {
+      requiredPermission: options.operationType === 'write' ? 'EDIT_CONTENT' : 'VIEW'
+    });
+    if (!projAuth.hasAccess) {
+      return { 
+        allowed: false, 
+        status: projAuth.notFound ? 404 : 403, 
+        message: projAuth.reason || "Access denied to requested project." 
+      };
+    }
+    resolvedProject = projAuth.project;
+    if (!effectiveRole) {
+      effectiveRole = projAuth.role;
+    }
+  }
+
+  // 3. Verify cross-resource match if both recordingId and projectId were supplied
+  if (resolvedRecord && options.projectId && typeof options.projectId === 'string' && options.projectId.trim() !== '' && options.projectId !== 'none') {
+    const recProjId = resolvedRecord.projectId;
+    if (recProjId && recProjId !== options.projectId.trim()) {
+      return {
+        allowed: false,
+        status: 400,
+        message: "Resource mismatch: Specified recording does not belong to the specified project."
+      };
+    }
+  }
+
+  return {
+    allowed: true,
+    status: 200,
+    message: "Authorized",
+    record: resolvedRecord,
+    project: resolvedProject,
+    role: effectiveRole
+  };
+}
+
 

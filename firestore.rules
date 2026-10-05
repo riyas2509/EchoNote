@@ -2,20 +2,34 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
     
-    // Default deny
+    // Default deny: Global Safety Net (Deny-by-default posture)
     match /{document=**} {
       allow read, write: if false;
     }
     
-    // Helper functions
+    // --- GLOBAL PRIMITIVES & IDENTITY HELPERS ---
     function isAuthenticated() {
       return request.auth != null;
     }
 
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
     function isAdmin() {
       return isAuthenticated() && (
-        request.auth.token.role == 'admin' ||
-        request.auth.token.platform_admin == true ||
+        (request.auth.token.email_verified == true && (
+          request.auth.token.role == 'admin' ||
+          request.auth.token.platform_admin == true
+        )) ||
         (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin')
       );
@@ -24,87 +38,608 @@ service cloud.firestore {
     function isOwner(userId) {
       return isAuthenticated() && request.auth.uid == userId;
     }
-    
+
     function isDocOwner() {
       return isAuthenticated() && request.auth.uid == resource.data.userId;
     }
 
-    function isValidId(id) {
-      return id is string && id.size() <= 128;
+    // --- ORGANIZATION ROLE & TENANT HELPERS ---
+    function hasOrgClaim(orgId) {
+      return isAuthenticated() && request.auth.token.orgId == orgId;
+    }
+
+    function isOrgOwner(orgId) {
+      return isAuthenticated() && (
+        (request.auth.token.orgId == orgId && request.auth.token.orgRole == 'owner') ||
+        (exists(/databases/$(database)/documents/organizations/$(orgId)) && 
+         (get(/databases/$(database)/documents/organizations/$(orgId)).data.ownerId == request.auth.uid ||
+          (request.auth.token.email_verified == true && get(/databases/$(database)/documents/organizations/$(orgId)).data.ownerEmail == request.auth.token.email)))
+      );
+    }
+
+    function isOrgAdmin(orgId) {
+      return isAuthenticated() && (
+        isAdmin() ||
+        isOrgOwner(orgId) ||
+        (request.auth.token.orgId == orgId && (request.auth.token.orgRole in ['org_admin', 'super_admin', 'admin'])) ||
+        (exists(/databases/$(database)/documents/orgMembers/$(request.auth.uid + "_" + orgId)) && 
+         get(/databases/$(database)/documents/orgMembers/$(request.auth.uid + "_" + orgId)).data.status == 'active' &&
+         get(/databases/$(database)/documents/orgMembers/$(request.auth.uid + "_" + orgId)).data.role in ['owner', 'org_admin', 'admin', 'super_admin'])
+      );
+    }
+
+    function isOrgManager(orgId) {
+      return isAuthenticated() && (
+        isOrgAdmin(orgId) ||
+        (request.auth.token.orgId == orgId && (request.auth.token.orgRole in ['team_manager', 'team_lead', 'manager']))
+      );
+    }
+
+    function isOrgMember(orgId) {
+      return isAuthenticated() && (
+        isOrgManager(orgId) ||
+        (request.auth.token.orgId == orgId && (request.auth.token.orgRole in ['member', 'viewer', 'guest'])) ||
+        (exists(/databases/$(database)/documents/orgMembers/$(request.auth.uid + "_" + orgId)) && 
+         get(/databases/$(database)/documents/orgMembers/$(request.auth.uid + "_" + orgId)).data.status == 'active')
+      );
+    }
+
+    // --- PROJECT TENANT & SUPERVISORY HELPERS ---
+    function hasProjectOrg(projectId) {
+      return exists(/databases/$(database)/documents/projects/$(projectId)) &&
+        'organizationId' in get(/databases/$(database)/documents/projects/$(projectId)).data &&
+        get(/databases/$(database)/documents/projects/$(projectId)).data.organizationId != null &&
+        get(/databases/$(database)/documents/projects/$(projectId)).data.organizationId != '';
+    }
+
+    function getProjectOrgId(projectId) {
+      return get(/databases/$(database)/documents/projects/$(projectId)).data.organizationId;
+    }
+
+    function isUserInProjectOrg(projectId) {
+      return !hasProjectOrg(projectId) || isOrgMember(getProjectOrgId(projectId));
+    }
+
+    function isProjectSupervisoryAdmin(projectId) {
+      return isAuthenticated() &&
+        hasProjectOrg(projectId) &&
+        isOrgAdmin(getProjectOrgId(projectId));
     }
 
     function isProjectOwner(projectId) {
-      return isAuthenticated() && get(/databases/$(database)/documents/projects/$(projectId)).data.userId == request.auth.uid;
+      return isAuthenticated() && 
+        exists(/databases/$(database)/documents/projects/$(projectId)) && 
+        get(/databases/$(database)/documents/projects/$(projectId)).data.userId == request.auth.uid &&
+        isUserInProjectOrg(projectId);
+    }
+
+    function hasExplicitProjectRole(projectId, allowedRoles) {
+      return isAuthenticated() &&
+        isUserInProjectOrg(projectId) &&
+        exists(/databases/$(database)/documents/projectMembers/$(request.auth.uid + "_" + projectId)) &&
+        get(/databases/$(database)/documents/projectMembers/$(request.auth.uid + "_" + projectId)).data.role in allowedRoles;
+    }
+
+    // Canonical Collaboration Roles: owner, admin (includes legacy editor), commenter, viewer
+    function canViewProject(projectId) {
+      return isAuthenticated() && (
+        isAdmin() ||
+        isProjectOwner(projectId) ||
+        isProjectSupervisoryAdmin(projectId) ||
+        hasExplicitProjectRole(projectId, ['owner', 'admin', 'editor', 'commenter', 'viewer'])
+      );
+    }
+
+    function canCommentProject(projectId) {
+      return isAuthenticated() && (
+        isAdmin() ||
+        isProjectOwner(projectId) ||
+        isProjectSupervisoryAdmin(projectId) ||
+        hasExplicitProjectRole(projectId, ['owner', 'admin', 'editor', 'commenter'])
+      );
+    }
+
+    function canEditProjectContent(projectId) {
+      return isAuthenticated() && (
+        isAdmin() ||
+        isProjectOwner(projectId) ||
+        isProjectSupervisoryAdmin(projectId) ||
+        hasExplicitProjectRole(projectId, ['owner', 'admin', 'editor'])
+      );
+    }
+
+    function canManageProjectMembers(projectId) {
+      return isAuthenticated() && (
+        isAdmin() ||
+        isProjectOwner(projectId) ||
+        isProjectSupervisoryAdmin(projectId) ||
+        hasExplicitProjectRole(projectId, ['owner', 'admin', 'editor'])
+      );
+    }
+
+    function isProjectAdmin(projectId) {
+      return isAuthenticated() && (
+        isAdmin() ||
+        isProjectOwner(projectId) ||
+        isProjectSupervisoryAdmin(projectId) ||
+        hasExplicitProjectRole(projectId, ['owner', 'admin', 'editor'])
+      );
     }
 
     function isProjectMember(projectId) {
-      return isAuthenticated() && (
-        // Check if owner
-        (exists(/databases/$(database)/documents/projects/$(projectId)) && 
-         get(/databases/$(database)/documents/projects/$(projectId)).data.userId == request.auth.uid) ||
-        // Check if member
-        exists(/databases/$(database)/documents/projectMembers/$(request.auth.uid + "_" + projectId))
-      );
+      return canViewProject(projectId);
     }
+
+    // --- VALIDATION BLUEPRINTS ---
+    function isValidUserProfile(data) {
+      return data.email is string && data.email.size() > 0 && data.email.size() <= 256 &&
+        (!('displayName' in data) || (data.displayName is string && data.displayName.size() <= 128)) &&
+        (!('role' in data) || data.role in ['user', 'member', 'admin']) &&
+        (!('plan' in data) || data.plan in ['free', 'pro', 'enterprise', 'growth', 'unlimited']);
+    }
+
+    function isValidProject(data) {
+      return data.name is string && data.name.size() > 0 && data.name.size() <= 200 &&
+        data.userId is string && data.userId.size() > 0 && data.userId.size() <= 128 &&
+        (!('description' in data) || (data.description is string && data.description.size() <= 2000)) &&
+        (!('organizationId' in data) || data.organizationId == null || (data.organizationId is string && data.organizationId.size() <= 128)) &&
+        (!('orgId' in data) || data.orgId == null || (data.orgId is string && data.orgId.size() <= 128));
+    }
+
+    function isValidProjectMember(data) {
+      return data.userId is string && data.userId.size() > 0 && data.userId.size() <= 128 &&
+        data.projectId is string && data.projectId.size() > 0 && data.projectId.size() <= 128 &&
+        data.role in ['owner', 'admin', 'editor', 'commenter', 'viewer'] &&
+        (!('email' in data) || (data.email is string && data.email.size() <= 256)) &&
+        (!('displayName' in data) || (data.displayName is string && data.displayName.size() <= 128));
+    }
+
+    function isValidTask(data) {
+      return data.projectId is string && data.projectId.size() > 0 && data.projectId.size() <= 128 &&
+        data.title is string && data.title.size() > 0 && data.title.size() <= 300 &&
+        (!('description' in data) || (data.description is string && data.description.size() <= 5000)) &&
+        (!('assigneeEmail' in data) || (data.assigneeEmail is string && data.assigneeEmail.size() <= 256)) &&
+        (!('assigneeName' in data) || (data.assigneeName is string && data.assigneeName.size() <= 128)) &&
+        (!('assigneeId' in data) || (data.assigneeId is string && data.assigneeId.size() <= 128)) &&
+        (!('status' in data) || data.status in ['pending', 'in_progress', 'completed']) &&
+        (!('priority' in data) || data.priority in ['low', 'medium', 'high', 'urgent']) &&
+        (!('dueDate' in data) || (data.dueDate is string && data.dueDate.size() <= 64)) &&
+        (!('subTasks' in data) || (data.subTasks is list && data.subTasks.size() <= 50)) &&
+        (!('activityHistory' in data) || (data.activityHistory is list && data.activityHistory.size() <= 200)) &&
+        (!('createdBy' in data) || (data.createdBy is string && data.createdBy.size() <= 128)) &&
+        (!('creatorEmail' in data) || (data.creatorEmail is string && data.creatorEmail.size() <= 256));
+    }
+
+    function isValidComment(data) {
+      return data.projectId is string && data.projectId.size() > 0 && data.projectId.size() <= 128 &&
+        data.recordingId is string && data.recordingId.size() > 0 && data.recordingId.size() <= 128 &&
+        data.userId is string && data.userId.size() > 0 && data.userId.size() <= 128 &&
+        data.content is string && data.content.size() > 0 && data.content.size() <= 5000 &&
+        (!('orgId' in data) || data.orgId == null || (data.orgId is string && data.orgId.size() <= 128)) &&
+        (!('organizationId' in data) || data.organizationId == null || (data.organizationId is string && data.organizationId.size() <= 128)) &&
+        (!('userEmail' in data) || (data.userEmail is string && data.userEmail.size() <= 256)) &&
+        (!('userName' in data) || (data.userName is string && data.userName.size() <= 128));
+    }
+
+    function isValidInvite(data) {
+      return data.email is string && data.email.size() > 0 && data.email.size() <= 256 &&
+        data.projectId is string && data.projectId.size() > 0 && data.projectId.size() <= 128 &&
+        data.role in ['admin', 'editor', 'commenter', 'viewer'] &&
+        (!('status' in data) || data.status in ['pending', 'accepted', 'declined', 'revoked']) &&
+        (!('projectName' in data) || (data.projectName is string && data.projectName.size() <= 200)) &&
+        (!('invitedBy' in data) || (data.invitedBy is string && data.invitedBy.size() <= 256));
+    }
+
+    function isValidRecording(data) {
+      return data.userId is string && data.userId.size() > 0 && data.userId.size() <= 128 &&
+        (!('title' in data) || (data.title is string && data.title.size() <= 300)) &&
+        (!('fileName' in data) || (data.fileName is string && data.fileName.size() <= 300)) &&
+        (!('projectId' in data) || data.projectId == null || (data.projectId is string && data.projectId.size() <= 128)) &&
+        (!('organizationId' in data) || data.organizationId == null || (data.organizationId is string && data.organizationId.size() <= 128)) &&
+        (!('group' in data) || data.group == null || (data.group is string && data.group.size() <= 128));
+    }
+
+    function isValidTranscription(data) {
+      return data.userId is string && data.userId.size() > 0 && data.userId.size() <= 128 &&
+        (!('title' in data) || (data.title is string && data.title.size() <= 300)) &&
+        (!('fileName' in data) || (data.fileName is string && data.fileName.size() <= 300)) &&
+        (!('projectId' in data) || data.projectId == null || (data.projectId is string && data.projectId.size() <= 128)) &&
+        (!('organizationId' in data) || data.organizationId == null || (data.organizationId is string && data.organizationId.size() <= 128)) &&
+        (!('group' in data) || data.group == null || (data.group is string && data.group.size() <= 128));
+    }
+
+    function isValidProjectActivity(data) {
+      return data.projectId is string && data.projectId.size() > 0 && data.projectId.size() <= 128 &&
+        data.userId is string && data.userId.size() > 0 && data.userId.size() <= 128 &&
+        data.actionType is string && data.actionType.size() > 0 && data.actionType.size() <= 100 &&
+        data.description is string && data.description.size() > 0 && data.description.size() <= 2000 &&
+        (!('userEmail' in data) || (data.userEmail is string && data.userEmail.size() <= 256)) &&
+        (!('userName' in data) || (data.userName is string && data.userName.size() <= 128));
+    }
+
+    function isValidNotification(data) {
+      return data.title is string && data.title.size() > 0 && data.title.size() <= 300 &&
+        data.message is string && data.message.size() > 0 && data.message.size() <= 2000 &&
+        (!('userId' in data) || (data.userId is string && data.userId.size() <= 128)) &&
+        (!('userEmail' in data) || (data.userEmail is string && data.userEmail.size() <= 256)) &&
+        (!('projectId' in data) || (data.projectId is string && data.projectId.size() <= 128)) &&
+        (!('taskId' in data) || (data.taskId is string && data.taskId.size() <= 128)) &&
+        (!('type' in data) || data.type in ['audio', 'text', 'error', 'success', 'info']);
+    }
+
+    // --- COLLECTION RULES ---
 
     // User Profiles - strictly isolate tenant & prevent privilege escalation
     match /users/{userId} {
       allow read: if isOwner(userId) || isAdmin();
-      // Users can initialize profile, but cannot self-assign platform admin or elevated roles
-      allow create: if isOwner(userId) && 
-        (!('role' in request.resource.data) || request.resource.data.role != 'admin') &&
-        (!('platform_admin' in request.resource.data) || request.resource.data.platform_admin != true);
-      // Users cannot modify role, platform_admin, or authoritative billing fields (handled strictly by server Admin SDK)
-      allow update: if isOwner(userId) && 
-        !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role', 'platform_admin', 'claims', 'monthlyMinuteLimit', 'monthlyThinkingLimit']);
+      // Users can initialize profile with self-service fields, but cannot self-assign privileged fields
+      allow create: if isOwner(userId) && isValidUserProfile(request.resource.data) &&
+        (!('role' in request.resource.data) || request.resource.data.role in ['user', 'member']) &&
+        (!('platform_admin' in request.resource.data) || request.resource.data.platform_admin != true) &&
+        !request.resource.data.keys().hasAny([
+          'claims', 'monthlyMinuteLimit', 'monthlyThinkingLimit',
+          'organizationId', 'orgId', 'orgRole', 'subscriptionId', 'customerId', 'billingStatus'
+        ]) &&
+        (!('plan' in request.resource.data) || request.resource.data.plan == 'free');
+      // Users cannot modify role, platform_admin, orgRole, or authoritative billing/plan fields (handled strictly by server Admin SDK)
+      allow update: if (isOwner(userId) || isAdmin()) && isValidUserProfile(request.resource.data) &&
+        (isAdmin() || !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+          'role', 'platform_admin', 'claims', 'monthlyMinuteLimit', 'monthlyThinkingLimit',
+          'plan', 'organizationId', 'orgId', 'orgRole', 'subscriptionId', 'customerId',
+          'billingStatus', 'isOwner', 'paymentMethods'
+        ]));
       allow delete: if isAdmin();
     }
     
-    // Projects
+    // Projects - centralized collaboration authorization
     match /projects/{projectId} {
-      allow read: if isAuthenticated() && (
+      allow get: if isAuthenticated() && canViewProject(projectId);
+      allow list: if isAuthenticated() && (
         isAdmin() ||
-        resource.data.userId == request.auth.uid || 
-        isProjectMember(projectId)
+        resource.data.userId == request.auth.uid ||
+        canViewProject(resource.data.id) ||
+        canViewProject(projectId)
       );
-      allow create, update: if isAuthenticated() && (isAdmin() || resource == null || resource.data.userId == request.auth.uid);
-      allow delete: if isAdmin(); // Direct client-side deletion forbidden for standard users. Use server-authoritative DELETE /api/projects/:projectId
+      allow create: if isAuthenticated() && 
+        isValidId(projectId) &&
+        isValidProject(request.resource.data) &&
+        request.resource.data.userId == request.auth.uid &&
+        (
+          !('organizationId' in request.resource.data) ||
+          request.resource.data.organizationId == null ||
+          request.resource.data.organizationId == '' ||
+          isOrgMember(request.resource.data.organizationId)
+        );
+      allow update: if isAuthenticated() && 
+        isValidId(projectId) &&
+        isValidProject(request.resource.data) &&
+        request.resource.data.userId == resource.data.userId &&
+        (isAdmin() || resource.data.userId == request.auth.uid || isProjectAdmin(projectId)) &&
+        !request.resource.data.diff(resource.data).affectedKeys().hasAny(['userId', 'id', 'organizationId', 'orgId']);
+      allow delete: if isAdmin(); // Direct client-side deletion forbidden for standard users. Standard users use server-authoritative DELETE /api/projects/:projectId
     }
 
-    // Project Members
+    // Project Members - strict RBAC, no self-join, anti-privilege escalation
     match /projectMembers/{memberId} {
-      allow read: if isAuthenticated();
+      allow get: if isAuthenticated() && (
+        isAdmin() ||
+        resource.data.userId == request.auth.uid ||
+        canViewProject(resource.data.projectId)
+      );
+      allow list: if isAuthenticated() && (
+        isAdmin() ||
+        resource.data.userId == request.auth.uid ||
+        canViewProject(resource.data.projectId)
+      );
       allow create: if isAuthenticated() && 
-        (isAdmin() || request.resource.data.userId == request.auth.uid);
+        isValidId(memberId) &&
+        isValidProjectMember(request.resource.data) &&
+        exists(/databases/$(database)/documents/projects/$(request.resource.data.projectId)) &&
+        request.resource.data.role != 'owner' &&
+        memberId == request.resource.data.userId + "_" + request.resource.data.projectId &&
+        (
+          isAdmin() ||
+          canManageProjectMembers(request.resource.data.projectId)
+        );
+      allow update: if isAuthenticated() && 
+        isValidId(memberId) &&
+        isValidProjectMember(request.resource.data) &&
+        request.resource.data.userId == resource.data.userId &&
+        request.resource.data.projectId == resource.data.projectId &&
+        !request.resource.data.diff(resource.data).affectedKeys().hasAny(['userId', 'projectId', 'id', 'organizationId']) &&
+        (
+          // Case 1: Role/metadata updates by project authority (owner/admin/orgSupervisor/platformAdmin)
+          // Users cannot elevate their own permissions, and cannot grant 'owner' status
+          (
+            canManageProjectMembers(resource.data.projectId) &&
+            (resource.data.userId != request.auth.uid || isAdmin()) &&
+            request.resource.data.role != 'owner' &&
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['role', 'displayName', 'email', 'lastActive', 'joinedAt'])
+          ) ||
+          // Case 2: Self-update of non-role fields only (displayName, email, lastActive)
+          (
+            resource.data.userId == request.auth.uid &&
+            request.resource.data.role == resource.data.role &&
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['displayName', 'email', 'lastActive'])
+          )
+        );
       allow delete: if isAuthenticated() && (
         isAdmin() ||
-        resource.data.userId == request.auth.uid || 
-        isProjectOwner(resource.data.projectId)
+        canManageProjectMembers(resource.data.projectId) ||
+        (resource.data.userId == request.auth.uid && resource.data.role != 'owner')
       );
     }
 
-    // Invitations
+    // Tasks (Assigned Project Tasks) - viewers and commenters cannot mutate tasks
+    match /tasks/{taskId} {
+      allow get: if isAuthenticated() && (
+        isAdmin() ||
+        canViewProject(resource.data.projectId)
+      );
+      allow list: if isAuthenticated() && (
+        isAdmin() ||
+        canViewProject(resource.data.projectId)
+      );
+      allow create: if isAuthenticated() && 
+        isValidId(taskId) &&
+        isValidTask(request.resource.data) &&
+        exists(/databases/$(database)/documents/projects/$(request.resource.data.projectId)) &&
+        canEditProjectContent(request.resource.data.projectId) &&
+        (!('createdBy' in request.resource.data) || request.resource.data.createdBy == request.auth.uid);
+      allow update: if isAuthenticated() && 
+        isValidId(taskId) &&
+        isValidTask(request.resource.data) &&
+        request.resource.data.projectId == resource.data.projectId &&
+        canEditProjectContent(resource.data.projectId) &&
+        !request.resource.data.diff(resource.data).affectedKeys().hasAny(['projectId', 'id', 'createdBy']) &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'title', 'description', 'assigneeEmail', 'assigneeName', 'assigneeId',
+          'status', 'priority', 'dueDate', 'subTasks', 'activityHistory', 'updatedAt'
+        ]);
+      allow delete: if isAuthenticated() && (
+        isAdmin() ||
+        isProjectAdmin(resource.data.projectId) ||
+        (resource.data.createdBy == request.auth.uid && canEditProjectContent(resource.data.projectId))
+      );
+    }
+
+    // Comments on Project Recordings - authenticated project commenters/admins/owners
+    match /comments/{commentId} {
+      allow get: if isAuthenticated() && (
+        isAdmin() ||
+        canViewProject(resource.data.projectId)
+      );
+      allow list: if isAuthenticated() && (
+        isAdmin() ||
+        canViewProject(resource.data.projectId)
+      );
+      allow create: if isAuthenticated() && 
+        isValidId(commentId) &&
+        isValidComment(request.resource.data) &&
+        request.resource.data.userId == request.auth.uid &&
+        exists(/databases/$(database)/documents/projects/$(request.resource.data.projectId)) &&
+        canCommentProject(request.resource.data.projectId) &&
+        (
+          !hasProjectOrg(request.resource.data.projectId) ||
+          (!('orgId' in request.resource.data) || request.resource.data.orgId == null || request.resource.data.orgId == getProjectOrgId(request.resource.data.projectId))
+        );
+      allow update: if isAuthenticated() && 
+        isValidId(commentId) &&
+        isValidComment(request.resource.data) &&
+        request.resource.data.userId == resource.data.userId &&
+        request.resource.data.recordingId == resource.data.recordingId &&
+        request.resource.data.projectId == resource.data.projectId &&
+        !request.resource.data.diff(resource.data).affectedKeys().hasAny(['userId', 'recordingId', 'projectId', 'orgId', 'organizationId', 'id', 'createdAt']) &&
+        (
+          // Author edit: content & updatedAt only
+          (resource.data.userId == request.auth.uid && canCommentProject(resource.data.projectId) && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['content', 'updatedAt'])) ||
+          // Admin / Owner moderation edit
+          (isProjectAdmin(resource.data.projectId) && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['content', 'updatedAt']))
+        );
+      allow delete: if isAuthenticated() && (
+        isAdmin() ||
+        (resource.data.userId == request.auth.uid && canCommentProject(resource.data.projectId)) ||
+        isProjectAdmin(resource.data.projectId)
+      );
+    }
+
+    // In-App Notifications
+    match /notifications/{notificationId} {
+      allow get: if isAuthenticated() && (
+        isAdmin() ||
+        resource.data.userId == request.auth.uid ||
+        resource.data.userEmail == request.auth.token.email
+      );
+      allow list: if isAuthenticated() && (
+        isAdmin() ||
+        resource.data.userId == request.auth.uid ||
+        resource.data.userEmail == request.auth.token.email
+      );
+      allow create: if isAuthenticated() && 
+        isValidId(notificationId) &&
+        isValidNotification(request.resource.data);
+      allow update: if isAuthenticated() && (
+        isAdmin() ||
+        resource.data.userId == request.auth.uid ||
+        resource.data.userEmail == request.auth.token.email
+      ) && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isRead']);
+      allow delete: if isAuthenticated() && (
+        isAdmin() ||
+        resource.data.userId == request.auth.uid ||
+        resource.data.userEmail == request.auth.token.email
+      );
+    }
+
+    // Invitations (Project Invites) - only project admins/owners can create
     match /invites/{inviteId} {
-      allow read: if true; // Needed for join page validation before login if needed, or just let everyone see if they have the token
-      allow create: if isAuthenticated(); // Ideally check if project owner
-      allow update: if isAuthenticated() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status']);
+      allow get: if true; // Public join token validation
+      allow list: if isAuthenticated() && (
+        isAdmin() ||
+        canViewProject(resource.data.projectId)
+      );
+      allow create: if isAuthenticated() && 
+        isValidId(inviteId) &&
+        isValidInvite(request.resource.data) &&
+        request.resource.data.role != 'owner' &&
+        (isAdmin() || isProjectAdmin(request.resource.data.projectId));
+      allow update: if isAuthenticated() && 
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'status', 'acceptedAt', 'acceptedBy', 'declinedAt', 'declinedBy'
+        ]) &&
+        request.resource.data.status in ['accepted', 'declined', 'revoked'] &&
+        (
+          isAdmin() ||
+          isProjectAdmin(resource.data.projectId) ||
+          (request.resource.data.status in ['accepted', 'declined'] &&
+           (request.resource.data.acceptedBy == request.auth.uid || request.resource.data.declinedBy == request.auth.uid))
+        );
+      allow delete: if isAuthenticated() && (
+        isAdmin() ||
+        isProjectAdmin(resource.data.projectId)
+      );
     }
     
-    // Recordings
+    // Recordings - hardened project & tenant access control
     match /recordings/{recordingId} {
-       allow read: if isAdmin() || isProjectMember(resource.data.group) || isProjectMember(resource.data.projectId) || isOwner(resource.data.userId);
-       allow write: if isAuthenticated() && (isAdmin() || resource == null || isProjectMember(request.resource.data.projectId) || isOwner(request.resource.data.userId));
+       allow get: if isAuthenticated() && (
+         isAdmin() || 
+         resource.data.userId == request.auth.uid ||
+         (resource.data.projectId != null && resource.data.projectId != '' && canViewProject(resource.data.projectId)) ||
+         (resource.data.group != null && resource.data.group != '' && canViewProject(resource.data.group))
+       );
+       allow list: if isAuthenticated() && (
+         isAdmin() || 
+         resource.data.userId == request.auth.uid ||
+         (resource.data.projectId != null && resource.data.projectId != '' && canViewProject(resource.data.projectId)) ||
+         (resource.data.group != null && resource.data.group != '' && canViewProject(resource.data.group))
+       );
+       allow create: if isAuthenticated() && 
+         isValidId(recordingId) &&
+         isValidRecording(request.resource.data) &&
+         request.resource.data.userId == request.auth.uid &&
+         (
+           // Personal/standalone recording
+           ((!('projectId' in request.resource.data) || 
+             request.resource.data.projectId == null ||
+             request.resource.data.projectId == '') &&
+            (!('organizationId' in request.resource.data) ||
+             request.resource.data.organizationId == null ||
+             request.resource.data.organizationId == '' ||
+             isOrgMember(request.resource.data.organizationId))) ||
+           // Project recording: user must hold edit content permissions in project (owner, admin, editor)
+           (
+             request.resource.data.projectId != null &&
+             request.resource.data.projectId != '' &&
+             exists(/databases/$(database)/documents/projects/$(request.resource.data.projectId)) &&
+             canEditProjectContent(request.resource.data.projectId) &&
+             (
+               !('organizationId' in request.resource.data) ||
+               request.resource.data.organizationId == null ||
+               !hasProjectOrg(request.resource.data.projectId) ||
+               request.resource.data.organizationId == getProjectOrgId(request.resource.data.projectId)
+             )
+           )
+         );
+       allow update: if isAuthenticated() && 
+         isValidId(recordingId) &&
+         isValidRecording(request.resource.data) &&
+         request.resource.data.userId == resource.data.userId &&
+         !request.resource.data.diff(resource.data).affectedKeys().hasAny(['projectId', 'organizationId', 'userId', 'id']) &&
+         (
+           // Standalone recording update
+           (!('projectId' in resource.data) || resource.data.projectId == null || resource.data.projectId == '') ?
+           (isAdmin() || resource.data.userId == request.auth.uid) :
+           // Project recording update: requires content edit role (admin, editor, owner)
+           (isAdmin() || canEditProjectContent(resource.data.projectId))
+         );
+       allow delete: if isAuthenticated() && (
+         isAdmin() || 
+         // Standalone recording deletion
+         ((!('projectId' in resource.data) || resource.data.projectId == null || resource.data.projectId == '') && resource.data.userId == request.auth.uid) ||
+         // Project recording delete access: project owner, supervisory admin, or creator with content edit permissions
+         (
+           resource.data.projectId != null && resource.data.projectId != '' &&
+           (
+             isProjectOwner(resource.data.projectId) ||
+             isProjectSupervisoryAdmin(resource.data.projectId) ||
+             (resource.data.userId == request.auth.uid && canEditProjectContent(resource.data.projectId))
+           )
+         )
+       );
     }
     
-    // Transcriptions
+    // Transcriptions - hardened project & tenant access control
     match /transcriptions/{transcriptionId} {
-       allow read: if isAdmin() || isProjectMember(resource.data.group) || isProjectMember(resource.data.projectId) || isOwner(resource.data.userId);
-       allow write: if isAuthenticated() && (isAdmin() || resource == null || isProjectMember(request.resource.data.projectId) || isOwner(request.resource.data.userId));
+       allow get: if isAuthenticated() && (
+         isAdmin() || 
+         resource.data.userId == request.auth.uid ||
+         (resource.data.projectId != null && resource.data.projectId != '' && canViewProject(resource.data.projectId)) ||
+         (resource.data.group != null && resource.data.group != '' && canViewProject(resource.data.group))
+       );
+       allow list: if isAuthenticated() && (
+         isAdmin() || 
+         resource.data.userId == request.auth.uid ||
+         (resource.data.projectId != null && resource.data.projectId != '' && canViewProject(resource.data.projectId)) ||
+         (resource.data.group != null && resource.data.group != '' && canViewProject(resource.data.group))
+       );
+       allow create: if isAuthenticated() && 
+         isValidId(transcriptionId) &&
+         isValidTranscription(request.resource.data) &&
+         request.resource.data.userId == request.auth.uid &&
+         (
+           // Personal/standalone transcription
+           ((!('projectId' in request.resource.data) || 
+             request.resource.data.projectId == null ||
+             request.resource.data.projectId == '') &&
+            (!('organizationId' in request.resource.data) ||
+             request.resource.data.organizationId == null ||
+             request.resource.data.organizationId == '' ||
+             isOrgMember(request.resource.data.organizationId))) ||
+           // Project transcription: requires content edit role (admin, editor, owner)
+           (
+             request.resource.data.projectId != null &&
+             request.resource.data.projectId != '' &&
+             exists(/databases/$(database)/documents/projects/$(request.resource.data.projectId)) &&
+             canEditProjectContent(request.resource.data.projectId) &&
+             (
+               !('organizationId' in request.resource.data) ||
+               request.resource.data.organizationId == null ||
+               !hasProjectOrg(request.resource.data.projectId) ||
+               request.resource.data.organizationId == getProjectOrgId(request.resource.data.projectId)
+             )
+           )
+         );
+       allow update: if isAuthenticated() && 
+         isValidId(transcriptionId) &&
+         isValidTranscription(request.resource.data) &&
+         request.resource.data.userId == resource.data.userId &&
+         !request.resource.data.diff(resource.data).affectedKeys().hasAny(['projectId', 'organizationId', 'userId', 'id']) &&
+         (
+           // Standalone transcription update
+           (!('projectId' in resource.data) || resource.data.projectId == null || resource.data.projectId == '') ?
+           (isAdmin() || resource.data.userId == request.auth.uid) :
+           // Project transcription update: requires content edit role
+           (isAdmin() || canEditProjectContent(resource.data.projectId))
+         );
+       allow delete: if isAuthenticated() && (
+         isAdmin() || 
+         // Standalone transcription deletion
+         ((!('projectId' in resource.data) || resource.data.projectId == null || resource.data.projectId == '') && resource.data.userId == request.auth.uid) ||
+         // Project transcription delete access
+         (
+           resource.data.projectId != null && resource.data.projectId != '' &&
+           (
+             isProjectOwner(resource.data.projectId) ||
+             isProjectSupervisoryAdmin(resource.data.projectId) ||
+             (resource.data.userId == request.auth.uid && canEditProjectContent(resource.data.projectId))
+           )
+         )
+       );
     }
     
     // Usage
     match /usage/{userId} {
-      allow read: if isOwner(userId);
+      allow read: if isOwner(userId) || isAdmin();
       allow write: if isOwner(userId);
     }
 
@@ -118,29 +653,68 @@ service cloud.firestore {
                data.output is map;
       }
       
-      allow read: if isAuthenticated() && (resource.data.userId == request.auth.uid);
+      allow read: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
       allow create: if isAuthenticated() && isValidDecisionHistory(request.resource.data) && (request.resource.data.createdAt == request.time || request.resource.data.createdAt == null);
-      allow update: if false; // Decisions are immutable record of analysis
-      allow delete: if isAuthenticated() && resource.data.userId == request.auth.uid;
+      allow update: if false; // Decisions are immutable records of analysis
+      allow delete: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
     }
     
-    // Subscriptions
+    // Subscriptions - strictly server-authoritative
     match /subscriptions/{id} {
-      allow read: if isAuthenticated() && resource.data.userId == request.auth.uid;
-      allow write: if false; // Only server-side or admin
+      allow read: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow write: if false; // Only server-side Admin SDK
     }
 
-    // Transactions / Billing History
+    // Transactions / Billing History - strictly server-authoritative
     match /transactions/{id} {
-      allow read: if isAuthenticated() && (resource.data.userId == request.auth.uid);
-      allow write: if isAuthenticated() && (request.resource.data.userId == request.auth.uid);
+      allow read: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow write: if false; // Only server-side Admin SDK writes financial transaction records
+    }
+
+    // Orders - strictly server-authoritative
+    match /orders/{orderId} {
+      allow read: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow write: if false; // Only server-side Admin SDK writes order state
+    }
+
+    // Webhook Events - strictly server-authoritative
+    match /webhook_events/{eventId} {
+      allow read: if isAdmin();
+      allow write: if false; // Only server-side Admin SDK writes webhook event records
+    }
+
+    // Platform Audit Logs - strictly server-authoritative
+    match /authAuditLogs/{logId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
+    match /auditLogs/{logId} {
+      allow read: if isAdmin();
+      allow write: if false;
     }
 
     // Project Activities
     match /projectActivities/{id} {
-      allow read: if isAuthenticated();
-      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
-      allow delete: if isAuthenticated() && (resource.data.userId == request.auth.uid || isProjectOwner(resource.data.projectId));
+      allow get: if isAuthenticated() && (
+        isAdmin() ||
+        canViewProject(resource.data.projectId)
+      );
+      allow list: if isAuthenticated() && (
+        isAdmin() ||
+        canViewProject(resource.data.projectId)
+      );
+      allow create: if isAuthenticated() && 
+        isValidId(id) &&
+        isValidProjectActivity(request.resource.data) &&
+        request.resource.data.userId == request.auth.uid &&
+        canViewProject(request.resource.data.projectId);
+      allow update: if false; // Activities are immutable audit trails
+      allow delete: if isAuthenticated() && (
+        isAdmin() ||
+        isProjectOwner(resource.data.projectId) ||
+        isProjectSupervisoryAdmin(resource.data.projectId)
+      );
     }
     
     // Health Check & Connection Test
@@ -190,59 +764,32 @@ service cloud.firestore {
       allow write: if false;
     }
 
-    // Organization Role & Custom Claims Helpers
-    function hasOrgClaim(orgId) {
-      return isAuthenticated() && request.auth.token.orgId == orgId;
-    }
-
-    function isOrgOwner(orgId) {
-      return isAuthenticated() && (
-        (request.auth.token.orgId == orgId && request.auth.token.orgRole == 'owner') ||
-        (exists(/databases/$(database)/documents/organizations/$(orgId)) && 
-         (get(/databases/$(database)/documents/organizations/$(orgId)).data.ownerId == request.auth.uid ||
-          get(/databases/$(database)/documents/organizations/$(orgId)).data.ownerEmail == request.auth.token.email))
-      );
-    }
-
-    function isOrgAdmin(orgId) {
-      return isAuthenticated() && (
-        isOrgOwner(orgId) ||
-        (request.auth.token.orgId == orgId && (request.auth.token.orgRole in ['org_admin', 'super_admin', 'admin']))
-      );
-    }
-
-    function isOrgManager(orgId) {
-      return isAuthenticated() && (
-        isOrgAdmin(orgId) ||
-        (request.auth.token.orgId == orgId && (request.auth.token.orgRole in ['team_manager', 'team_lead', 'manager']))
-      );
-    }
-
-    function isOrgMember(orgId) {
-      return isAuthenticated() && (
-        isOrgManager(orgId) ||
-        (request.auth.token.orgId == orgId && (request.auth.token.orgRole in ['member', 'viewer', 'guest'])) ||
-        (exists(/databases/$(database)/documents/orgMembers/$(request.auth.uid + "_" + orgId)) && 
-         get(/databases/$(database)/documents/orgMembers/$(request.auth.uid + "_" + orgId)).data.status == 'active')
-      );
-    }
-
-    // Organizations
+    // Organizations - sensitive billing, subscription, and security fields protected from client writes
     match /organizations/{orgId} {
       allow read: if isAuthenticated() && (
+        isAdmin() ||
         isOrgMember(orgId) || 
         isOrgOwner(orgId) || 
         resource.data.ownerId == request.auth.uid || 
-        resource.data.ownerEmail == request.auth.token.email
+        (request.auth.token.email_verified == true && resource.data.ownerEmail == request.auth.token.email)
       );
       allow create: if isAuthenticated() && (
+        isAdmin() ||
         request.resource.data.ownerId == request.auth.uid || 
-        request.resource.data.ownerEmail == request.auth.token.email
-      );
-      allow update: if isAuthenticated() && isOrgAdmin(orgId) && 
+        (request.auth.token.email_verified == true && request.resource.data.ownerEmail == request.auth.token.email)
+      ) && !request.resource.data.keys().hasAny([
+        'plan', 'billingStatus', 'subscriptionId', 'seatLimit', 'tier', 'subscription'
+      ]);
+      allow update: if isAuthenticated() && (isAdmin() || isOrgAdmin(orgId)) && 
         request.resource.data.ownerId == resource.data.ownerId && 
-        request.resource.data.ownerEmail == resource.data.ownerEmail;
-      allow delete: if false; // Direct client deletion strictly forbidden to prevent orphaned subcollections and identity mappings. Use server-authoritative workflow.
+        request.resource.data.ownerEmail == resource.data.ownerEmail &&
+        (isAdmin() || !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+          'ownerId', 'ownerEmail', 'plan', 'billingPlan', 'subscriptionId', 'subscriptionStatus',
+          'billingStatus', 'seats', 'seatLimit', 'monthlySpendingLimit', 'totalSpent',
+          'stripeCustomerId', 'razorpaySubscriptionId', 'razorpayCustomerId', 'securityConfig',
+          'ssoConfig', 'idpConfig', 'authDomain', 'enforce2FA', 'allowedDomains'
+        ]));
+      allow delete: if false; // Server-authoritative deletion strictly forbidden from client SDK
 
       match /monthlyTrends/{trendId} {
         allow read: if isOrgAdmin(orgId);
@@ -267,8 +814,9 @@ service cloud.firestore {
 
     // Teams
     match /teams/{teamId} {
-      allow read: if isAuthenticated() && (isOrgMember(resource.data.orgId) || isOrgOwner(resource.data.orgId));
+      allow read: if isAuthenticated() && (isOrgMember(resource.data.orgId) || isOrgOwner(resource.data.orgId) || isAdmin());
       allow create, update, delete: if isAuthenticated() && (
+        isAdmin() ||
         isOrgManager(request.resource.data.orgId) || 
         (resource != null && isOrgManager(resource.data.orgId))
       );
@@ -276,8 +824,9 @@ service cloud.firestore {
 
     // Departments
     match /departments/{deptId} {
-      allow read: if isAuthenticated() && (isOrgMember(resource.data.orgId) || isOrgOwner(resource.data.orgId));
+      allow read: if isAuthenticated() && (isOrgMember(resource.data.orgId) || isOrgOwner(resource.data.orgId) || isAdmin());
       allow create, update, delete: if isAuthenticated() && (
+        isAdmin() ||
         isOrgAdmin(request.resource.data.orgId) || 
         (resource != null && isOrgAdmin(resource.data.orgId))
       );
@@ -286,36 +835,48 @@ service cloud.firestore {
     // Org Members (authoritatively managed by server-side Admin SDK)
     match /orgMembers/{memberId} {
       allow read: if isAuthenticated() && (
+        isAdmin() ||
         isOrgMember(resource.data.orgId) || 
         isOrgOwner(resource.data.orgId) || 
         resource.data.userId == request.auth.uid || 
-        resource.data.email == request.auth.token.email
+        (request.auth.token.email_verified == true && resource.data.email == request.auth.token.email)
       );
       allow write: if false; // Role modifications and memberships are issued authoritatively via backend
     }
 
     // Org Invoices
     match /orgInvoices/{invoiceId} {
-      allow read: if isAuthenticated() && isOrgAdmin(resource.data.orgId);
+      allow read: if isAuthenticated() && (isAdmin() || isOrgAdmin(resource.data.orgId));
       allow write: if false;
     }
 
-    // Org Invitations
+    // Org Invitations (authoritatively managed by server-side Admin SDK)
     match /orgInvitations/{inviteId} {
       allow read: if isAuthenticated() && (
+        isAdmin() ||
         isOrgAdmin(resource.data.orgId) || 
-        resource.data.email == request.auth.token.email
+        (request.auth.token.email_verified == true && resource.data.email == request.auth.token.email)
       );
       allow write: if false; // Invitations are handled authoritatively by backend
     }
 
-    // Enterprise Identity Group & Attribute Mappings (Phase 1.7)
+    // Enterprise Identity Group & Attribute Mappings
     match /orgIdentityMappings/{mappingId} {
       allow read: if isAuthenticated() && (
+        isAdmin() ||
         isOrgAdmin(resource.data.orgId) || 
         isOrgOwner(resource.data.orgId)
       );
       allow write: if false; // Identity mappings are authoritatively managed via backend endpoints
+    }
+
+    // User Integrations & OAuth states
+    match /userIntegrations/{userId} {
+      allow read, write: if isOwner(userId) || isAdmin();
+    }
+
+    match /jiraStates/{userId} {
+      allow read, write: if isOwner(userId) || isAdmin();
     }
 
     // Product Telemetry & Activation Events (Privacy-first, metadata only)

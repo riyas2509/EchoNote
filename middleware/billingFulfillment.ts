@@ -89,9 +89,16 @@ export const processedPaymentsStore = new Map<string, any>();
  * NOTE: Never uses the presence/absence of Firestore credentials to determine environment.
  */
 export function isProductionEnvironment(): boolean {
-  if (process.env.NODE_ENV === "production") return true;
-  if (process.env.RAZORPAY_MODE === "live") return true;
-  if (Boolean(process.env.K_SERVICE) && process.env.NODE_ENV !== "development" && process.env.NODE_ENV !== "test") {
+  // Explicit development or test overrides: NEVER treat as production environment
+  if (process.env.NODE_ENV === "development" || process.env.NODE_ENV === "test") {
+    return false;
+  }
+  // Cloud Run managed runtime (K_SERVICE is set by Cloud Run)
+  if (Boolean(process.env.K_SERVICE)) {
+    return true;
+  }
+  // Explicit production NODE_ENV
+  if (process.env.NODE_ENV === "production") {
     return true;
   }
   return false;
@@ -430,10 +437,9 @@ export async function fulfillTopupOrder(
     // NON-PRODUCTION DEV/SANDBOX ONLY FALLBACK:
     // Restricted to non-production environments where Firestore Admin IAM may be unavailable.
     if (isPermissionError(err)) {
-      console.warn(`⚠️ [NON-PROD DEV ONLY] [${source.toUpperCase()}] Firestore Admin write unavailable (${err?.message}). Applying non-production in-memory fallback for top-up:`, {
+      console.info(`ℹ️ [NON-PROD DEV ONLY] [${source.toUpperCase()}] Applying non-production in-memory fallback for top-up:`, {
         orderId,
-        paymentId,
-        error: err?.message || String(err)
+        paymentId
       });
       const memOrder = pendingOrdersStore.get(orderId);
       const verifiedAmount = Number(memOrder?.amount || 0);
@@ -708,10 +714,9 @@ export async function fulfillSubscriptionPayment(
     // NON-PRODUCTION DEV/SANDBOX ONLY FALLBACK:
     // Restricted to non-production environments where Firestore Admin IAM may be unavailable.
     if (isPermissionError(err)) {
-      console.warn(`⚠️ [NON-PROD DEV ONLY] [${source.toUpperCase()}] Firestore Admin write unavailable (${err?.message}). Applying non-production in-memory fallback for subscription:`, {
+      console.info(`ℹ️ [NON-PROD DEV ONLY] [${source.toUpperCase()}] Applying non-production in-memory fallback for subscription:`, {
         subscriptionId,
-        paymentId,
-        error: err?.message || String(err)
+        paymentId
       });
       const memSub = pendingSubscriptionsStore.get(subscriptionId);
       const targetUserId = memSub?.userId || callerUserId || "unknown";

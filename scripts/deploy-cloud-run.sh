@@ -2,14 +2,18 @@
 # ==============================================================================
 # EchoNote Production Cloud Run Deployment & Environment Variables Configuration
 # ==============================================================================
-# Hardened for production deployment safety.
+# Hardened for explicit immutable Docker deployment to production Cloud Run.
 #
 # Production Target Lock:
-#   Project:         echonote-2509
-#   Region:          us-west1
-#   Service:         echonote
-#   Service Account: 200551109142-compute@developer.gserviceaccount.com
-#   Razorpay Mode:   live
+#   Project:           echonote-2509
+#   Region:            us-west1
+#   Service:           echonote
+#   Service Account:   200551109142-compute@developer.gserviceaccount.com
+#   Artifact Registry: us-west1-docker.pkg.dev/echonote-2509/echonote/echonote
+#   Razorpay Mode:     live
+#
+# Baseline Production Revision:
+#   echonote-00009-w5m
 #
 # Rollback Reference:
 #   Last known verified production revision: echonote-00008-lw9
@@ -31,6 +35,8 @@ readonly EXPECTED_PROJECT_ID="echonote-2509"
 readonly EXPECTED_REGION="us-west1"
 readonly EXPECTED_SERVICE_NAME="echonote"
 readonly EXPECTED_SERVICE_ACCOUNT="200551109142-compute@developer.gserviceaccount.com"
+readonly EXPECTED_ARTIFACT_REGISTRY="us-west1-docker.pkg.dev/echonote-2509/echonote/echonote"
+readonly CURRENT_SERVING_PROD_REVISION="echonote-00009-w5m"
 readonly LAST_KNOWN_PROD_REVISION="echonote-00008-lw9"
 
 # Target variables (subject to strict validation against expected production constants)
@@ -54,6 +60,19 @@ readonly SECRET_PLAYBACK_SECRET="PLAYBACK_SECRET=echonote-playback-secret:latest
 readonly SECRET_CRON_SECRET="CRON_SECRET=echonote-cron-secret:latest"
 
 readonly CLOUD_RUN_SECRETS="${SECRET_GEMINI_API_KEY},${SECRET_RAZORPAY_KEY_SECRET},${SECRET_RAZORPAY_WEBHOOK_SECRET},${SECRET_RESEND_API_KEY},${SECRET_PLAYBACK_SECRET},${SECRET_CRON_SECRET}"
+
+# Complete set of ordinary (non-secret) production environment variables.
+# Uses --set-env-vars to replace all ordinary environment variables, ensuring complete
+# elimination of legacy plain secrets (GEMINI_API_KEY, RAZORPAY_KEY_SECRET, etc.) from
+# the ordinary env-var pool and avoiding Cloud Run type conflicts with --set-secrets.
+readonly PRODUCTION_ORDINARY_ENV_VARS="RAZORPAY_MODE=live,\
+NODE_ENV=production,\
+APP_URL=https://echonote-25.ai.studio,\
+RESEND_FROM_EMAIL=EchoNote <invitations@echotechai.in>,\
+RAZORPAY_PRO_MONTHLY_PLAN_ID=$PLAN_PRO_MONTHLY,\
+RAZORPAY_PRO_YEARLY_PLAN_ID=$PLAN_PRO_YEARLY,\
+RAZORPAY_TEAM_MONTHLY_PLAN_ID=$PLAN_TEAM_MONTHLY,\
+RAZORPAY_TEAM_YEARLY_PLAN_ID=$PLAN_TEAM_YEARLY"
 
 TARGET_RAZORPAY_MODE="live"
 ACTION="${1:-update-env}"
@@ -155,7 +174,100 @@ validate_razorpay_mode() {
 }
 
 # ------------------------------------------------------------------------------
-# 5. Local Pre-flight: npm run lint && npm run build
+# 5. Image Tag Resolution: Must be an immutable git commit SHA (reject 'latest')
+# ------------------------------------------------------------------------------
+resolve_image_tag() {
+  local tag="${IMAGE_TAG:-}"
+  if [ -z "$tag" ]; then
+    if command -v git &>/dev/null; then
+      tag="$(git rev-parse --short=12 HEAD 2>/dev/null || true)"
+    fi
+  fi
+
+  if [ -z "$tag" ]; then
+    echo "ERROR: Unable to resolve git commit SHA for immutable image tag. Aborting deployment." >&2
+    exit 1
+  fi
+
+  if [ "$tag" = "latest" ]; then
+    echo "ERROR: Mutable 'latest' tag is strictly forbidden. An immutable git commit SHA is required." >&2
+    exit 1
+  fi
+
+  # Validate that tag is a valid git commit SHA (hex string between 7 and 40 characters)
+  if ! [[ "$tag" =~ ^[a-f0-9]{7,40}$ ]]; then
+    echo "ERROR: Invalid image tag '$tag'. Must be a valid git commit SHA (hex string between 7 and 40 characters)." >&2
+    exit 1
+  fi
+
+  echo "$tag"
+}
+
+# ------------------------------------------------------------------------------
+# 6. Docker Build, Push, and Digest Resolution
+# ------------------------------------------------------------------------------
+docker_build_image() {
+  local image_uri="$1"
+
+  if ! command -v docker &>/dev/null; then
+    echo "ERROR: docker CLI is required for container build but not found in PATH." >&2
+    exit 1
+  fi
+
+  echo "======================================================================"
+  echo "Building Docker Image from repository Dockerfile..."
+  echo "Target Image URI: $image_uri"
+  echo "======================================================================"
+  if ! docker build -t "$image_uri" .; then
+    echo "ERROR: Docker build failed for '$image_uri'. Aborting deployment." >&2
+    exit 1
+  fi
+}
+
+docker_push_image() {
+  local image_uri="$1"
+
+  if ! command -v docker &>/dev/null; then
+    echo "ERROR: docker CLI is required for container push but not found in PATH." >&2
+    exit 1
+  fi
+
+  echo "======================================================================"
+  echo "Pushing Docker Image to Artifact Registry..."
+  echo "Target Image URI: $image_uri"
+  echo "======================================================================"
+  if ! docker push "$image_uri"; then
+    echo "ERROR: Docker push failed for '$image_uri'. Aborting deployment." >&2
+    exit 1
+  fi
+}
+
+resolve_image_digest() {
+  local image_uri="$1"
+  local digest=""
+
+  if command -v gcloud &>/dev/null; then
+    digest="$(gcloud artifacts docker images describe "$image_uri" --format='value(image_summary.digest)' 2>/dev/null || true)"
+  fi
+  if [ -z "$digest" ] && command -v docker &>/dev/null; then
+    digest="$(docker inspect --format='{{range .RepoDigests}}{{.}}{{"\n"}}{{end}}' "$image_uri" 2>/dev/null | grep "$EXPECTED_ARTIFACT_REGISTRY@" | head -n1 | sed -n 's/.*@\(sha256:[a-f0-9]\{64\}\).*/\1/p' || true)"
+  fi
+
+  if [ -z "$digest" ]; then
+    echo "ERROR: Failed to resolve immutable image digest for $image_uri. Aborting deployment." >&2
+    exit 1
+  fi
+
+  if ! [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+    echo "ERROR: Invalid image digest format '$digest'. Expected sha256:<64 hex chars>." >&2
+    exit 1
+  fi
+
+  echo "$digest"
+}
+
+# ------------------------------------------------------------------------------
+# 7. Local Pre-flight: npm run lint && npm run build
 # ------------------------------------------------------------------------------
 run_preflight() {
   echo "======================================================================"
@@ -180,20 +292,31 @@ run_preflight() {
 }
 
 # ------------------------------------------------------------------------------
-# 6. Safe Deployment Summary (No secrets, only validity status)
+# 8. Safe Deployment Summary (No secrets, only validity status)
 # ------------------------------------------------------------------------------
 print_deployment_summary() {
+  local image_tag="${1:-unset}"
+  local image_uri="${2:-unset}"
+
   echo "======================================================================"
   echo "Production deployment target:"
-  echo "  Project: $EXPECTED_PROJECT_ID"
-  echo "  Region: $EXPECTED_REGION"
-  echo "  Service: $EXPECTED_SERVICE_NAME"
-  echo "  Service Account: $EXPECTED_SERVICE_ACCOUNT"
-  echo "  Razorpay Mode: $TARGET_RAZORPAY_MODE"
-  echo "  Razorpay Pro Monthly Plan: VALID"
-  echo "  Razorpay Pro Yearly Plan: VALID"
-  echo "  Razorpay Team Monthly Plan: VALID"
-  echo "  Razorpay Team Yearly Plan: VALID"
+  echo "  Project:                     $EXPECTED_PROJECT_ID"
+  echo "  Region:                      $EXPECTED_REGION"
+  echo "  Service:                     $EXPECTED_SERVICE_NAME"
+  echo "  Service Account:             $EXPECTED_SERVICE_ACCOUNT"
+  echo "  Artifact Registry:           $EXPECTED_ARTIFACT_REGISTRY"
+  echo "  Immutable Image Tag:         $image_tag"
+  echo "  Full Image Target:           $image_uri"
+  echo "  Deployment Mechanism:        Explicit Immutable Docker Image"
+  echo "  Razorpay Mode:               $TARGET_RAZORPAY_MODE"
+  echo "  Razorpay Pro Monthly Plan:   VALID"
+  echo "  Razorpay Pro Yearly Plan:    VALID"
+  echo "  Razorpay Team Monthly Plan:  VALID"
+  echo "  Razorpay Team Yearly Plan:   VALID"
+  echo "  Ordinary Env Vars Mode:      Complete replacement (--set-env-vars)"
+  echo "  Ordinary Env Vars Config:    8 verified non-secret variables (zero plain secrets)"
+  echo "  Authoritative Sender:        RESEND_FROM_EMAIL=EchoNote <invitations@echotechai.in>"
+  echo "  Canonical App URL:           APP_URL=https://echonote-25.ai.studio"
   echo "  Secret Manager References (6 production secrets):"
   echo "    - GEMINI_API_KEY -> echonote-gemini-api-key:latest"
   echo "    - RAZORPAY_KEY_SECRET -> echonote-razorpay-key-secret:latest"
@@ -201,6 +324,7 @@ print_deployment_summary() {
   echo "    - RESEND_API_KEY -> echonote-resend-api-key:latest"
   echo "    - PLAYBACK_SECRET -> echonote-playback-secret:latest"
   echo "    - CRON_SECRET -> echonote-cron-secret:latest"
+  echo "  Current Serving Revision:    $CURRENT_SERVING_PROD_REVISION"
   echo "  Rollback Reference Revision: $LAST_KNOWN_PROD_REVISION"
   echo "======================================================================"
 }
@@ -211,7 +335,7 @@ case "$ACTION" in
     validate_active_gcloud_project
     validate_plan_ids
     validate_razorpay_mode
-    print_deployment_summary
+    print_deployment_summary "N/A (update-env)" "N/A (update-env)"
 
     echo "Updating Cloud Run Service Environment Variables & Secret References"
     echo "Service: $SERVICE_NAME (Region: $REGION, Project: $PROJECT_ID)"
@@ -224,12 +348,7 @@ case "$ACTION" in
     gcloud run services update "$SERVICE_NAME" \
       --project="$PROJECT_ID" \
       --region="$REGION" \
-      --update-env-vars="RAZORPAY_MODE=live,\
-NODE_ENV=production,\
-RAZORPAY_PRO_MONTHLY_PLAN_ID=$PLAN_PRO_MONTHLY,\
-RAZORPAY_PRO_YEARLY_PLAN_ID=$PLAN_PRO_YEARLY,\
-RAZORPAY_TEAM_MONTHLY_PLAN_ID=$PLAN_TEAM_MONTHLY,\
-RAZORPAY_TEAM_YEARLY_PLAN_ID=$PLAN_TEAM_YEARLY" \
+      --set-env-vars="$PRODUCTION_ORDINARY_ENV_VARS" \
       --set-secrets="$CLOUD_RUN_SECRETS"
 
     echo "✅ Cloud Run environment variables successfully updated."
@@ -242,32 +361,111 @@ RAZORPAY_TEAM_YEARLY_PLAN_ID=$PLAN_TEAM_YEARLY" \
     validate_plan_ids
     validate_razorpay_mode
     run_preflight
-    print_deployment_summary
 
-    echo "Building and Deploying New Image to Cloud Run"
-    echo "Service: $SERVICE_NAME (Region: $REGION, Project: $PROJECT_ID)"
+    # Resolve immutable git commit SHA tag
+    IMAGE_TAG="$(resolve_image_tag)"
+    IMAGE_URI="${EXPECTED_ARTIFACT_REGISTRY}:${IMAGE_TAG}"
+    print_deployment_summary "$IMAGE_TAG" "$IMAGE_URI"
+
+    echo "======================================================================"
+    echo "Recording Production Revision Baseline (Revision Safety)"
+    echo "======================================================================"
+    CURRENT_ACTIVE_REVISION="$CURRENT_SERVING_PROD_REVISION"
+    if command -v gcloud &>/dev/null; then
+      ACTIVE_QUERY="$(gcloud run services describe "$SERVICE_NAME" --project="$PROJECT_ID" --region="$REGION" --format='value(status.traffic[0].revisionName)' 2>/dev/null || true)"
+      if [ -n "$ACTIVE_QUERY" ]; then
+        CURRENT_ACTIVE_REVISION="$ACTIVE_QUERY"
+      fi
+    fi
+    echo "Current serving revision: $CURRENT_ACTIVE_REVISION"
+    echo "Current service account:  $EXPECTED_SERVICE_ACCOUNT"
+    echo "Artifact Registry target: $EXPECTED_ARTIFACT_REGISTRY"
+    echo "Immutable image tag:      $IMAGE_TAG"
 
     if [ "${DRY_RUN:-0}" = "1" ]; then
-      echo "DRY RUN: Pre-flight and safety validations passed. Skipping remote gcloud execution."
+      echo "DRY RUN: Pre-flight, image tag validation, and target safety validations passed."
+      echo "Target Image URI: $IMAGE_URI"
+      echo "Skipping remote Docker build, push, and gcloud deployment."
       exit 0
     fi
 
+    # 1. Build Docker image using repository Dockerfile
+    docker_build_image "$IMAGE_URI"
+
+    # 2. Push Docker image to Artifact Registry
+    docker_push_image "$IMAGE_URI"
+
+    # 3. Resolve verified immutable image digest
+    echo "--> Resolving immutable image digest from Artifact Registry..."
+    IMAGE_DIGEST="$(resolve_image_digest "$IMAGE_URI")"
+    echo "IMAGE_URI: $IMAGE_URI"
+    echo "IMAGE_DIGEST: $IMAGE_DIGEST"
+
+    IMMUTABLE_DEPLOY_IMAGE="${EXPECTED_ARTIFACT_REGISTRY}@${IMAGE_DIGEST}"
+    echo "--> Immutable Deployment Image Digest: $IMMUTABLE_DEPLOY_IMAGE"
+
+    echo "======================================================================"
+    echo "Deploying Explicit Immutable Image to Cloud Run"
+    echo "Service: $SERVICE_NAME (Region: $REGION, Project: $PROJECT_ID)"
+    echo "Image:   $IMMUTABLE_DEPLOY_IMAGE"
+    echo "======================================================================"
+
+    # Deploy explicit immutable image without source deployment
     gcloud run deploy "$SERVICE_NAME" \
-      --source . \
+      --image="$IMMUTABLE_DEPLOY_IMAGE" \
       --project="$PROJECT_ID" \
       --region="$REGION" \
       --service-account="$EXPECTED_SERVICE_ACCOUNT" \
       --allow-unauthenticated \
       --port=3000 \
-      --update-env-vars="RAZORPAY_MODE=live,\
-NODE_ENV=production,\
-RAZORPAY_PRO_MONTHLY_PLAN_ID=$PLAN_PRO_MONTHLY,\
-RAZORPAY_PRO_YEARLY_PLAN_ID=$PLAN_PRO_YEARLY,\
-RAZORPAY_TEAM_MONTHLY_PLAN_ID=$PLAN_TEAM_MONTHLY,\
-RAZORPAY_TEAM_YEARLY_PLAN_ID=$PLAN_TEAM_YEARLY" \
+      --no-traffic \
+      --set-env-vars="$PRODUCTION_ORDINARY_ENV_VARS" \
       --set-secrets="$CLOUD_RUN_SECRETS"
 
-    echo "✅ Deployment completed and active."
+    echo "--> Verifying deployed revision status and container image..."
+    NEW_REVISION="$(gcloud run services describe "$SERVICE_NAME" --project="$PROJECT_ID" --region="$REGION" --format='value(status.latestCreatedRevisionName)' 2>/dev/null || true)"
+    echo "Newly deployed revision: $NEW_REVISION"
+
+    if [ -z "$NEW_REVISION" ]; then
+      echo "ERROR: Failed to resolve newly deployed revision name. Refusing to route traffic!" >&2
+      echo "Active production traffic remains untouched on: $CURRENT_ACTIVE_REVISION" >&2
+      exit 1
+    fi
+
+    IS_READY="$(gcloud run revisions describe "$NEW_REVISION" --project="$PROJECT_ID" --region="$REGION" --format='value(status.conditions[0].status)' 2>/dev/null || true)"
+    if [ "$IS_READY" != "True" ]; then
+      echo "ERROR: Deployed revision $NEW_REVISION failed health check (Ready condition status: '$IS_READY'). Refusing to route traffic!" >&2
+      echo "Active production traffic remains untouched on: $CURRENT_ACTIVE_REVISION" >&2
+      exit 1
+    fi
+
+    # Verify that the new revision's container image corresponds to the immutable digest deployed
+    REVISION_IMAGE="$(gcloud run revisions describe "$NEW_REVISION" --project="$PROJECT_ID" --region="$REGION" --format='value(spec.containers[0].image)' 2>/dev/null || true)"
+    echo "Deployed revision image: $REVISION_IMAGE"
+    if ! echo "$REVISION_IMAGE" | grep -q "$IMAGE_DIGEST"; then
+      echo "ERROR: Deployed revision $NEW_REVISION image verification failed!" >&2
+      echo "Expected image to contain immutable digest: $IMAGE_DIGEST" >&2
+      echo "Actual revision container image: $REVISION_IMAGE" >&2
+      echo "Refusing to route traffic! Active production traffic remains untouched on: $CURRENT_ACTIVE_REVISION" >&2
+      exit 1
+    fi
+
+    echo "--> Revision $NEW_REVISION is Ready and verified with immutable digest $IMAGE_DIGEST."
+    echo "--> Shifting 100% production traffic to healthy new revision..."
+    gcloud run services update-traffic "$SERVICE_NAME" \
+      --to-revisions="$NEW_REVISION=100" \
+      --project="$PROJECT_ID" \
+      --region="$REGION"
+
+    echo "✅ Explicit immutable Docker deployment completed and 100% traffic active."
+    ;;
+
+  declarative-prepare)
+    exec "$(dirname "$0")/migrate-cloud-run-declarative.sh" prepare "${@:2}"
+    ;;
+
+  promote-traffic)
+    exec "$(dirname "$0")/migrate-cloud-run-declarative.sh" promote "${@:2}"
     ;;
 
   verify)
@@ -286,7 +484,7 @@ RAZORPAY_TEAM_YEARLY_PLAN_ID=$PLAN_TEAM_YEARLY" \
 
   *)
     echo "Unknown action: $ACTION"
-    echo "Usage: ./scripts/deploy-cloud-run.sh [update-env | deploy | verify <URL>]"
+    echo "Usage: ./scripts/deploy-cloud-run.sh [update-env | deploy | declarative-prepare | promote-traffic <REV> | verify <URL>]"
     exit 1
     ;;
 esac

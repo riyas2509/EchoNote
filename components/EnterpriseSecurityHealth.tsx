@@ -60,7 +60,7 @@ export const EnterpriseSecurityHealth: React.FC<EnterpriseSecurityHealthProps> =
   const [groupRemovalBehavior, setGroupRemovalBehavior] = useState<RemovedGroupBehavior>('REVERT_TO_DEFAULT_ROLE');
   const [sessionMinutes, setSessionMinutes] = useState<number>(1440);
 
-  const isAdmin = userOrgRole === 'super_admin' || userOrgRole === 'org_admin' || userOrgRole === 'owner';
+  const isAdmin = userOrgRole === 'owner' || userOrgRole === 'org_admin';
 
   // Load Security Health on mount or org change
   const fetchSecurityHealth = async () => {

@@ -11,17 +11,18 @@ import crypto from "crypto";
 import fs from "fs";
 import os from "os";
 import { convertOpusToWav, convertAudioToWav, normalizeAudioMimeType, isFfmpegAvailable } from "./lib/audioUtils.js";
-import { initializeApp, getApps } from "firebase-admin/app";
-import { getFirestore, FieldValue } from "firebase-admin/firestore";
+import { FieldValue } from "firebase-admin/firestore";
 import admin from "firebase-admin";
+import { appAdmin, db, firebaseConfig } from "./lib/firebaseAdmin.ts";
 import { GoogleAuth } from "google-auth-library";
 import { GoogleGenAI, Type, Modality, ThinkingLevel } from "@google/genai";
 import { trackAIUsage, getAiUsageOverview, getRecentAiUsageLogs } from "./lib/aiTracker.js";
-import { emailService } from "./lib/emailService.js";
+import { emailService, resolveSenderEmail } from "./lib/emailService.js";
 import { 
   requireAuth, 
   optionalAuth, 
   checkProjectAccess, 
+  resolveProjectAccess,
   checkOrgAccess, 
   requireOrgRole, 
   requireAdmin,
@@ -29,20 +30,35 @@ import {
   syncUserCustomClaims, 
   recordOrgAuditEvent, 
   normalizeOrgRole, 
+  normalizeDomain,
+  PUBLIC_CONSUMER_DOMAINS,
   ROLE_HIERARCHY, 
-  AuthenticatedRequest 
+  AuthenticatedRequest,
+  authorizeRecordingAccess as authRecordingHelper,
+  verifyAiResourceAccess as verifyAiResourceHelper,
+  sanitizeSsoClaims as sanitizeSsoClaimsHelper
 } from "./middleware/auth.ts";
 import { admitExpensiveOperation } from "./middleware/runtimeLimiter.ts";
 import { 
   processEnterpriseJitOrSync, 
   evaluateIdentityMappings 
 } from "./lib/jitProvisioning.ts";
+import {
+  recordAuthAuditEvent,
+  queryAuthAuditLogs,
+  AuthAuditLogEvent
+} from "./lib/auditLogger.ts";
 import { 
   AuthoritativeOrgRole, 
   OrgSsoEnforcementState, 
   OrgSecurityHealthIssue, 
   OrgAllowedAuthMethod, 
-  OrgSecurityHealthSummary 
+  OrgSecurityHealthSummary,
+  TargetProjectRole,
+  ProjectPermission,
+  ProjectPermissions,
+  ProjectAccessResolution,
+  normalizeProjectRole
 } from "./types.js";
 import {
   SERVER_PLAN_LIMITS,
@@ -54,38 +70,12 @@ import {
   recordPendingOrder,
   isProductionEnvironment
 } from "./middleware/billingFulfillment.ts";
+import {
+  acceptProjectInvitation,
+  sanitizeInvitationToken
+} from "./lib/projectInvitation.ts";
 
-// Initialize Firebase Admin
-let firebaseConfig: any = {};
-try {
-  const firebaseConfigPath = path.join(process.cwd(), 'firebase-applet-config.json');
-  if (fs.existsSync(firebaseConfigPath)) {
-    firebaseConfig = JSON.parse(fs.readFileSync(firebaseConfigPath, 'utf8'));
-  }
-} catch (e) {
-  console.warn("⚠️ Failed to load firebase-applet-config.json:", e);
-}
-
-let appAdmin: any;
-if (!getApps().length) {
-  try {
-    appAdmin = initializeApp({ 
-      credential: admin.credential.applicationDefault(),
-      projectId: firebaseConfig.projectId || process.env.GOOGLE_CLOUD_PROJECT || "echonote-2509",
-      storageBucket: firebaseConfig.storageBucket || "echonote-2509.firebasestorage.app"
-    });
-  } catch (err) {
-    console.warn("⚠️ Firebase Admin default credential init failed, falling back without explicit credential:", err);
-    appAdmin = initializeApp({ 
-      projectId: firebaseConfig.projectId || process.env.GOOGLE_CLOUD_PROJECT || "echonote-2509",
-      storageBucket: firebaseConfig.storageBucket || "echonote-2509.firebasestorage.app"
-    });
-  }
-} else {
-  appAdmin = getApps()[0];
-}
-
-const db = getFirestore(appAdmin, firebaseConfig.firestoreDatabaseId);
+// Canonical Firebase Admin and Firestore initialized from ./lib/firebaseAdmin.ts
 
 async function checkIdentity() {
   try {
@@ -125,6 +115,37 @@ function timingSafeStringCompare(a?: string | null, b?: string | null): boolean 
   if (bufA.length !== bufB.length) return false;
   return crypto.timingSafeEqual(bufA, bufB);
 }
+
+// HTML entity escaping utility to prevent XSS in email templates
+export function escapeHtml(str: string | null | undefined): string {
+  if (!str) return "";
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+// Canonical public application URL resolver
+export function resolveAppUrl(): string {
+  // In production, deterministically return the canonical public domain.
+  // Neither APP_URL nor VITE_APP_URL is allowed to override this in production.
+  if (process.env.NODE_ENV === "production") {
+    return "https://echonote-25.ai.studio";
+  }
+
+  const configured = (process.env.APP_URL || process.env.VITE_APP_URL || "https://echonote-25.ai.studio").trim();
+  return (configured || "https://echonote-25.ai.studio").replace(/\/+$/, "");
+}
+
+// Re-export authoritative sender resolver from emailService
+export { resolveSenderEmail };
+
+// Authoritative transactional email sender configuration
+const AUTHORITATIVE_EMAIL_CONFIG = {
+  from: resolveSenderEmail()
+};
 
 const resendKey = process.env.RESEND_API_KEY;
 const resend = resendKey ? new Resend(resendKey) : null;
@@ -695,6 +716,21 @@ async function startServer() {
     }
   });
 
+  // Helper to prevent privilege escalation via client-supplied claims in SSO flows
+  function sanitizeSsoClaims(claims: any): Record<string, any> {
+    if (!claims || typeof claims !== 'object') return {};
+    const sanitized: Record<string, any> = {};
+    const blockedKeys = new Set([
+      'role', 'orgrole', 'platform_admin', 'admin', 'owner', 'isowner', 'org_admin', 'super_admin'
+    ]);
+    for (const [k, v] of Object.entries(claims)) {
+      if (!blockedKeys.has(k.toLowerCase().trim())) {
+        sanitized[k] = v;
+      }
+    }
+    return sanitized;
+  }
+
   // ==========================================
   // PHASE 1.5: MICROSOFT ENTRA ID / OIDC ENTERPRISE SSO
   // ==========================================
@@ -721,6 +757,12 @@ async function startServer() {
     }
 
     const domain = normalizeDomain(callerEmail);
+    if (PUBLIC_CONSUMER_DOMAINS.has(domain)) {
+      return res.status(400).json({ 
+        error: "Bad Request", 
+        message: "Public consumer email domains cannot be used for enterprise SSO discovery." 
+      });
+    }
 
     try {
       // 1. Locate organization owning this verified enterprise domain
@@ -816,7 +858,7 @@ async function startServer() {
         groups: tokenGroups,
         department: tokenDept,
         jobTitle: tokenJobTitle,
-        claims: clientClaims || {},
+        claims: sanitizeSsoClaims(clientClaims),
         tenantId: reportedTenantId
       });
 
@@ -984,6 +1026,12 @@ async function startServer() {
     }
 
     const domain = normalizeDomain(callerEmail);
+    if (PUBLIC_CONSUMER_DOMAINS.has(domain)) {
+      return res.status(400).json({ 
+        error: "Bad Request", 
+        message: "Public consumer email domains cannot be used for enterprise SSO discovery." 
+      });
+    }
 
     try {
       // 1. Locate organization owning this verified enterprise domain
@@ -1100,7 +1148,7 @@ async function startServer() {
         groups: tokenGroups,
         department: tokenDept,
         jobTitle: tokenJobTitle,
-        claims: clientClaims || {},
+        claims: sanitizeSsoClaims(clientClaims),
         tenantId: expectedProviderId
       });
 
@@ -3543,6 +3591,110 @@ async function startServer() {
   });
 
   /**
+   * Assign or Clear Member Department (Owner & Org Admin only)
+   */
+  app.patch("/api/organizations/:organizationId/members/:memberId/department", requireAuth, async (req: AuthenticatedRequest, res) => {
+    const { organizationId, memberId } = req.params;
+    const { departmentId } = req.body;
+    const callerUid = req.user!.uid;
+    const callerEmail = (req.user!.email || "").toLowerCase();
+
+    try {
+      // 1. Authorization: Owner or Org Admin
+      const orgAccess = await checkOrgAccess(db, callerEmail, organizationId, ["owner", "org_admin"]);
+      const isPlatformAdmin = Boolean(req.user?.platform_admin || req.user?.role === "admin");
+      if (!orgAccess.hasAccess && !isPlatformAdmin) {
+        return res.status(403).json({
+          error: "Forbidden",
+          message: "Only organization owners and administrators can assign member departments."
+        });
+      }
+
+      // 2. Fetch member and verify tenant boundary
+      const memberRef = db.collection("orgMembers").doc(memberId);
+      const memberDoc = await memberRef.get();
+      if (!memberDoc.exists || memberDoc.data()?.orgId !== organizationId) {
+        return res.status(404).json({
+          error: "Not Found",
+          message: "Member not found in organization."
+        });
+      }
+
+      const memberData = memberDoc.data()!;
+      const previousDeptId = memberData.departmentId || "";
+      const targetDeptId = typeof departmentId === "string" ? departmentId.trim() : (departmentId === null ? "" : undefined);
+
+      if (targetDeptId === undefined) {
+        return res.status(400).json({
+          error: "Bad Request",
+          message: "departmentId must be provided as a string or null."
+        });
+      }
+
+      // 3. If assigning to a department (non-empty), validate department existence & tenant
+      let assignedDeptName = "";
+      if (targetDeptId !== "") {
+        const deptDoc = await db.collection("departments").doc(targetDeptId).get();
+        if (!deptDoc.exists) {
+          return res.status(404).json({
+            error: "Not Found",
+            message: "Department not found."
+          });
+        }
+        const deptData = deptDoc.data() || {};
+        if (deptData.orgId !== organizationId) {
+          return res.status(400).json({
+            error: "Bad Request",
+            message: "Department belongs to a different organization."
+          });
+        }
+        if (deptData.status && deptData.status !== "active") {
+          return res.status(400).json({
+            error: "Bad Request",
+            message: "Department is not active."
+          });
+        }
+        assignedDeptName = deptData.name || targetDeptId;
+      }
+
+      // 4. Update authoritative orgMembers document
+      await memberRef.update({
+        departmentId: targetDeptId
+      });
+
+      // 5. Record structured audit event
+      await recordOrgAuditEvent(db, {
+        organizationId,
+        actorUserId: callerUid,
+        actorEmail: callerEmail,
+        targetUserId: memberData.userId,
+        targetUserEmail: memberData.email,
+        action: "MEMBER_DEPARTMENT_ASSIGNED",
+        timestamp: new Date().toISOString(),
+        source: "api",
+        details: targetDeptId
+          ? `Assigned member ${memberData.email} to department ${assignedDeptName} (${targetDeptId})`
+          : `Unassigned member ${memberData.email} from department`,
+        metadata: {
+          memberId,
+          previousDepartmentId: previousDeptId || null,
+          newDepartmentId: targetDeptId || null
+        }
+      });
+
+      res.json({
+        success: true,
+        memberId,
+        departmentId: targetDeptId,
+        message: targetDeptId ? "Member department updated successfully" : "Member department cleared successfully"
+      });
+    } catch (error: any) {
+      console.error("❌ Member department assignment failed:", error);
+      res.status(500).json({ error: "Failed to assign member department", message: error.message });
+    }
+  });
+
+  /**
    * Transfer Organization Ownership (Owner only)
    */
   app.post("/api/organizations/:organizationId/transfer-ownership", requireAuth, async (req: AuthenticatedRequest, res) => {
@@ -3788,7 +3940,7 @@ async function startServer() {
   });
 
   /**
-   * Remove Member from Organization
+   * Remove Member from Organization (with atomic project membership invalidation)
    */
   app.delete("/api/organizations/:organizationId/members/:memberId", requireAuth, async (req: AuthenticatedRequest, res) => {
     const { organizationId, memberId } = req.params;
@@ -3797,7 +3949,8 @@ async function startServer() {
 
     try {
       const orgAccess = await checkOrgAccess(db, callerEmail, organizationId, ["owner", "org_admin"]);
-      if (!orgAccess.hasAccess) {
+      const isPlatformAdmin = Boolean(req.user?.platform_admin || req.user?.role === "admin");
+      if (!orgAccess.hasAccess && !isPlatformAdmin) {
         return res.status(403).json({ error: "Forbidden", message: "Insufficient permissions to remove members." });
       }
 
@@ -3812,11 +3965,75 @@ async function startServer() {
         return res.status(400).json({ error: "Bad Request", message: "Cannot remove the organization owner." });
       }
 
-      await memberRef.delete();
+      if (!orgAccess.isOwner && !isPlatformAdmin && normalizeOrgRole(memberData.role) === "org_admin") {
+        return res.status(403).json({ error: "Forbidden", message: "Administrators cannot remove other administrators. Only the owner can remove administrators." });
+      }
+
+      // Identify projects belonging to this organization
+      const orgProjectsSnap = await db.collection("projects").where("organizationId", "==", organizationId).get();
+      const orgProjectIds = new Set(orgProjectsSnap.docs.map(d => d.id));
+
+      // Find projectMembers records for this user that belong to this organization
+      const matchingPmDocRefs = new Map<string, admin.firestore.DocumentReference>();
+
+      // 1. Query projectMembers by userId if present
+      if (memberData.userId) {
+        try {
+          const userPmSnap = await db.collection("projectMembers").where("userId", "==", memberData.userId).get();
+          for (const pmDoc of userPmSnap.docs) {
+            const pmData = pmDoc.data();
+            if (pmData.organizationId === organizationId || orgProjectIds.has(pmData.projectId)) {
+              matchingPmDocRefs.set(pmDoc.id, pmDoc.ref);
+            }
+          }
+        } catch (pmErr: any) {
+          console.warn("⚠️ Query projectMembers by userId note:", pmErr?.message);
+        }
+      }
+
+      // 2. Query projectMembers by email if present
+      if (memberData.email) {
+        try {
+          const emailPmSnap = await db.collection("projectMembers").where("email", "==", memberData.email.toLowerCase()).get();
+          for (const pmDoc of emailPmSnap.docs) {
+            const pmData = pmDoc.data();
+            if (pmData.organizationId === organizationId || orgProjectIds.has(pmData.projectId)) {
+              matchingPmDocRefs.set(pmDoc.id, pmDoc.ref);
+            }
+          }
+        } catch (pmErr: any) {
+          console.warn("⚠️ Query projectMembers by email note:", pmErr?.message);
+        }
+      }
+
+      // 3. Direct deterministic key check: `${userId}_${projectId}`
+      if (memberData.userId) {
+        for (const pId of orgProjectIds) {
+          const directRef = db.collection("projectMembers").doc(`${memberData.userId}_${pId}`);
+          try {
+            const directDoc = await directRef.get();
+            if (directDoc.exists) {
+              matchingPmDocRefs.set(directDoc.id, directRef);
+            }
+          } catch {}
+        }
+      }
+
+      // Atomically delete the orgMembers document and all matching projectMembers documents
+      const batch = db.batch();
+      batch.delete(memberRef);
+      for (const pmRef of matchingPmDocRefs.values()) {
+        batch.delete(pmRef);
+      }
+      await batch.commit();
 
       // Revoke custom claims
       if (memberData.userId) {
-        await admin.auth().setCustomUserClaims(memberData.userId, { orgId: null, orgRole: null });
+        try {
+          await admin.auth().setCustomUserClaims(memberData.userId, { orgId: null, orgRole: null });
+        } catch (claimErr: any) {
+          console.warn("⚠️ Revoking custom claims note:", claimErr?.message);
+        }
       }
 
       await recordOrgAuditEvent(db, {
@@ -3828,10 +4045,18 @@ async function startServer() {
         action: "MEMBER_REMOVED",
         timestamp: new Date().toISOString(),
         source: "api",
-        details: `Removed member ${memberData.email} from organization`
+        details: `Removed member ${memberData.email} from organization and cleaned up ${matchingPmDocRefs.size} project memberships`,
+        metadata: {
+          cleanedProjectMembershipsCount: matchingPmDocRefs.size
+        }
       });
 
-      res.json({ success: true, memberId, message: "Member removed from organization" });
+      res.json({
+        success: true,
+        memberId,
+        cleanedProjectMembershipsCount: matchingPmDocRefs.size,
+        message: "Member removed from organization and project memberships invalidated"
+      });
     } catch (error: any) {
       console.error("❌ Member removal failed:", error);
       res.status(500).json({ error: "Failed to remove member", message: error.message });
@@ -3845,10 +4070,16 @@ async function startServer() {
     const { organizationId } = req.params;
     const { email, role, departmentId, teamId } = req.body;
     const callerUid = req.user!.uid;
-    const callerEmail = (req.user!.email || "").toLowerCase();
+    const callerEmail = (req.user!.email || "").toLowerCase().trim();
 
-    if (!email) {
+    if (!email || typeof email !== "string" || !email.trim()) {
       return res.status(400).json({ error: "Bad Request", message: "Email is required" });
+    }
+
+    const normalizedEmail = email.trim().toLowerCase();
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(normalizedEmail)) {
+      return res.status(400).json({ error: "Bad Request", message: "A valid email address is required" });
     }
 
     try {
@@ -3877,7 +4108,8 @@ async function startServer() {
         }
       }
 
-      if (callerRole !== "owner" && callerRole !== "org_admin") {
+      const isPlatformAdmin = Boolean(req.user?.platform_admin || req.user?.role === "admin");
+      if (callerRole !== "owner" && callerRole !== "org_admin" && !isPlatformAdmin) {
         return res.status(403).json({ error: "Forbidden", message: "Only owners and administrators can invite members." });
       }
 
@@ -3886,15 +4118,125 @@ async function startServer() {
         return res.status(400).json({ error: "Bad Request", message: "Cannot invite a user as owner." });
       }
 
-      if (callerRole === "org_admin" && requestedRole === "org_admin") {
+      if (callerRole === "org_admin" && requestedRole === "org_admin" && !isPlatformAdmin) {
         return res.status(403).json({ error: "Forbidden", message: "Administrators cannot invite new administrators." });
       }
 
-      const inviteId = "inv_" + Math.random().toString(36).substring(2, 9) + Date.now().toString(36);
+      // Step 6B.3: Prevent inviting an active member of this organization
+      if (orgData.ownerEmail && orgData.ownerEmail.trim().toLowerCase() === normalizedEmail) {
+        return res.status(400).json({
+          error: "Bad Request",
+          message: "This user is already a member of this organization."
+        });
+      }
+
+      const activeMemberSnap = await db
+        .collection("orgMembers")
+        .where("orgId", "==", organizationId)
+        .where("email", "==", normalizedEmail)
+        .where("status", "==", "active")
+        .limit(1)
+        .get();
+
+      if (!activeMemberSnap.empty) {
+        return res.status(400).json({
+          error: "Bad Request",
+          message: "This user is already a member of this organization."
+        });
+      }
+
+      // Step 6B.2: Prevent duplicate active pending invitations in the same organization
+      const isResendRequest = Boolean(req.body && req.body.resend);
+      const pendingInvitesSnap = await db
+        .collection("orgInvitations")
+        .where("orgId", "==", organizationId)
+        .where("email", "==", normalizedEmail)
+        .where("status", "==", "pending")
+        .get();
+
+      const now = Date.now();
+      const activePendingDoc = pendingInvitesSnap.docs.find(doc => {
+        const d = doc.data();
+        if (!d.expiresAt) return true;
+        return new Date(d.expiresAt).getTime() > now;
+      });
+
+      if (activePendingDoc) {
+        if (!isResendRequest) {
+          return res.status(400).json({
+            error: "Bad Request",
+            message: "An active invitation already exists for this email address."
+          });
+        }
+
+        // Safe retry path: Re-dispatch using the existing invitation without creating duplicate records
+        const existingData = activePendingDoc.data();
+        const existingInviteId = activePendingDoc.id;
+        const appUrl = resolveAppUrl();
+        const acceptUrl = `${appUrl}/invite/accept?token=${encodeURIComponent(existingInviteId)}`;
+
+        const emailResult = await emailService.sendOrganizationInvitation(normalizedEmail, {
+          inviterName: callerEmail,
+          orgName: orgData.name || "an organization",
+          role: existingData.role || requestedRole,
+          inviteLink: acceptUrl,
+          expiresAt: existingData.expiresAt ? new Date(existingData.expiresAt).toUTCString() : undefined
+        });
+
+        const emailSent = Boolean(emailResult && emailResult.success);
+
+        const updatedHistory = [
+          ...(existingData.history || []),
+          { 
+            event: "resent", 
+            timestamp: new Date().toISOString(), 
+            by: callerEmail, 
+            emailSent,
+            emailDeliveryCode: emailSent ? null : (emailResult?.errorCode || "EMAIL_DELIVERY_FAILED")
+          }
+        ];
+
+        await activePendingDoc.ref.update({
+          history: updatedHistory,
+          emailDeliveryStatus: emailSent ? "sent" : "failed",
+          emailDeliveryError: emailSent ? null : (emailResult?.error || "Email delivery failed"),
+          emailDeliveryCode: emailSent ? null : (emailResult?.errorCode || "EMAIL_DELIVERY_FAILED"),
+          lastResentAt: new Date().toISOString()
+        });
+
+        await recordOrgAuditEvent(db, {
+          organizationId,
+          actorUserId: callerUid,
+          actorEmail: callerEmail,
+          targetUserEmail: normalizedEmail,
+          newRole: existingData.role || requestedRole,
+          action: "MEMBER_INVITED",
+          timestamp: new Date().toISOString(),
+          source: "api",
+          details: `Resent invitation to ${normalizedEmail} (email ${emailSent ? 'dispatched' : 'failed'})`
+        });
+
+        return res.status(200).json({
+          success: true,
+          invite: { ...existingData, id: existingInviteId },
+          emailSent,
+          emailError: emailSent ? undefined : (emailResult?.error || "Email delivery failed"),
+          emailErrorCode: emailSent ? undefined : (emailResult?.errorCode || "EMAIL_DELIVERY_FAILED"),
+          statusCode: emailResult?.statusCode,
+          inviteLink: acceptUrl,
+          message: emailSent 
+            ? "Invitation email resent successfully." 
+            : `Invitation record active, but email re-delivery failed: ${emailResult?.error || 'Email delivery failed'}.`,
+          warning: emailSent ? undefined : (emailResult?.error || "Email delivery failed")
+        });
+      }
+
+      // Step 6B.1: Cryptographically secure 256-bit random invitation identifier
+      const inviteId = `inv_${crypto.randomBytes(32).toString("hex")}`;
       const inviteData = {
         id: inviteId,
         orgId: organizationId,
-        email: email.toLowerCase().trim(),
+        email: normalizedEmail,
         role: requestedRole,
         departmentId: departmentId || "",
         teamId: teamId || "",
@@ -3909,51 +4251,246 @@ async function startServer() {
 
       await db.collection("orgInvitations").doc(inviteId).set(inviteData);
 
-      // Send email
-      if (resend) {
-        try {
-          await resend.emails.send({
-            from: "EchoNote <invitations@echotechai.in>",
-            to: [email.trim()],
-            subject: `You have been invited to join ${orgData.name || "an organization"} on EchoNote`,
-            html: `
-              <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; padding: 24px; border: 1px solid #e2e8f0; border-radius: 12px;">
-                <h2 style="color: #0f172a; margin-bottom: 16px;">Organization Invitation</h2>
-                <p style="color: #475569; font-size: 16px; line-height: 1.5;">
-                  <strong>${callerEmail}</strong> has invited you to join <strong>${orgData.name}</strong> as <strong>${requestedRole}</strong> on EchoNote.
-                </p>
-                <div style="margin-top: 24px;">
-                  <a href="https://echotechai.in" style="background-color: #4f46e5; color: #ffffff; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-weight: bold; display: inline-block;">
-                    Accept Invitation
-                  </a>
-                </div>
-              </div>
-            `
-          });
-        } catch (mailErr: any) {
-          console.warn("⚠️ Failed to send org invitation email:", mailErr.message);
-        }
+      // Step 6C: Canonical organization invitation URL resolution & email dispatch
+      const appUrl = resolveAppUrl();
+      const acceptUrl = `${appUrl}/invite/accept?token=${encodeURIComponent(inviteId)}`;
+
+      const safeOrgName = escapeHtml(orgData.name || "an organization");
+      const safeInviter = escapeHtml(callerEmail);
+      const safeRecipient = escapeHtml(normalizedEmail);
+      const safeRole = escapeHtml(requestedRole);
+      const safeExpiresAt = escapeHtml(new Date(inviteData.expiresAt).toUTCString());
+      const safeAcceptUrl = escapeHtml(acceptUrl);
+
+      const emailSubject = `You have been invited to join ${orgData.name || "an organization"} on EchoNote`;
+
+      const emailHtml = `
+        <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 32px 24px; background-color: #ffffff; border: 1px solid #e2e8f0; border-radius: 16px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);">
+          <div style="text-align: center; margin-bottom: 28px; padding-bottom: 20px; border-bottom: 1px solid #f1f5f9;">
+            <div style="font-size: 24px; font-weight: 900; color: #1A234E; letter-spacing: -0.5px;">
+              E C H O <span style="color: #3B82F6; font-weight: 600;">N O T E</span>
+            </div>
+            <div style="font-size: 11px; text-transform: uppercase; font-weight: 700; letter-spacing: 2px; color: #94a3b8; margin-top: 4px;">
+              Enterprise Audio Intelligence
+            </div>
+          </div>
+
+          <h2 style="color: #0f172a; font-size: 20px; font-weight: 800; margin: 0 0 16px 0; letter-spacing: -0.3px;">
+            Organization Invitation
+          </h2>
+
+          <p style="color: #475569; font-size: 15px; line-height: 1.6; margin: 0 0 20px 0;">
+            You have been invited to join <strong>${safeOrgName}</strong> on EchoNote.
+          </p>
+
+          <div style="background-color: #f8fafc; border-radius: 12px; border: 1px solid #e2e8f0; padding: 18px 20px; margin: 20px 0;">
+            <table cellpadding="0" cellspacing="0" border="0" style="width: 100%; font-size: 14px; line-height: 1.6;">
+              <tr>
+                <td style="color: #64748b; font-weight: 600; padding: 4px 0; width: 140px;">Invited by:</td>
+                <td style="color: #0f172a; font-weight: 700; padding: 4px 0;">${safeInviter}</td>
+              </tr>
+              <tr>
+                <td style="color: #64748b; font-weight: 600; padding: 4px 0;">Recipient:</td>
+                <td style="color: #0f172a; font-weight: 700; padding: 4px 0;">${safeRecipient}</td>
+              </tr>
+              <tr>
+                <td style="color: #64748b; font-weight: 600; padding: 4px 0;">Assigned Role:</td>
+                <td style="color: #1A234E; font-weight: 700; padding: 4px 0; text-transform: capitalize;">${safeRole}</td>
+              </tr>
+              <tr>
+                <td style="color: #64748b; font-weight: 600; padding: 4px 0;">Expires on:</td>
+                <td style="color: #dc2626; font-weight: 600; padding: 4px 0;">${safeExpiresAt}</td>
+              </tr>
+            </table>
+          </div>
+
+          <div style="margin: 28px 0; text-align: center;">
+            <a href="${safeAcceptUrl}" style="background-color: #1A234E; color: #ffffff; padding: 14px 28px; border-radius: 10px; text-decoration: none; font-weight: 700; font-size: 15px; display: inline-block; letter-spacing: -0.2px; box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);">
+              Accept Invitation
+            </a>
+          </div>
+
+          <hr style="border: 0; border-top: 1px solid #f1f5f9; margin: 24px 0;" />
+
+          <p style="margin: 0; font-size: 12px; color: #94a3b8; line-height: 1.6; word-break: break-all;">
+            If the button cannot be used, copy and paste this link into your browser:<br />
+            <a href="${safeAcceptUrl}" style="color: #3B82F6; text-decoration: underline;">${safeAcceptUrl}</a>
+          </p>
+
+          <p style="margin: 16px 0 0 0; font-size: 11px; color: #cbd5e1; text-align: center;">
+            © ${new Date().getFullYear()} EchoNote Technologies. All rights reserved.
+          </p>
+        </div>
+      `;
+
+      const emailPlainText = `Organization Invitation - EchoNote
+
+You have been invited to join ${orgData.name || "an organization"} on EchoNote.
+
+Invited by: ${callerEmail}
+Recipient: ${normalizedEmail}
+Assigned Role: ${requestedRole}
+Expires on: ${new Date(inviteData.expiresAt).toUTCString()}
+
+To accept this invitation, please visit the following link:
+${acceptUrl}
+
+If you did not expect this invitation, you can safely ignore this email.
+© ${new Date().getFullYear()} EchoNote Technologies. All rights reserved.`;
+
+      // Send email via centralized email service with explicit error handling
+      const emailResult = await emailService.sendOrganizationInvitation(normalizedEmail, {
+        inviterName: callerEmail,
+        orgName: orgData.name || "an organization",
+        role: requestedRole,
+        inviteLink: acceptUrl,
+        expiresAt: new Date(inviteData.expiresAt).toUTCString(),
+        html: emailHtml,
+        text: emailPlainText
+      });
+
+      const emailSent = Boolean(emailResult && emailResult.success);
+
+      // Record email delivery status in orgInvitations document
+      try {
+        await db.collection("orgInvitations").doc(inviteId).update({
+          emailDeliveryStatus: emailSent ? "sent" : "failed",
+          emailDeliveryError: emailSent ? null : (emailResult?.error || "Email delivery failed"),
+          emailDeliveryCode: emailSent ? null : (emailResult?.errorCode || "EMAIL_DELIVERY_FAILED"),
+          lastEmailAttemptAt: new Date().toISOString()
+        });
+      } catch (updateErr) {
+        // Non-blocking metadata update
       }
 
       await recordOrgAuditEvent(db, {
         organizationId,
         actorUserId: callerUid,
         actorEmail: callerEmail,
-        targetUserEmail: email.toLowerCase().trim(),
+        targetUserEmail: normalizedEmail,
         newRole: requestedRole,
         action: "MEMBER_INVITED",
         timestamp: new Date().toISOString(),
         source: "api",
-        details: `Sent invitation to ${email} with role ${requestedRole}`
+        details: `Sent invitation to ${normalizedEmail} with role ${requestedRole}${emailSent ? '' : ' (email dispatch failed)'}`
       });
+
+      if (!emailSent) {
+        console.warn("⚠️ [ORG INVITE] Invitation record created, but email dispatch failed:", {
+          inviteId,
+          error: emailResult?.error,
+          code: emailResult?.errorCode
+        });
+        return res.status(201).json({
+          success: true,
+          invite: inviteData,
+          emailSent: false,
+          emailError: emailResult?.error || "Email delivery failed",
+          emailErrorCode: emailResult?.errorCode || "EMAIL_DELIVERY_FAILED",
+          statusCode: emailResult?.statusCode || 500,
+          inviteLink: acceptUrl,
+          message: `Invitation created, but the invitation email could not be delivered: ${emailResult?.error || 'Email delivery failed'}. You can copy the invite link or retry.`,
+          warning: emailResult?.error || "Email delivery failed"
+        });
+      }
 
       res.status(201).json({
         success: true,
-        invite: inviteData
+        invite: inviteData,
+        emailSent: true,
+        inviteLink: acceptUrl,
+        message: "Invitation sent successfully."
       });
     } catch (error: any) {
       console.error("❌ Send invitation failed:", error);
       res.status(500).json({ error: "Failed to send invitation", message: error.message });
+    }
+  });
+
+  /**
+   * Safe Organization Invitation Preview Endpoint (Step 6D)
+   * Returns minimal non-sensitive metadata for acceptance preview.
+   * Never exposes membership lists, internal data, or secrets.
+   */
+  app.get("/api/organizations/invitation-preview/:inviteId", async (req, res) => {
+    const { inviteId } = req.params;
+    if (!inviteId || typeof inviteId !== "string" || !inviteId.trim()) {
+      return res.status(400).json({ error: "Bad Request", message: "inviteId is required" });
+    }
+
+    try {
+      const inviteRef = db.collection("orgInvitations").doc(inviteId.trim());
+      const inviteDoc = await inviteRef.get();
+
+      if (!inviteDoc.exists) {
+        return res.status(404).json({ error: "Not Found", message: "Invitation not found" });
+      }
+
+      const inviteData = inviteDoc.data()!;
+
+      // Check accepted state
+      if (inviteData.status === "accepted") {
+        return res.status(400).json({
+          status: "accepted",
+          error: "Bad Request",
+          message: "This invitation has already been accepted."
+        });
+      }
+
+      // Check cancelled / rejected state
+      if (inviteData.status === "cancelled" || inviteData.status === "rejected") {
+        return res.status(400).json({
+          status: "cancelled",
+          error: "Bad Request",
+          message: "This invitation has been cancelled."
+        });
+      }
+
+      // Check expiration
+      const now = Date.now();
+      const isExpired = inviteData.status === "expired" || (inviteData.expiresAt && new Date(inviteData.expiresAt).getTime() <= now);
+      if (isExpired) {
+        return res.status(400).json({
+          status: "expired",
+          error: "Bad Request",
+          message: "This invitation has expired."
+        });
+      }
+
+      if (inviteData.status !== "pending") {
+        return res.status(400).json({
+          status: "invalid",
+          error: "Bad Request",
+          message: "This invitation is not valid for acceptance."
+        });
+      }
+
+      // Fetch organization name safely
+      let orgName = "an organization";
+      if (inviteData.orgId) {
+        try {
+          const orgDoc = await db.collection("organizations").doc(inviteData.orgId).get();
+          if (orgDoc.exists) {
+            orgName = orgDoc.data()?.name || "an organization";
+          }
+        } catch {
+          // fallback to default orgName
+        }
+      }
+
+      res.json({
+        valid: true,
+        status: "pending",
+        organizationName: orgName,
+        orgId: inviteData.orgId,
+        invitedBy: inviteData.invitedBy || "An administrator",
+        recipientEmail: inviteData.email,
+        role: inviteData.role || "member",
+        expiresAt: inviteData.expiresAt
+      });
+    } catch (error: any) {
+      console.error("Preview invitation error:", error);
+      res.status(500).json({ error: "Failed to preview invitation", message: "An unexpected error occurred." });
     }
   });
 
@@ -3963,14 +4500,14 @@ async function startServer() {
   app.post("/api/organizations/accept-invite", requireAuth, async (req: AuthenticatedRequest, res) => {
     const { inviteId } = req.body;
     const callerUid = req.user!.uid;
-    const callerEmail = (req.user!.email || "").toLowerCase();
+    const callerEmail = (req.user!.email || "").toLowerCase().trim();
 
-    if (!inviteId) {
+    if (!inviteId || typeof inviteId !== "string" || !inviteId.trim()) {
       return res.status(400).json({ error: "Bad Request", message: "inviteId is required" });
     }
 
     try {
-      const inviteRef = db.collection("orgInvitations").doc(inviteId);
+      const inviteRef = db.collection("orgInvitations").doc(inviteId.trim());
       const inviteDoc = await inviteRef.get();
 
       if (!inviteDoc.exists) {
@@ -3978,39 +4515,103 @@ async function startServer() {
       }
 
       const inviteData = inviteDoc.data()!;
-      if (inviteData.email?.toLowerCase() !== callerEmail) {
+      const invitedEmail = (inviteData.email || "").toLowerCase().trim();
+
+      // Step 6B.6: Mismatched recipient email
+      if (invitedEmail !== callerEmail) {
         return res.status(403).json({ error: "Forbidden", message: "This invitation was sent to a different email address." });
       }
 
+      // Step 6B.6: Replay prevention
       if (inviteData.status === "accepted") {
         return res.status(400).json({ error: "Bad Request", message: "This invitation has already been accepted." });
       }
 
+      // Step 6B.6: Cancelled / rejected state check
+      if (inviteData.status === "cancelled" || inviteData.status === "rejected") {
+        return res.status(400).json({ error: "Bad Request", message: "This invitation has been cancelled." });
+      }
+
+      // Step 6B.5 & 6B.6: Expiration enforcement
+      const now = Date.now();
+      const isExpired = inviteData.status === "expired" || (inviteData.expiresAt && new Date(inviteData.expiresAt).getTime() <= now);
+      if (isExpired) {
+        return res.status(400).json({ error: "Bad Request", message: "This invitation has expired." });
+      }
+
+      if (inviteData.status !== "pending") {
+        return res.status(400).json({ error: "Bad Request", message: "This invitation is not valid for acceptance." });
+      }
+
       const orgId = inviteData.orgId;
       const role = normalizeOrgRole(inviteData.role || "member");
+      const nowIso = new Date().toISOString();
 
-      // 1. Create or update member in orgMembers
-      const memberId = `member_${callerUid.slice(0, 8)}_${Date.now().toString(36)}`;
-      await db.collection("orgMembers").doc(memberId).set({
-        id: memberId,
-        orgId,
-        userId: callerUid,
-        email: callerEmail,
-        name: req.user!.name || callerEmail.split("@")[0] || "Member",
-        displayName: req.user!.name || callerEmail.split("@")[0] || "Member",
-        role,
-        departmentId: inviteData.departmentId || "",
-        teamId: inviteData.teamId || "",
-        status: "active",
-        joinedAt: new Date().toISOString()
-      });
+      // Step 6B.4: Create or reactivate member in orgMembers (never duplicate member records)
+      let existingMemberDocSnap: any = null;
+      const memberByEmailSnap = await db
+        .collection("orgMembers")
+        .where("orgId", "==", orgId)
+        .where("email", "==", callerEmail)
+        .limit(1)
+        .get();
+
+      if (!memberByEmailSnap.empty) {
+        existingMemberDocSnap = memberByEmailSnap.docs[0];
+      } else {
+        const memberByUidSnap = await db
+          .collection("orgMembers")
+          .where("orgId", "==", orgId)
+          .where("userId", "==", callerUid)
+          .limit(1)
+          .get();
+        if (!memberByUidSnap.empty) {
+          existingMemberDocSnap = memberByUidSnap.docs[0];
+        }
+      }
+
+      let memberId: string;
+      if (existingMemberDocSnap) {
+        // Reuse existing member document (handles deactivated members and preserves member identity & historical metadata)
+        memberId = existingMemberDocSnap.id;
+        const existingData = existingMemberDocSnap.data() || {};
+        await existingMemberDocSnap.ref.update({
+          status: "active",
+          role,
+          userId: callerUid,
+          email: callerEmail,
+          name: req.user!.name || existingData.name || callerEmail.split("@")[0] || "Member",
+          displayName: req.user!.name || existingData.displayName || callerEmail.split("@")[0] || "Member",
+          departmentId: inviteData.departmentId !== undefined ? inviteData.departmentId : (existingData.departmentId || ""),
+          teamId: inviteData.teamId !== undefined ? inviteData.teamId : (existingData.teamId || ""),
+          updatedAt: nowIso
+        });
+      } else {
+        // Create new member in orgMembers
+        memberId = `member_${callerUid.slice(0, 8)}_${crypto.randomBytes(6).toString("hex")}`;
+        await db.collection("orgMembers").doc(memberId).set({
+          id: memberId,
+          orgId,
+          userId: callerUid,
+          email: callerEmail,
+          name: req.user!.name || callerEmail.split("@")[0] || "Member",
+          displayName: req.user!.name || callerEmail.split("@")[0] || "Member",
+          role,
+          departmentId: inviteData.departmentId || "",
+          teamId: inviteData.teamId || "",
+          status: "active",
+          joinedAt: nowIso
+        });
+      }
 
       // 2. Mark invitation accepted
       await inviteRef.update({
         status: "accepted",
+        acceptedAt: nowIso,
+        acceptedBy: callerEmail,
         history: [
           ...(inviteData.history || []),
-          { event: "accepted", timestamp: new Date().toISOString(), by: callerEmail }
+          { event: "accepted", timestamp: nowIso, by: callerEmail }
         ]
       });
 
@@ -4029,7 +4630,7 @@ async function startServer() {
         targetUserEmail: callerEmail,
         newRole: role,
         action: "ROLE_ASSIGNED",
-        timestamp: new Date().toISOString(),
+        timestamp: nowIso,
         source: "api",
         details: `${callerEmail} joined organization ${orgId} with role ${role}`
       });
@@ -4037,6 +4638,7 @@ async function startServer() {
       res.json({
         success: true,
         orgId,
+        memberId,
         role,
         claims,
         message: "Successfully joined organization"
@@ -4044,6 +4646,115 @@ async function startServer() {
     } catch (error: any) {
       console.error("❌ Accept invitation failed:", error);
       res.status(500).json({ error: "Failed to accept invitation", message: error.message });
+    }
+  });
+
+  /**
+   * Cancel / Revoke Organization Invitation (Owner & Org Admin only)
+   */
+  app.delete("/api/organizations/:organizationId/invitations/:inviteId", requireAuth, async (req: AuthenticatedRequest, res) => {
+    const { organizationId, inviteId } = req.params;
+    const callerUid = req.user!.uid;
+    const callerEmail = (req.user!.email || "").toLowerCase();
+
+    try {
+      // 1. Authorization: Owner or Org Admin
+      const orgAccess = await checkOrgAccess(db, callerEmail, organizationId, ["owner", "org_admin"]);
+      const isPlatformAdmin = Boolean(req.user?.platform_admin || req.user?.role === "admin");
+      if (!orgAccess.hasAccess && !isPlatformAdmin) {
+        return res.status(403).json({
+          error: "Forbidden",
+          message: "Only organization owners and administrators can cancel invitations."
+        });
+      }
+
+      // 2. Fetch invitation
+      const inviteRef = db.collection("orgInvitations").doc(inviteId);
+      const inviteDoc = await inviteRef.get();
+      if (!inviteDoc.exists) {
+        return res.status(404).json({
+          error: "Not Found",
+          message: "Invitation not found."
+        });
+      }
+
+      const inviteData = inviteDoc.data() || {};
+
+      // 3. Tenant Boundary check
+      if (inviteData.orgId !== organizationId) {
+        return res.status(404).json({
+          error: "Not Found",
+          message: "Invitation not found in this organization."
+        });
+      }
+
+      // 4. Invitation Lifecycle state validation
+      if (inviteData.status === "accepted") {
+        return res.status(400).json({
+          error: "Bad Request",
+          message: "Cannot cancel an invitation that has already been accepted."
+        });
+      }
+
+      if (inviteData.status === "rejected" || inviteData.status === "cancelled") {
+        return res.status(400).json({
+          error: "Bad Request",
+          message: "This invitation has already been cancelled."
+        });
+      }
+
+      if (inviteData.status === "expired" || (inviteData.expiresAt && new Date(inviteData.expiresAt).getTime() < Date.now())) {
+        return res.status(400).json({
+          error: "Bad Request",
+          message: "Cannot cancel an expired invitation."
+        });
+      }
+
+      if (inviteData.status !== "pending") {
+        return res.status(400).json({
+          error: "Bad Request",
+          message: `Cannot cancel invitation with status '${inviteData.status}'.`
+        });
+      }
+
+      // 5. Update invitation to rejected/cancelled with history audit
+      const updatedHistory = [
+        ...(inviteData.history || []),
+        { event: "cancelled", timestamp: new Date().toISOString(), by: callerEmail }
+      ];
+
+      await inviteRef.update({
+        status: "rejected",
+        cancelledAt: new Date().toISOString(),
+        cancelledBy: callerEmail,
+        history: updatedHistory
+      });
+
+      // 6. Record Organization Audit Log
+      await recordOrgAuditEvent(db, {
+        organizationId,
+        actorUserId: callerUid,
+        actorEmail: callerEmail,
+        targetUserEmail: inviteData.email,
+        action: "INVITATION_CANCELLED",
+        timestamp: new Date().toISOString(),
+        source: "api",
+        details: `Cancelled invitation for ${inviteData.email} (role: ${inviteData.role})`,
+        metadata: {
+          inviteId,
+          invitedRole: inviteData.role,
+          invitedEmail: inviteData.email
+        }
+      });
+
+      res.json({
+        success: true,
+        inviteId,
+        message: `Invitation for ${inviteData.email} cancelled successfully.`
+      });
+    } catch (error: any) {
+      console.error("❌ Cancel invitation failed:", error);
+      res.status(500).json({ error: "Failed to cancel invitation", message: error.message });
     }
   });
 
@@ -4128,9 +4839,13 @@ async function startServer() {
     }
   });
 
+  // In-memory fallback stores for non-production sandbox/preview environments
+  const pendingInvitesStore = new Map<string, any>();
+  const projectMembersFallbackStore = new Map<string, any>();
+
   // Invitation API - Protected: requires valid auth token & project administrative rights
   app.post("/api/invite-member", requireAuth, async (req: AuthenticatedRequest, res) => {
-    const { email, role, projectId, projectName, inviteToken: clientInviteToken } = req.body;
+    const { email, role, projectId, projectName, ownerId: clientOwnerId, inviteToken: clientInviteToken } = req.body;
     const callerUid = req.user!.uid;
     const callerEmail = req.user!.email || "A team member";
     
@@ -4139,78 +4854,191 @@ async function startServer() {
     }
 
     try {
-      // 1. Verify caller has administrative/owner access to the project
-      let ownerId: string | null = null;
-      try {
-        const projectDoc = await db.collection("projects").doc(projectId).get();
-        if (projectDoc.exists) {
-          const projectData = projectDoc.data() || {};
-          ownerId = projectData.userId || null;
+      // 1. Authorize caller via hardened project access resolution (requires MANAGE_MEMBERS)
+      const access = await resolveProjectAccess(db, req.user, projectId, { 
+        requiredPermission: 'MANAGE_MEMBERS',
+        callerClaimedOwnerId: clientOwnerId || callerUid
+      });
+      if (!access.hasAccess || !access.permissions.canManageMembers) {
+        if (access.notFound) {
+          return res.status(404).json({ error: "Not Found", message: "Project not found." });
         }
-      } catch (e: any) {
-        console.warn("⚠️ Could not read project document:", e.message);
-      }
-
-      const access = await checkProjectAccess(db, callerUid, projectId, ["owner", "admin"]);
-      // If access check fails and caller is not verified owner, forbid invitation
-      if (!access.hasAccess && ownerId && ownerId !== callerUid) {
         return res.status(403).json({ 
           error: "Forbidden", 
           message: "You do not have administrative permission to invite members to this project." 
         });
       }
 
-      const inviteToken = clientInviteToken || crypto.randomUUID();
+      const normalizedInvitedRole = normalizeProjectRole(role);
+      if (normalizedInvitedRole === 'owner') {
+        return res.status(400).json({
+          error: "Bad Request",
+          message: "Cannot invite a member directly as owner. Use project transfer of ownership."
+        });
+      }
+
+      const projectData = access.project || {};
+      const ownerId = projectData.userId || callerUid;
+
+      // Prevent accumulating duplicate pending invites for the same project & email
+      const normalizedEmail = email.trim().toLowerCase();
+      let inviteToken = clientInviteToken;
+      if (!inviteToken) {
+        try {
+          const existingPendingSnap = await db
+            .collection("invites")
+            .where("projectId", "==", projectId)
+            .where("email", "==", normalizedEmail)
+            .where("status", "==", "pending")
+            .limit(1)
+            .get();
+          if (!existingPendingSnap.empty) {
+            inviteToken = existingPendingSnap.docs[0].id;
+          }
+        } catch (queryErr) {
+          // Fall back to new token if query is unsupported in sandbox
+        }
+      }
+      if (!inviteToken) {
+        inviteToken = crypto.randomUUID();
+      }
+
       const inviteData = {
         id: inviteToken,
-        email: email.trim().toLowerCase(),
+        email: normalizedEmail,
         projectId,
-        projectName: projectName || "EchoNote Workspace",
-        role,
+        projectName: projectName || projectData.name || "EchoNote Workspace",
+        role: normalizedInvitedRole,
         invitedBy: callerEmail,
-        ownerId: ownerId || callerUid,
+        ownerId: ownerId,
         status: "pending",
         createdAt: FieldValue.serverTimestamp()
       };
 
+      pendingInvitesStore.set(inviteToken, inviteData);
+
       // Store in Firestore
       try {
-        await db.collection("invites").doc(inviteToken).set(inviteData);
-        console.log(`✅ Stored invite in server Firestore: ${inviteToken}`);
+        await db.collection("invites").doc(inviteToken).set(inviteData, { merge: true });
+        console.info(`✅ Stored invite in server Firestore: ${inviteToken}`);
       } catch (dbErr: any) {
-        console.log("⚠️ Server-side Firestore write failed:", dbErr.message);
+        if (isProductionEnvironment()) {
+          console.error("🚨 [PRODUCTION] Failed to persist invite in Firestore:", {
+            inviteToken,
+            error: dbErr?.message || String(dbErr)
+          });
+          return res.status(500).json({ error: "Failed to persist invitation in database" });
+        }
+        console.info(`ℹ️ [NON-PROD DEV ONLY] Stored invite in development fallback store: ${inviteToken}`);
       }
 
       // Send Email via Resend centralized email service
-      const appUrl = process.env.VITE_APP_URL || `https://${req.get('host')}`;
-      const joinUrl = `${appUrl}/join?token=${inviteToken}`;
+      const appUrl = resolveAppUrl();
+      const joinUrl = `${appUrl}/join?token=${encodeURIComponent(inviteToken)}`;
 
-      await emailService.sendTeamInvitation(email, {
+      const emailResult = await emailService.sendTeamInvitation(email, {
         inviterName: callerEmail,
         projectName: projectName || "EchoNote Workspace",
         role: role,
         inviteLink: joinUrl
       });
 
-      res.json({ success: true, inviteToken });
+      const emailSent = Boolean(emailResult && emailResult.success);
+
+      // Record email delivery metadata on invitation document
+      try {
+        await db.collection("invites").doc(inviteToken).update({
+          emailDeliveryStatus: emailSent ? "sent" : "failed",
+          emailDeliveryError: emailSent ? null : (emailResult?.error || "Email delivery failed"),
+          emailDeliveryCode: emailSent ? null : (emailResult?.errorCode || "EMAIL_DELIVERY_FAILED"),
+          lastEmailAttemptAt: FieldValue.serverTimestamp()
+        });
+      } catch (updateErr) {
+        // Non-blocking metadata update
+      }
+
+      if (!emailSent) {
+        console.warn("⚠️ [INVITE MEMBER] Invitation record created, but email dispatch failed:", {
+          inviteToken,
+          error: emailResult?.error,
+          code: emailResult?.errorCode
+        });
+        return res.status(200).json({
+          success: true,
+          inviteToken,
+          emailSent: false,
+          emailError: emailResult?.error || "Email delivery failed",
+          emailErrorCode: emailResult?.errorCode || "EMAIL_DELIVERY_FAILED",
+          statusCode: emailResult?.statusCode || 500,
+          inviteLink: joinUrl,
+          message: `Invitation created, but the invitation email could not be delivered: ${emailResult?.error || 'Email delivery failed'}. You can copy and share the invitation link directly.`,
+          warning: emailResult?.error || "Email delivery failed"
+        });
+      }
+
+      res.json({
+        success: true,
+        inviteToken,
+        emailSent: true,
+        inviteLink: joinUrl,
+        message: "Invitation sent successfully."
+      });
     } catch (error: any) {
-      console.error("🔥 INVITE ERROR:", error);
-      res.status(500).json({ error: "Failed to send invitation", details: error.message });
+      console.warn("⚠️ [INVITE MEMBER] Error:", error?.message || String(error));
+      return res.status(500).json({ error: "InternalError", message: "Failed to create or send invitation." });
     }
   });
 
   // Get Invite Details - Safe public endpoint returning non-sensitive metadata
   app.get("/api/invite-details/:token", async (req, res) => {
-    const { token } = req.params;
+    const tokenValidation = sanitizeInvitationToken(req.params.token);
+    if (!tokenValidation.valid || !tokenValidation.token) {
+      return res.status(400).json({ error: tokenValidation.error || "BadRequest", message: tokenValidation.message || "Missing or invalid invitation token." });
+    }
+    const token = tokenValidation.token;
+
     try {
-      const doc = await db.collection("invites").doc(token).get();
-      if (!doc.exists) {
-        return res.status(404).json({ error: "Invalid or expired invitation token" });
+      let docSnap: FirebaseFirestore.DocumentSnapshot | null = null;
+      let docRef: FirebaseFirestore.DocumentReference = db.collection("invites").doc(token);
+
+      const canonicalSnap = await docRef.get();
+      if (canonicalSnap.exists) {
+        docSnap = canonicalSnap;
+      } else {
+        // Fallback lookup by id or token field for schema resilience
+        const idSnap = await db.collection("invites").where("id", "==", token).limit(1).get();
+        if (!idSnap.empty) {
+          docSnap = idSnap.docs[0];
+          docRef = docSnap.ref;
+        } else {
+          const tokenSnap = await db.collection("invites").where("token", "==", token).limit(1).get();
+          if (!tokenSnap.empty) {
+            docSnap = tokenSnap.docs[0];
+            docRef = docSnap.ref;
+          }
+        }
       }
 
-      const invite = doc.data() || {};
-      res.json({
-        id: doc.id,
+      if (!docSnap || !docSnap.exists) {
+        if (!isProductionEnvironment() && pendingInvitesStore.has(token)) {
+          const invite = pendingInvitesStore.get(token);
+          return res.json({
+            id: token,
+            email: invite.email,
+            projectId: invite.projectId,
+            projectName: invite.projectName,
+            role: invite.role,
+            invitedBy: invite.invitedBy,
+            status: invite.status || "pending",
+            createdAt: invite.createdAt
+          });
+        }
+        return res.status(404).json({ error: "NotFound", message: "Invalid or expired invitation token." });
+      }
+
+      const invite = docSnap.data() || {};
+      return res.json({
+        id: docSnap.id,
         email: invite.email,
         projectId: invite.projectId,
         projectName: invite.projectName,
@@ -4220,137 +5048,65 @@ async function startServer() {
         createdAt: invite.createdAt
       });
     } catch (error: any) {
-      console.warn("⚠️ Server-side invite-details fetch fallback:", error.message);
-      if (error.message && (error.message.includes("PERMISSION_DENIED") || error.code === 7)) {
-        return res.json({ id: token, status: "pending", clientDirectSyncNeeded: true });
-      }
-      res.status(500).json({ error: "Failed to fetch invitation details" });
+      console.error("🚨 [INVITE DETAILS] Database error during invitation lookup:", {
+        tokenPrefix: token.slice(0, 8),
+        errorMessage: error?.message || String(error)
+      });
+      return res.status(500).json({
+        error: "DatabaseError",
+        message: "Failed to retrieve invitation details due to a database error."
+      });
     }
   });
 
   // Accept Invitation & Add User to Project - Protected with requireAuth
   app.post("/api/invite-accept", requireAuth, async (req: AuthenticatedRequest, res) => {
-    const { token } = req.body;
+    const rawToken = req.body?.token;
     const userId = req.user!.uid;
     const userEmail = req.user!.email;
     const userDisplayName = (req.user as any)?.name || userEmail?.split('@')[0] || 'User';
 
-    if (!token) {
-      return res.status(400).json({ error: "Missing invitation token" });
-    }
-    if (!userEmail) {
-      return res.status(400).json({ error: "Authenticated user must have an email address to accept invitations." });
-    }
+    const result = await acceptProjectInvitation(db, {
+      rawToken,
+      userId,
+      userEmail: userEmail || "",
+      userDisplayName,
+      appUrl: resolveAppUrl(),
+      pendingInvitesStore,
+      projectMembersFallbackStore
+    });
 
-    try {
-      let invite: any = {
-        id: token,
-        projectId: "unknown",
-        projectName: "EchoNote Workspace",
-        role: "member",
-        status: "pending"
-      };
-
-      try {
-        const inviteDocRef = db.collection("invites").doc(token);
-        const inviteDoc = await inviteDocRef.get();
-        if (inviteDoc.exists) {
-          invite = inviteDoc.data() || invite;
-
-          // Check invitation status
-          if (invite.status && invite.status !== "pending") {
-            return res.status(400).json({ 
-              error: "Invalid invitation", 
-              message: `This invitation has already been ${invite.status}.` 
-            });
-          }
-
-          // Strict email matching: verified user email must match invite email
-          if (invite.email && invite.email.toLowerCase() !== userEmail.toLowerCase()) {
-            return res.status(403).json({
-              error: "Forbidden",
-              message: `This invitation was issued to ${invite.email}. You are currently authenticated as ${userEmail}.`
-            });
-          }
-        }
-      } catch (e: any) {
-        console.log("⚠️ Server-side invite get failed:", e.message);
-      }
-
-      // 1. Create project member record
-      const memberId = `${userId}_${invite.projectId}`;
-      try {
-        await db.collection("projectMembers").doc(memberId).set({
-          userId,
-          email: userEmail,
-          displayName: userDisplayName,
-          projectId: invite.projectId,
-          ownerId: invite.ownerId || null,
-          projectName: invite.projectName,
-          role: invite.role,
-          joinedAt: FieldValue.serverTimestamp()
-        });
-      } catch (e: any) {
-        console.log("⚠️ Server-side projectMembers set note:", e.message);
-      }
-
-      // 2. Update invite status to accepted
-      try {
-        const inviteDocRef = db.collection("invites").doc(token);
-        await inviteDocRef.update({
-          status: "accepted",
-          acceptedAt: FieldValue.serverTimestamp(),
-          acceptedBy: userId
-        });
-      } catch (e: any) {
-        console.log("⚠️ Server-side invite status update note:", e.message);
-      }
-
-      // 3. Log join project activity
-      try {
-        await db.collection("projectActivities").add({
-          projectId: invite.projectId,
-          userId: userId,
-          userEmail: userEmail,
-          userName: userDisplayName,
-          actionType: "join_project",
-          description: `${userDisplayName} joined project "${invite.projectName}"`,
-          createdAt: FieldValue.serverTimestamp()
-        });
-      } catch (e: any) {
-        console.log("⚠️ Server-side projectActivities add note:", e.message);
-      }
-
-      // 4. Send welcome email via Resend
-      const appUrl = process.env.VITE_APP_URL || `https://${req.get('host')}`;
-      try {
-        await emailService.sendWelcome(userEmail, {
-          name: userDisplayName,
-          dashboardLink: `${appUrl}/app`
-        });
-      } catch (welcomeErr) {
-        console.error("⚠️ Failed to send welcome onboarding email:", welcomeErr);
-      }
-
-      res.json({ success: true, message: "Successfully joined the project" });
-    } catch (error: any) {
-      console.error("🔥 ACCEPT INVITATION ERROR:", error);
-      res.status(500).json({ error: "Failed to accept invitation", details: error.message });
-    }
+    return res.status(result.status).json(result.body);
   });
 
   // Decline/Reject Invitation - Token validated & recipient verified
   app.post("/api/invite-decline", optionalAuth, async (req: AuthenticatedRequest, res) => {
-    const { token } = req.body;
+    const rawToken = req.body?.token;
     const userId = req.user?.uid || null;
 
-    if (!token || typeof token !== 'string') {
-      return res.status(400).json({ error: "Missing token" });
+    if (!rawToken || typeof rawToken !== "string" || !rawToken.trim()) {
+      return res.status(400).json({ error: "Missing token", message: "A valid invitation token is required." });
     }
+    const token = rawToken.trim();
 
     try {
-      const inviteDocRef = db.collection("invites").doc(token);
-      const inviteDoc = await inviteDocRef.get();
+      let inviteDocRef: FirebaseFirestore.DocumentReference = db.collection("invites").doc(token);
+      let inviteDoc = await inviteDocRef.get();
+
+      if (!inviteDoc.exists) {
+        const idSnap = await db.collection("invites").where("id", "==", token).limit(1).get();
+        if (!idSnap.empty) {
+          inviteDoc = idSnap.docs[0];
+          inviteDocRef = inviteDoc.ref;
+        } else {
+          const tokenSnap = await db.collection("invites").where("token", "==", token).limit(1).get();
+          if (!tokenSnap.empty) {
+            inviteDoc = tokenSnap.docs[0];
+            inviteDocRef = inviteDoc.ref;
+          }
+        }
+      }
+
       if (!inviteDoc.exists) {
         return res.status(404).json({ error: "NotFound", message: "Invitation not found or invalid token." });
       }
@@ -4382,13 +5138,13 @@ async function startServer() {
           });
         }
       } catch (e: any) {
-        console.log("⚠️ Server-side decline projectActivities add note:", e.message);
+        console.warn("⚠️ Server-side decline projectActivities add note:", e?.message || e);
       }
 
-      res.json({ success: true, message: "Invitation declined successfully" });
+      return res.status(200).json({ success: true, message: "Invitation declined successfully" });
     } catch (error: any) {
-      console.error("🔥 DECLINE INVITATION ERROR:", error);
-      res.status(500).json({ error: "Failed to decline invitation", details: error.message });
+      console.error("🚨 [DECLINE INVITATION] Error:", error?.message || String(error));
+      return res.status(500).json({ error: "InternalError", message: "Failed to decline invitation." });
     }
   });
 
@@ -4404,12 +5160,14 @@ async function startServer() {
     try {
       const inviteDocRef = db.collection("invites").doc(token);
       const inviteDoc = await inviteDocRef.get();
-      if (inviteDoc.exists) {
-        const inviteData = inviteDoc.data() || {};
-        const access = await checkProjectAccess(db, callerUid, inviteData.projectId, ["owner", "admin"]);
-        if (!access.hasAccess && inviteData.ownerId !== callerUid) {
-          return res.status(403).json({ error: "Forbidden", message: "Permission denied to expire this invite." });
-        }
+      if (!inviteDoc.exists) {
+        return res.status(404).json({ error: "Not Found", message: "Invitation not found." });
+      }
+
+      const inviteData = inviteDoc.data() || {};
+      const access = await resolveProjectAccess(db, req.user, inviteData.projectId, { requiredPermission: 'MANAGE_MEMBERS' });
+      if (!access.hasAccess && inviteData.ownerId !== callerUid && inviteData.invitedBy !== req.user?.email) {
+        return res.status(403).json({ error: "Forbidden", message: "Permission denied to expire this invite." });
       }
 
       try {
@@ -4424,8 +5182,8 @@ async function startServer() {
 
       res.json({ success: true, message: "Invitation expired successfully" });
     } catch (error: any) {
-      console.error("🔥 EXPIRE INVITATION ERROR:", error);
-      res.status(500).json({ error: "Failed to expire invitation", details: error.message });
+      console.error("🚨 [EXPIRE INVITATION] Error:", error?.message || String(error));
+      res.status(500).json({ error: "InternalError", message: "Failed to expire invitation." });
     }
   });
 
@@ -4525,12 +5283,12 @@ async function startServer() {
             code: "SUBSCRIPTION_INIT_DB_FAILED"
           });
         }
-        console.warn("⚠️ Failed to persist pending subscription in Firestore (continuing with non-prod in-memory store):", {
+        // Non-production environment: gracefully continue with in-memory fallback store
+        console.info("ℹ️ [NON-PROD DEV ONLY] Pending subscription recorded in development fallback store:", {
           subscriptionId: subscription.id,
           userId,
           planId: normalizedPlan,
-          billingCycle: normalizedCycle,
-          error: dbErr?.message || String(dbErr)
+          billingCycle: normalizedCycle
         });
       }
 
@@ -4731,12 +5489,12 @@ async function startServer() {
             code: "ORDER_INIT_DB_FAILED"
           });
         }
-        console.warn("⚠️ Failed to persist pending order in Firestore (continuing with non-prod in-memory store):", {
+        // Non-production environment: gracefully continue with in-memory fallback store
+        console.info("ℹ️ [NON-PROD DEV ONLY] Pending order recorded in development fallback store:", {
           orderId: order.id,
           userId,
           type: topupType,
-          amount,
-          error: dbErr?.message || String(dbErr)
+          amount
         });
       }
 
@@ -5104,9 +5862,22 @@ async function startServer() {
   
   // Audio Conversion Endpoints
   const handleAudioConversion = async (req: express.Request, res: express.Response) => {
-    const { base64Audio, fileName, mimeType } = req.body;
+    const authReq = req as AuthenticatedRequest;
+    const { base64Audio, fileName, mimeType, recordingId, projectId } = req.body;
     if (!base64Audio || typeof base64Audio !== 'string' || base64Audio.trim().length === 0) {
       return res.status(400).json({ error: "Missing or invalid base64Audio payload.", code: "INVALID_AUDIO_PAYLOAD" });
+    }
+
+    // Authorize resource context if supplied
+    if (recordingId || projectId) {
+      const accessCheck = await verifyAiResourceAccess(authReq.user, {
+        recordingId,
+        projectId,
+        operationType: 'write'
+      });
+      if (!accessCheck.allowed) {
+        return res.status(accessCheck.status).json({ error: "Forbidden", message: accessCheck.message });
+      }
     }
 
     // Size limit check (approx 50MB base64 ~ 37MB raw binary)
@@ -5152,7 +5923,7 @@ async function startServer() {
       const safeBaseName = (fileName ? path.basename(fileName, path.extname(fileName)) : 'audio').replace(/[^a-zA-Z0-9_-]/g, '_');
 
       res.json({ 
-        success: true,
+        success: true, 
         base64Audio: outputBase64, 
         mimeType: 'audio/wav',
         fileName: `${safeBaseName}.wav`
@@ -5187,6 +5958,7 @@ async function startServer() {
 
   app.post("/api/convert-opus", requireAuth, handleAudioConversion);
   app.post("/api/convert-audio", requireAuth, handleAudioConversion);
+  app.post("/api/convert-base64", requireAuth, handleAudioConversion);
 
   // ==============================================================================
   // Secure Audio Playback & Streaming Architecture
@@ -5229,95 +6001,76 @@ async function startServer() {
     }
   }
 
-  async function authorizeRecordingAccess(
-    user: { uid: string; email?: string; platform_admin?: boolean; role?: string; orgRole?: string },
+  const authorizeRecordingAccess = async (
+    user: { uid: string; email?: string; platform_admin?: boolean; role?: string; orgRole?: string; [key: string]: any },
     recordingId: string,
-    options?: { allowDeleted?: boolean }
-  ): Promise<{ authorized: boolean; record?: any; status: number; message: string }> {
-    if (!user || !user.uid) {
-      return { authorized: false, status: 401, message: "Authentication required" };
+    options?: { 
+      allowDeleted?: boolean;
+      requiredAction?: 'VIEW' | 'COMMENT' | 'EDIT_CONTENT' | 'DELETE';
     }
-
-    const isPlatformAdmin = Boolean(
-      user.platform_admin === true ||
-      user.role === 'admin' ||
-      (user as any)?.claims?.platform_admin === true
-    );
-
-    // 1. Fetch record from 'recordings' or fallback to 'transcriptions'
-    let recordDoc = await db.collection("recordings").doc(recordingId).get();
-    if (!recordDoc.exists) {
-      recordDoc = await db.collection("transcriptions").doc(recordingId).get();
+  ) => {
+    const result = await authRecordingHelper(db, user, recordingId, options);
+    if (!result.authorized) {
+      recordAuthAuditEvent(db, {
+        eventType: result.status === 410 ? 'AUTH_DENIED_SOFT_DELETED' : (result.message?.includes('Tenant isolation') ? 'AUTH_DENIED_TENANT_ISOLATION' : 'AUTH_DENIED_INSUFFICIENT_ROLE'),
+        action: `recording.${options?.requiredAction?.toLowerCase() || 'access'}`,
+        status: 'denied',
+        severity: result.status === 403 && result.message?.includes('Tenant isolation') ? 'high' : 'medium',
+        actorUserId: user?.uid,
+        actorEmail: user?.email,
+        resourceId: recordingId,
+        resourceType: 'recording',
+        requiredPermission: options?.requiredAction || 'VIEW',
+        callerRole: user?.role || user?.orgRole || 'unknown',
+        reason: result.message
+      }).catch(() => {});
+    } else {
+      recordAuthAuditEvent(db, {
+        eventType: 'AUTH_PERMITTED',
+        action: `recording.${options?.requiredAction?.toLowerCase() || 'access'}`,
+        status: 'allowed',
+        severity: 'low',
+        actorUserId: user?.uid,
+        actorEmail: user?.email,
+        organizationId: result.record?.orgId || result.record?.organizationId,
+        projectId: result.record?.projectId,
+        resourceId: recordingId,
+        resourceType: 'recording',
+        requiredPermission: options?.requiredAction || 'VIEW',
+        callerRole: result.role,
+        reason: result.message
+      }).catch(() => {});
     }
+    return result;
+  };
 
-    if (!recordDoc.exists) {
-      return { authorized: false, status: 404, message: "Recording not found" };
+  const verifyAiResourceAccess = async (
+    user: any,
+    options: {
+      recordingId?: string | null;
+      projectId?: string | null;
+      operationType: 'read' | 'write';
     }
-
-    const record = recordDoc.data() || {};
-    record.id = recordDoc.id;
-
-    // Block access to soft-deleted recordings unless explicitly allowed (e.g. for hard-delete or restore)
-    if (record.deletedAt && !options?.allowDeleted) {
-      return { authorized: false, status: 410, message: "Recording has been deleted and cannot be accessed." };
+  ) => {
+    const result = await verifyAiResourceHelper(db, user, options);
+    if (!result.allowed) {
+      recordAuthAuditEvent(db, {
+        eventType: result.status === 400 ? 'AUTH_DENIED_RESOURCE_MISMATCH' : (result.status === 401 ? 'AUTH_DENIED_UNAUTHENTICATED' : 'AI_RESOURCE_GATEWAY_CHECK'),
+        action: `ai.${options.operationType}`,
+        status: 'denied',
+        severity: result.status === 400 ? 'high' : 'medium',
+        actorUserId: user?.uid,
+        actorEmail: user?.email,
+        projectId: options.projectId || undefined,
+        resourceId: options.recordingId || undefined,
+        resourceType: 'ai_resource',
+        requiredPermission: options.operationType === 'write' ? 'EDIT_CONTENT' : 'VIEW',
+        callerRole: user?.role || user?.orgRole || 'unknown',
+        reason: result.message
+      }).catch(() => {});
     }
-
-    if (isPlatformAdmin) {
-      return { authorized: true, record, status: 200, message: "Authorized as platform admin" };
-    }
-
-    // 2. Direct ownership
-    if (record.userId === user.uid) {
-      return { authorized: true, record, status: 200, message: "Authorized as owner" };
-    }
-
-    // 3. Project-level membership / owner
-    const projectId = record.projectId;
-    if (projectId) {
-      const projectAccess = await checkProjectAccess(db, user.uid, projectId, ["owner", "admin", "member", "viewer"]);
-      if (projectAccess.hasAccess) {
-        return { authorized: true, record, status: 200, message: "Authorized via project membership" };
-      }
-
-      const projectDoc = await db.collection("projects").doc(projectId).get();
-      if (projectDoc.exists) {
-        const projectData = projectDoc.data() || {};
-        if (projectData.userId === user.uid) {
-          return { authorized: true, record, status: 200, message: "Authorized as project creator" };
-        }
-        const orgId = projectData.orgId || projectData.organizationId;
-        if (orgId && user.email) {
-          const orgAccess = await checkOrgAccess(db, user.email, orgId, ["owner", "org_admin", "team_manager", "member", "viewer"]);
-          if (orgAccess.hasAccess) {
-            return { authorized: true, record, status: 200, message: "Authorized via organization project affiliation" };
-          }
-        }
-      }
-    }
-
-    // 4. Direct organization membership
-    const recordOrgId = record.orgId || record.organizationId;
-    if (recordOrgId && user.email) {
-      const orgAccess = await checkOrgAccess(db, user.email, recordOrgId, ["owner", "org_admin", "team_manager", "member", "viewer"]);
-      if (orgAccess.hasAccess) {
-        return { authorized: true, record, status: 200, message: "Authorized via organization membership" };
-      }
-    }
-
-    // 5. Explicit collaborators list
-    if (Array.isArray(record.collaborators)) {
-      const isCollaborator = record.collaborators.some((c: any) => 
-        c === user.uid ||
-        c?.userId === user.uid ||
-        (c?.email && user.email && c.email.toLowerCase() === user.email.toLowerCase())
-      );
-      if (isCollaborator) {
-        return { authorized: true, record, status: 200, message: "Authorized as collaborator" };
-      }
-    }
-
-    return { authorized: false, status: 403, message: "Access denied. You do not have permission to access this recording." };
-  }
+    return result;
+  };
 
   function resolveStoragePath(record: any): string | null {
     if (record.storagePath && typeof record.storagePath === 'string') {
@@ -5530,42 +6283,18 @@ async function startServer() {
         return res.status(400).json({ error: "Bad Request", message: "Project ID is required." });
       }
 
-      const projectDoc = await db.collection("projects").doc(projectId).get();
-      if (!projectDoc.exists) {
-        return res.status(404).json({ error: "Not Found", message: "Project not found." });
-      }
-      const projectData = projectDoc.data() || {};
-
-      const isPlatformAdmin = Boolean(
-        req.user.platform_admin === true ||
-        req.user.role === 'admin' ||
-        (req.user as any)?.claims?.platform_admin === true
-      );
-      const isProjectOwner = projectData.userId === req.user.uid;
-
-      let hasAdminPrivilege = isProjectOwner || isPlatformAdmin;
-
-      if (!hasAdminPrivilege) {
-        const projectAccess = await checkProjectAccess(db, req.user.uid, projectId, ["owner", "admin"]);
-        if (projectAccess.hasAccess && (projectAccess.isOwner || projectAccess.role === 'admin')) {
-          hasAdminPrivilege = true;
+      const projAccess = await resolveProjectAccess(db, req.user, projectId, { requiredPermission: 'DELETE_PROJECT' });
+      if (!projAccess.hasAccess || !projAccess.permissions.canDeleteProject) {
+        if (projAccess.notFound) {
+          return res.status(404).json({ error: "Not Found", message: "Project not found." });
         }
-      }
-
-      if (!hasAdminPrivilege && projectData.organizationId) {
-        const orgAccess = await checkOrgAccess(db, req.user.email, projectData.organizationId, ["owner", "org_admin"]);
-        if (orgAccess.hasAccess) {
-          hasAdminPrivilege = true;
-        }
-      }
-
-      if (!hasAdminPrivilege) {
         return res.status(403).json({
           error: "Forbidden",
           message: "Only the project owner, organization administrator, or platform administrator can delete this project."
         });
       }
 
+      const projectData = projAccess.project || {};
       const cascadeRecordings = req.query.cascadeRecordings === 'true' || req.body?.cascadeRecordings === true;
       const bucketName = firebaseConfig.storageBucket || "echonote-2509.firebasestorage.app";
       const bucket = admin.storage().bucket(bucketName);
@@ -5681,22 +6410,17 @@ async function startServer() {
         return res.status(400).json({ error: "Bad Request", message: "projectId and newOwnerId are required." });
       }
 
-      const projectDoc = await db.collection("projects").doc(projectId).get();
-      if (!projectDoc.exists) {
-        return res.status(404).json({ error: "Not Found", message: "Project not found." });
+      const projAccess = await resolveProjectAccess(db, req.user, projectId, { requiredPermission: 'DELETE_PROJECT' });
+      if (!projAccess.hasAccess || (!projAccess.isOwner && !projAccess.isPlatformAdmin && !projAccess.isOrgAdmin)) {
+        if (projAccess.notFound) {
+          return res.status(404).json({ error: "Not Found", message: "Project not found." });
+        }
+        return res.status(403).json({ 
+          error: "Forbidden", 
+          message: "Only the current project owner, organization administrator, or platform admin can transfer ownership." 
+        });
       }
-      const projectData = projectDoc.data() || {};
-
-      const isPlatformAdmin = Boolean(
-        req.user.platform_admin === true ||
-        req.user.role === 'admin' ||
-        (req.user as any)?.claims?.platform_admin === true
-      );
-      const isOwner = projectData.userId === req.user.uid;
-
-      if (!isOwner && !isPlatformAdmin) {
-        return res.status(403).json({ error: "Forbidden", message: "Only the current project owner or platform admin can transfer ownership." });
-      }
+      const projectData = projAccess.project || {};
 
       // Verify target user exists
       const targetUserDoc = await db.collection("users").doc(newOwnerId).get();
@@ -5704,6 +6428,17 @@ async function startServer() {
         return res.status(404).json({ error: "Not Found", message: "Target owner user not found." });
       }
       const targetUserData = targetUserDoc.data() || {};
+
+      // Tenant isolation: if project is in an org, target user MUST be an active member of that org
+      if (projectData.organizationId) {
+        const targetOrgMember = await checkOrgAccess(db, targetUserData.email, projectData.organizationId, ["owner", "org_admin", "team_manager", "member", "viewer"]);
+        if (!targetOrgMember.hasAccess) {
+          return res.status(400).json({
+            error: "Bad Request",
+            message: "Target owner must be an active member of the project's organization to receive ownership."
+          });
+        }
+      }
 
       // Verify target user is affiliated (project member or organization member)
       const targetMemberDoc = await db.collection("projectMembers").doc(`${newOwnerId}_${projectId}`).get();
@@ -5784,6 +6519,512 @@ async function startServer() {
     } catch (err: any) {
       console.error("[Ownership Transfer Error]:", err);
       return res.status(500).json({ error: "Internal Server Error", message: "Failed to transfer project ownership." });
+    }
+  });
+
+  // ============================================================================
+  // SERVER-AUTHORITATIVE COMMENT API (PHASE 1 - STEP 4A)
+  // ============================================================================
+
+  // 1. GET /api/recordings/:recordingId/comments
+  app.get("/api/recordings/:recordingId/comments", requireAuth, async (req: AuthenticatedRequest, res: express.Response) => {
+    try {
+      const { recordingId } = req.params;
+      if (!recordingId || typeof recordingId !== 'string') {
+        return res.status(400).json({ error: "Bad Request", message: "Valid recordingId is required." });
+      }
+
+      // Authorize access with VIEW permission
+      const authResult = await authorizeRecordingAccess(req.user, recordingId, { requiredAction: 'VIEW' });
+      if (!authResult.authorized) {
+        return res.status(authResult.status).json({
+          error: authResult.status === 404 ? "Not Found" : (authResult.status === 401 ? "Unauthorized" : "Forbidden"),
+          message: authResult.message
+        });
+      }
+
+      const commentsSnap = await db.collection("comments").where("recordingId", "==", recordingId).get();
+
+      const comments = commentsSnap.docs.map(doc => {
+        const data = doc.data() || {};
+        return {
+          id: doc.id,
+          ...data
+        };
+      });
+
+      // Consistent sorting: timestampSeconds ascending, then createdAt ascending
+      // (comments without timestampSeconds placed after timestamped comments)
+      comments.sort((a: any, b: any) => {
+        const hasTimeA = typeof a.timestampSeconds === 'number' && !isNaN(a.timestampSeconds);
+        const hasTimeB = typeof b.timestampSeconds === 'number' && !isNaN(b.timestampSeconds);
+        if (hasTimeA && hasTimeB) {
+          if (a.timestampSeconds !== b.timestampSeconds) {
+            return a.timestampSeconds - b.timestampSeconds;
+          }
+        } else if (hasTimeA && !hasTimeB) {
+          return -1;
+        } else if (!hasTimeA && hasTimeB) {
+          return 1;
+        }
+        const createdA = typeof a.createdAt === 'string' ? a.createdAt : (a.createdAt?.toDate ? a.createdAt.toDate().toISOString() : '');
+        const createdB = typeof b.createdAt === 'string' ? b.createdAt : (b.createdAt?.toDate ? b.createdAt.toDate().toISOString() : '');
+        return createdA.localeCompare(createdB);
+      });
+
+      return res.json({ comments });
+    } catch (err: any) {
+      console.error("[Get Comments Error]:", err);
+      return res.status(500).json({ error: "Internal Server Error", message: "Failed to fetch comments." });
+    }
+  });
+
+  // 2. POST /api/recordings/:recordingId/comments
+  app.post("/api/recordings/:recordingId/comments", requireAuth, async (req: AuthenticatedRequest, res: express.Response) => {
+    try {
+      const { recordingId } = req.params;
+      if (!recordingId || typeof recordingId !== 'string') {
+        return res.status(400).json({ error: "Bad Request", message: "Valid recordingId is required." });
+      }
+
+      // Authorize access with COMMENT permission (verifies role, project, and tenant boundaries)
+      const authResult = await authorizeRecordingAccess(req.user, recordingId, { requiredAction: 'COMMENT' });
+      if (!authResult.authorized) {
+        return res.status(authResult.status).json({
+          error: authResult.status === 404 ? "Not Found" : (authResult.status === 401 ? "Unauthorized" : "Forbidden"),
+          message: authResult.message
+        });
+      }
+
+      const recording = authResult.record;
+      const projectId = recording.projectId;
+      if (!projectId || typeof projectId !== 'string') {
+        return res.status(400).json({ error: "Bad Request", message: "Recording must be associated with a valid project to receive comments." });
+      }
+
+      // Authoritative project verification
+      const projectDoc = await db.collection("projects").doc(projectId).get();
+      if (!projectDoc.exists) {
+        return res.status(404).json({ error: "Not Found", message: "Associated project not found." });
+      }
+      const projectData = projectDoc.data() || {};
+
+      // Organization boundary consistency
+      const recOrg = recording.organizationId || recording.orgId;
+      const projOrg = projectData.organizationId || projectData.orgId;
+      if (recOrg && projOrg && recOrg !== projOrg) {
+        return res.status(400).json({ error: "Bad Request", message: "Recording and project organization mismatch." });
+      }
+      const authoritativeOrgId = projOrg || recOrg || null;
+
+      // Validate request body
+      const { content, timestampSeconds, parentCommentId } = req.body || {};
+
+      if (content === undefined || content === null || typeof content !== 'string') {
+        return res.status(400).json({ error: "Bad Request", message: "Content is required and must be a string." });
+      }
+      const trimmedContent = content.trim();
+      if (!trimmedContent) {
+        return res.status(400).json({ error: "Bad Request", message: "Content cannot be empty." });
+      }
+      if (trimmedContent.length > 5000) {
+        return res.status(400).json({ error: "Bad Request", message: "Content exceeds maximum length of 5000 characters." });
+      }
+
+      // Validate timestampSeconds if provided
+      let validatedTimestamp: number | undefined = undefined;
+      if (timestampSeconds !== undefined && timestampSeconds !== null) {
+        if (typeof timestampSeconds !== 'number' || isNaN(timestampSeconds) || !isFinite(timestampSeconds) || timestampSeconds < 0) {
+          return res.status(400).json({ error: "Bad Request", message: "timestampSeconds must be a non-negative finite number." });
+        }
+        validatedTimestamp = timestampSeconds;
+      }
+
+      // Validate parentCommentId if provided (must belong to same recording and project)
+      let validatedParentId: string | undefined = undefined;
+      if (parentCommentId !== undefined && parentCommentId !== null) {
+        if (typeof parentCommentId !== 'string' || !parentCommentId.trim()) {
+          return res.status(400).json({ error: "Bad Request", message: "parentCommentId must be a non-empty string." });
+        }
+        const parentDoc = await db.collection("comments").doc(parentCommentId.trim()).get();
+        if (!parentDoc.exists) {
+          return res.status(404).json({ error: "Not Found", message: "Parent comment not found." });
+        }
+        const parentData = parentDoc.data() || {};
+        if (parentData.recordingId !== recordingId) {
+          return res.status(400).json({ error: "Bad Request", message: "Parent comment belongs to a different recording." });
+        }
+        if (parentData.projectId !== projectId) {
+          return res.status(400).json({ error: "Bad Request", message: "Parent comment belongs to a different project." });
+        }
+        validatedParentId = parentCommentId.trim();
+      }
+
+      // Authoritative author identity
+      const userId = req.user.uid;
+      let userEmail = req.user.email || "";
+      let userName = req.user.displayName || req.user.name || "";
+
+      try {
+        const userDoc = await db.collection("users").doc(userId).get();
+        if (userDoc.exists) {
+          const uData = userDoc.data() || {};
+          if (uData.email) userEmail = uData.email;
+          if (uData.displayName) userName = uData.displayName;
+        }
+      } catch {}
+
+      if (!userName && userEmail) {
+        userName = userEmail.split('@')[0];
+      }
+
+      const now = new Date().toISOString();
+      const commentDocRef = db.collection("comments").doc();
+      const newComment: Record<string, any> = {
+        id: commentDocRef.id,
+        recordingId,
+        projectId,
+        userId,
+        userEmail,
+        userName,
+        content: trimmedContent,
+        createdAt: now,
+        updatedAt: now
+      };
+
+      if (authoritativeOrgId) {
+        newComment.organizationId = authoritativeOrgId;
+        newComment.orgId = authoritativeOrgId;
+      }
+      if (validatedTimestamp !== undefined) {
+        newComment.timestampSeconds = validatedTimestamp;
+      }
+      if (validatedParentId !== undefined) {
+        newComment.parentCommentId = validatedParentId;
+      }
+
+      await commentDocRef.set(newComment);
+
+      const recordingTitle = recording.fileName || recording.title || recording.name || 'Recording';
+
+      // 1. Create projectActivity (comment_added)
+      try {
+        await db.collection("projectActivities").add({
+          projectId,
+          organizationId: authoritativeOrgId || null,
+          userId,
+          userEmail,
+          userName,
+          actionType: "comment_added",
+          description: `${userName} added a comment on recording "${recordingTitle}"`,
+          recordingId,
+          commentId: commentDocRef.id,
+          createdAt: FieldValue.serverTimestamp()
+        });
+      } catch (actErr: any) {
+        console.warn("[Create Comment Activity Note]:", actErr?.message || actErr);
+      }
+
+      // 2. Create Notifications (Server-authoritative recipient resolution)
+      try {
+        const recipientsToNotify: Array<{ userId: string; userEmail?: string; isReply: boolean }> = [];
+
+        // A. Recording creator/owner notification (when another user comments)
+        const recordingOwnerId = recording.userId || recording.ownerId;
+        const recordingOwnerEmail = recording.userEmail || recording.ownerEmail;
+        if (recordingOwnerId && recordingOwnerId !== userId) {
+          // Verify recipient belongs to project/organization
+          const isProjectOwner = projectData.userId === recordingOwnerId || 
+            (projectData.ownerEmail && projectData.ownerEmail.toLowerCase() === recordingOwnerEmail?.toLowerCase());
+          const isProjectMember = Array.isArray(projectData.members) && projectData.members.some(
+            (m: any) => m.uid === recordingOwnerId || m.userId === recordingOwnerId || 
+              (m.email && m.email.toLowerCase() === recordingOwnerEmail?.toLowerCase())
+          );
+
+          if (isProjectOwner || isProjectMember || !authoritativeOrgId) {
+            recipientsToNotify.push({
+              userId: recordingOwnerId,
+              userEmail: recordingOwnerEmail,
+              isReply: false
+            });
+          }
+        }
+
+        // B. Parent comment author notification (for replies when another user replies)
+        if (validatedParentId) {
+          try {
+            const parentDoc = await db.collection("comments").doc(validatedParentId).get();
+            if (parentDoc.exists) {
+              const parentData = parentDoc.data() || {};
+              const parentAuthorId = parentData.userId;
+              const parentAuthorEmail = parentData.userEmail;
+              if (
+                parentAuthorId &&
+                parentAuthorId !== userId &&
+                !recipientsToNotify.some(r => r.userId === parentAuthorId)
+              ) {
+                // Verify tenant boundary
+                const parentOrg = parentData.organizationId || parentData.orgId;
+                if (!authoritativeOrgId || !parentOrg || parentOrg === authoritativeOrgId) {
+                  recipientsToNotify.push({
+                    userId: parentAuthorId,
+                    userEmail: parentAuthorEmail,
+                    isReply: true
+                  });
+                }
+              }
+            }
+          } catch (pErr) {
+            console.warn("[Parent Comment Lookup Note]:", pErr);
+          }
+        }
+
+        // Persist notification for each eligible recipient using deterministic IDs to prevent duplicates
+        for (const recipient of recipientsToNotify) {
+          const notifId = `notif_comment_${commentDocRef.id}_${recipient.userId}`;
+          const notifTitle = recipient.isReply ? "New Reply on Comment" : "New Comment on Recording";
+          const notifMessage = recipient.isReply
+            ? `${userName} replied to your comment on "${recordingTitle}".`
+            : `${userName} commented on "${recordingTitle}".`;
+
+          await db.collection("notifications").doc(notifId).set({
+            userId: recipient.userId,
+            userEmail: recipient.userEmail || "",
+            title: notifTitle,
+            message: notifMessage,
+            type: "info",
+            projectId,
+            recordingId,
+            recordId: recordingId,
+            commentId: commentDocRef.id,
+            actorUserId: userId,
+            isRead: false,
+            createdAt: FieldValue.serverTimestamp()
+          });
+        }
+      } catch (notifErr: any) {
+        console.warn("[Create Comment Notification Note]:", notifErr?.message || notifErr);
+      }
+
+      return res.status(201).json({ success: true, comment: newComment });
+    } catch (err: any) {
+      console.error("[Create Comment Error]:", err);
+      return res.status(500).json({ error: "Internal Server Error", message: "Failed to create comment." });
+    }
+  });
+
+  // 3. PATCH /api/comments/:commentId
+  app.patch("/api/comments/:commentId", requireAuth, async (req: AuthenticatedRequest, res: express.Response) => {
+    try {
+      const { commentId } = req.params;
+      if (!commentId || typeof commentId !== 'string') {
+        return res.status(400).json({ error: "Bad Request", message: "Valid commentId is required." });
+      }
+
+      // 1. Load comment
+      const commentDoc = await db.collection("comments").doc(commentId).get();
+      if (!commentDoc.exists) {
+        return res.status(404).json({ error: "Not Found", message: "Comment not found." });
+      }
+      const comment = commentDoc.data() || {};
+      comment.id = commentDoc.id;
+
+      // 2. Load authoritative recording
+      let recordingDoc = await db.collection("recordings").doc(comment.recordingId).get();
+      if (!recordingDoc.exists) {
+        recordingDoc = await db.collection("transcriptions").doc(comment.recordingId).get();
+      }
+      if (!recordingDoc.exists) {
+        return res.status(404).json({ error: "Not Found", message: "Associated recording not found." });
+      }
+      const recording = recordingDoc.data() || {};
+
+      // 3. Validate recording.projectId === comment.projectId
+      if (recording.projectId !== comment.projectId) {
+        return res.status(400).json({ error: "Bad Request", message: "Comment and recording project mismatch." });
+      }
+
+      // 4. Resolve project access
+      const projAccess = await resolveProjectAccess(db, req.user, comment.projectId);
+      if (!projAccess.hasAccess) {
+        return res.status(403).json({ error: "Forbidden", message: "Access denied to project." });
+      }
+
+      // 5. Authorize update
+      const isAuthor = comment.userId === req.user.uid;
+      const canModerate = Boolean(
+        projAccess.isPlatformAdmin ||
+        projAccess.isOwner ||
+        projAccess.isOrgAdmin ||
+        projAccess.role === 'admin' ||
+        projAccess.role === 'owner'
+      );
+
+      const isViewer = projAccess.role === 'viewer';
+      // Commenter can edit own comment IF they still have canComment permission; viewers cannot edit
+      const canAuthorEdit = isAuthor && !isViewer && (projAccess.permissions.canComment || canModerate);
+
+      if (!canAuthorEdit && !canModerate) {
+        return res.status(403).json({
+          error: "Forbidden",
+          message: isViewer
+            ? "Permission denied: Viewers cannot modify comments."
+            : (isAuthor 
+                ? "Your role does not permit modifying comments." 
+                : "Permission denied: Only the comment author or project administrator can edit this comment.")
+        });
+      }
+
+      // 6. Validate allowed mutations (only content can be changed)
+      const { content } = req.body || {};
+      if (content === undefined || content === null || typeof content !== 'string') {
+        return res.status(400).json({ error: "Bad Request", message: "Content is required and must be a string." });
+      }
+      const trimmedContent = content.trim();
+      if (!trimmedContent) {
+        return res.status(400).json({ error: "Bad Request", message: "Content cannot be empty." });
+      }
+      if (trimmedContent.length > 5000) {
+        return res.status(400).json({ error: "Bad Request", message: "Content exceeds maximum length of 5000 characters." });
+      }
+
+      const updatedAt = new Date().toISOString();
+      await db.collection("comments").doc(commentId).update({
+        content: trimmedContent,
+        updatedAt
+      });
+
+      const updatedComment = {
+        ...comment,
+        content: trimmedContent,
+        updatedAt
+      };
+
+      // Create projectActivity (comment_updated)
+      try {
+        const recordingTitle = recording.fileName || recording.title || recording.name || 'Recording';
+        const actorName = req.user.displayName || req.user.name || (req.user.email ? req.user.email.split('@')[0] : 'User');
+
+        await db.collection("projectActivities").add({
+          projectId: comment.projectId,
+          organizationId: comment.organizationId || comment.orgId || null,
+          userId: req.user.uid,
+          userEmail: req.user.email || "",
+          userName: actorName,
+          actionType: "comment_updated",
+          description: isAuthor 
+            ? `${actorName} updated their comment on recording "${recordingTitle}"`
+            : `${actorName} updated a comment on recording "${recordingTitle}"`,
+          recordingId: comment.recordingId,
+          commentId,
+          createdAt: FieldValue.serverTimestamp()
+        });
+      } catch (actErr: any) {
+        console.warn("[Update Comment Activity Note]:", actErr?.message || actErr);
+      }
+
+      return res.json({ success: true, comment: updatedComment });
+    } catch (err: any) {
+      console.error("[Patch Comment Error]:", err);
+      return res.status(500).json({ error: "Internal Server Error", message: "Failed to update comment." });
+    }
+  });
+
+  // 4. DELETE /api/comments/:commentId
+  app.delete("/api/comments/:commentId", requireAuth, async (req: AuthenticatedRequest, res: express.Response) => {
+    try {
+      const { commentId } = req.params;
+      if (!commentId || typeof commentId !== 'string') {
+        return res.status(400).json({ error: "Bad Request", message: "Valid commentId is required." });
+      }
+
+      // 1. Load comment
+      const commentDoc = await db.collection("comments").doc(commentId).get();
+      if (!commentDoc.exists) {
+        return res.status(404).json({ error: "Not Found", message: "Comment not found." });
+      }
+      const comment = commentDoc.data() || {};
+      comment.id = commentDoc.id;
+
+      // 2. Load authoritative recording
+      let recordingDoc = await db.collection("recordings").doc(comment.recordingId).get();
+      if (!recordingDoc.exists) {
+        recordingDoc = await db.collection("transcriptions").doc(comment.recordingId).get();
+      }
+      if (!recordingDoc.exists) {
+        return res.status(404).json({ error: "Not Found", message: "Associated recording not found." });
+      }
+      const recording = recordingDoc.data() || {};
+
+      // 3. Validate recording.projectId === comment.projectId
+      if (recording.projectId !== comment.projectId) {
+        return res.status(400).json({ error: "Bad Request", message: "Comment and recording project mismatch." });
+      }
+
+      // 4. Resolve project access
+      const projAccess = await resolveProjectAccess(db, req.user, comment.projectId);
+      if (!projAccess.hasAccess) {
+        return res.status(403).json({ error: "Forbidden", message: "Access denied to project." });
+      }
+
+      // 5. Authorize delete
+      const isAuthor = comment.userId === req.user.uid;
+      const canModerate = Boolean(
+        projAccess.isPlatformAdmin ||
+        projAccess.isOwner ||
+        projAccess.isOrgAdmin ||
+        projAccess.role === 'admin' ||
+        projAccess.role === 'owner'
+      );
+
+      const isViewer = projAccess.role === 'viewer';
+      const canAuthorDelete = isAuthor && !isViewer && (projAccess.permissions.canComment || canModerate);
+
+      if (!canAuthorDelete && !canModerate) {
+        return res.status(403).json({
+          error: "Forbidden",
+          message: isViewer
+            ? "Permission denied: Viewers cannot delete comments."
+            : (isAuthor
+                ? "Your role does not permit deleting comments."
+                : "Permission denied: Only the comment author or project administrator can delete this comment.")
+        });
+      }
+
+      // 6. Delete comment
+      await db.collection("comments").doc(commentId).delete();
+
+      // Create projectActivity (comment_deleted)
+      try {
+        const recordingTitle = recording.fileName || recording.title || recording.name || 'Recording';
+        const actorName = req.user.displayName || req.user.name || (req.user.email ? req.user.email.split('@')[0] : 'User');
+
+        await db.collection("projectActivities").add({
+          projectId: comment.projectId,
+          organizationId: comment.organizationId || comment.orgId || null,
+          userId: req.user.uid,
+          userEmail: req.user.email || "",
+          userName: actorName,
+          actionType: "comment_deleted",
+          description: isAuthor 
+            ? `${actorName} deleted their comment on recording "${recordingTitle}"`
+            : `${actorName} deleted a comment on recording "${recordingTitle}"`,
+          recordingId: comment.recordingId,
+          commentId,
+          createdAt: FieldValue.serverTimestamp()
+        });
+      } catch (actErr: any) {
+        console.warn("[Delete Comment Activity Note]:", actErr?.message || actErr);
+      }
+
+      return res.json({
+        success: true,
+        message: "Comment deleted successfully.",
+        commentId
+      });
+    } catch (err: any) {
+      console.error("[Delete Comment Error]:", err);
+      return res.status(500).json({ error: "Internal Server Error", message: "Failed to delete comment." });
     }
   });
 
@@ -6243,6 +7484,102 @@ async function startServer() {
     }
   });
 
+  // Admin Authorization & Security Audit Logs Feed
+  app.get("/api/admin/audit-logs", requireAuth, async (req: AuthenticatedRequest, res) => {
+    try {
+      // Must be platform admin OR organization admin/owner
+      const isPlatformAdmin = Boolean(
+        req.user?.platform_admin === true ||
+        req.user?.role === 'admin' ||
+        (req.user as any)?.claims?.platform_admin === true
+      );
+
+      let callerOrgId: string | undefined = req.user?.orgId;
+      const callerRole: string = req.user?.orgRole || req.user?.role || '';
+      let isAuthorizedAdmin = isPlatformAdmin || ['owner', 'org_admin'].includes(callerRole);
+
+      // Verify db user role if not verified in claims
+      if (!isAuthorizedAdmin && req.user?.uid) {
+        try {
+          const userDoc = await db.collection("users").doc(req.user.uid).get();
+          if (userDoc.exists) {
+            const uData = userDoc.data() || {};
+            if (uData.role === 'admin') {
+              isAuthorizedAdmin = true;
+            } else if (uData.organizationId) {
+              callerOrgId = uData.organizationId;
+              const orgMemberSnap = await db.collection("organizations").doc(callerOrgId).collection("members").doc(req.user.uid).get();
+              if (orgMemberSnap.exists && ['owner', 'org_admin'].includes(orgMemberSnap.data()?.role)) {
+                isAuthorizedAdmin = true;
+              }
+            }
+          }
+        } catch (authErr) {
+          // ignore
+        }
+      }
+
+      if (!isAuthorizedAdmin) {
+        res.status(403).json({
+          error: "Forbidden",
+          message: "Administrative privileges required to access authorization audit logs."
+        });
+        return;
+      }
+
+      const {
+        searchTerm,
+        status,
+        severity,
+        action,
+        actionType,
+        userEmail,
+        organizationId,
+        projectId,
+        projectName,
+        startDate,
+        endDate,
+        startTimestamp,
+        endTimestamp,
+        limit,
+        sortOrder
+      } = req.query;
+
+      const filterOrgId = isPlatformAdmin 
+        ? (organizationId ? String(organizationId) : undefined)
+        : callerOrgId;
+
+      const result = await queryAuthAuditLogs(db, {
+        searchTerm: searchTerm ? String(searchTerm) : undefined,
+        status: status ? (status as any) : 'all',
+        severity: severity ? (severity as any) : 'all',
+        action: action ? String(action) : undefined,
+        actionType: actionType ? String(actionType) : undefined,
+        userEmail: userEmail ? String(userEmail) : undefined,
+        organizationId: filterOrgId,
+        projectId: projectId ? String(projectId) : undefined,
+        projectName: projectName ? String(projectName) : undefined,
+        startDate: startDate ? String(startDate) : undefined,
+        endDate: endDate ? String(endDate) : undefined,
+        startTimestamp: startTimestamp ? String(startTimestamp) : undefined,
+        endTimestamp: endTimestamp ? String(endTimestamp) : undefined,
+        limit: limit ? parseInt(String(limit), 10) : 200,
+        sortOrder: sortOrder === 'asc' ? 'asc' : 'desc'
+      });
+
+      res.json({
+        success: true,
+        ...result
+      });
+    } catch (err: any) {
+      console.error("Failed to query authorization audit logs:", err?.message || err);
+      res.status(500).json({
+        error: "Internal Server Error",
+        message: "Failed to query authorization audit logs."
+      });
+    }
+  });
+
   // Helper to sanitize error messages from AI provider calls to prevent credentials or stack traces from leaking
   function sanitizeAiErrorMessage(errMsg: any): string {
     if (!errMsg || typeof errMsg !== 'string') return "AI processing failed. Please try again.";
@@ -6265,16 +7602,14 @@ async function startServer() {
     const plan = userCtx.plan;
 
     // Authorize resource identifiers if provided
-    if (recordingId && typeof recordingId === 'string' && recordingId.trim()) {
-      const authResult = await authorizeRecordingAccess(req.user, recordingId.trim());
-      if (!authResult.authorized) {
-        return res.status(authResult.status).json({ error: "Forbidden", message: authResult.message });
-      }
-    }
-    if (projectId && typeof projectId === 'string' && projectId.trim()) {
-      const projectAccess = await checkProjectAccess(db, userId, projectId.trim(), ["owner", "admin", "member", "viewer"]);
-      if (!projectAccess.hasAccess) {
-        return res.status(403).json({ error: "Forbidden", message: "Access denied to requested project." });
+    if (recordingId || projectId) {
+      const accessCheck = await verifyAiResourceAccess(req.user, {
+        recordingId,
+        projectId,
+        operationType: 'write'
+      });
+      if (!accessCheck.allowed) {
+        return res.status(accessCheck.status).json({ error: "Forbidden", message: accessCheck.message });
       }
     }
 
@@ -6422,16 +7757,14 @@ async function startServer() {
     const plan = userCtx.plan;
 
     // Authorize resource identifiers if provided
-    if (recordingId && typeof recordingId === 'string' && recordingId.trim()) {
-      const authResult = await authorizeRecordingAccess(req.user, recordingId.trim());
-      if (!authResult.authorized) {
-        return res.status(authResult.status).json({ error: "Forbidden", message: authResult.message });
-      }
-    }
-    if (projectId && typeof projectId === 'string' && projectId.trim()) {
-      const projectAccess = await checkProjectAccess(db, userId, projectId.trim(), ["owner", "admin", "member", "viewer"]);
-      if (!projectAccess.hasAccess) {
-        return res.status(403).json({ error: "Forbidden", message: "Access denied to requested project." });
+    if (recordingId || projectId) {
+      const accessCheck = await verifyAiResourceAccess(req.user, {
+        recordingId,
+        projectId,
+        operationType: 'read'
+      });
+      if (!accessCheck.allowed) {
+        return res.status(accessCheck.status).json({ error: "Forbidden", message: accessCheck.message });
       }
     }
 
@@ -6539,12 +7872,587 @@ async function startServer() {
     }
   });
 
-  app.post("/api/ai/synthesize-speech", requireAuth, async (req: AuthenticatedRequest, res) => {
-    const { text, gender } = req.body;
+  app.post("/api/ai/smart-recap", requireAuth, async (req: AuthenticatedRequest, res) => {
+    const { transcript, recordingId, projectId, knownMembers } = req.body;
     const userCtx = await resolveUserContext(req);
     const userId = userCtx.userId;
     const email = userCtx.email;
     const plan = userCtx.plan;
+
+    // Authorize resource identifiers if provided
+    if (recordingId || projectId) {
+      const accessCheck = await verifyAiResourceAccess(req.user, {
+        recordingId,
+        projectId,
+        operationType: 'read'
+      });
+      if (!accessCheck.allowed) {
+        return res.status(accessCheck.status).json({ error: "Forbidden", message: accessCheck.message });
+      }
+    }
+
+    const start = Date.now();
+    const model = 'gemini-3.8-flash';
+    const featureName = "AI Smart Recap";
+
+    if (!transcript) {
+      return res.status(400).json({ error: "Missing transcript data for AI Smart Recap" });
+    }
+
+    const slot = admitExpensiveOperation(req, res, 'ai');
+    if (!slot) return;
+
+    let transcriptText = '';
+    if (Array.isArray(transcript)) {
+      transcriptText = transcript.map((s: any) => `${s.speaker || 'Speaker'}: ${s.text || ''}`).join('\n');
+    } else {
+      transcriptText = String(transcript);
+    }
+
+    let teamMembersContext = '';
+    if (Array.isArray(knownMembers) && knownMembers.length > 0) {
+      teamMembersContext = `\nKNOWN TEAM MEMBERS ON THIS PROJECT:\n` +
+        knownMembers.map((m: any) => `- Name: ${m.name || 'Member'}, Email: ${m.email || 'N/A'}, Role: ${m.role || 'Member'}`).join('\n');
+    } else if (projectId) {
+      try {
+        const membersSnap = await db.collection('projectMembers').where('projectId', '==', projectId).limit(20).get();
+        if (!membersSnap.empty) {
+          teamMembersContext = `\nKNOWN PROJECT TEAM MEMBERS:\n` +
+            membersSnap.docs.map(d => {
+              const data = d.data();
+              return `- Name: ${data.displayName || data.name || data.email || 'Member'}, Email: ${data.email || ''}, Role: ${data.role || 'member'}`;
+            }).join('\n');
+        }
+      } catch (err) {
+        // Non-blocking team lookup
+      }
+    }
+
+    try {
+      const response = await aiGen.models.generateContent({
+        model,
+        contents: [
+          {
+            parts: [
+              {
+                text: `You are an elite executive intelligence synthesizer and organizational memory analyst.
+Based on the following meeting transcript, produce an authoritative "AI Smart Recap".
+
+MANDATORY DELIVERABLES:
+1. EXECUTIVE SUMMARY:
+   - Provide EXACTLY THREE (3) high-impact bullet points:
+     * Bullet 1: Strategic Context & Discussion Purpose (What prompted the discussion and the primary operational context).
+     * Bullet 2: Key Strategic & Technical Decisions (Definitive conclusions, technical or architectural agreements, or consensus reached).
+     * Bullet 3: Forward Trajectory & Urgent Action Path (Immediate milestones, critical deadlines, and assigned deliverables).
+   - Each bullet must be punchy, clear, and business-focused (2-3 sentences per bullet).
+
+2. AUTOMATICALLY TAG RELEVANT TEAM MEMBERS:
+   - Identify every team member or participant who:
+     * Was assigned an action item, milestone, or task
+     * Made or championed a key decision
+     * Was discussed as a stakeholder, dependency, or blocker owner
+     * Actively spoke or led a crucial agenda item
+   - Correlate with the provided Known Team Members list whenever possible, or extract named individuals and speakers from the transcript.
+   - For each tagged team member, specify:
+     * name: Their full name or identifier
+     * email: Their email address (if matching known team members or identifiable, otherwise empty)
+     * role: Their organizational or meeting role (e.g., 'Lead Engineer', 'Product Manager', 'Decision Stakeholder', 'Contributor')
+     * reason: A specific, 1-sentence reason explaining why they are tagged (e.g., 'Assigned to finalize Cloud Run deployment and secret configuration before Friday')
+     * actionItems: An array of strings with specific action items or responsibilities assigned to them (or empty if none)
+
+${teamMembersContext}
+
+TRANSCRIPT:
+${transcriptText}`,
+              },
+            ],
+          },
+        ],
+        config: {
+          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              meetingTopic: { type: Type.STRING },
+              strategicTakeaway: { type: Type.STRING },
+              executiveSummary: {
+                type: Type.ARRAY,
+                items: { type: Type.STRING },
+                description: "Exactly 3 executive summary bullet points"
+              },
+              taggedMembers: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    name: { type: Type.STRING },
+                    email: { type: Type.STRING },
+                    role: { type: Type.STRING },
+                    reason: { type: Type.STRING },
+                    actionItems: {
+                      type: Type.ARRAY,
+                      items: { type: Type.STRING }
+                    }
+                  },
+                  required: ["name", "reason"]
+                }
+              }
+            },
+            required: ["executiveSummary", "taggedMembers"]
+          },
+        },
+      });
+
+      const parsed = JSON.parse(response.text || "{}");
+      
+      // Ensure exactly 3 executive summary bullets
+      let rawBullets: string[] = Array.isArray(parsed.executiveSummary) ? parsed.executiveSummary : [];
+      if (rawBullets.length < 3) {
+        if (rawBullets.length === 0) rawBullets.push("Meeting review and team alignment across current objectives.");
+        if (rawBullets.length === 1) rawBullets.push("Key decisions resolved regarding timeline and architecture priorities.");
+        if (rawBullets.length === 2) rawBullets.push("Follow-through actions assigned to team owners for upcoming sprint.");
+      } else if (rawBullets.length > 3) {
+        rawBullets = rawBullets.slice(0, 3);
+      }
+
+      const smartRecap = {
+        executiveSummary: rawBullets,
+        taggedMembers: Array.isArray(parsed.taggedMembers) ? parsed.taggedMembers : [],
+        meetingTopic: parsed.meetingTopic || "Executive Meeting Intelligence",
+        strategicTakeaway: parsed.strategicTakeaway || "",
+        generatedAt: new Date().toISOString(),
+        recordingId: recordingId || undefined
+      };
+
+      // Persist to Firestore recording if recordingId is available
+      if (recordingId) {
+        try {
+          await db.collection('recordings').doc(recordingId).update({
+            smartRecap,
+            updatedAt: new Date().toISOString()
+          });
+        } catch (dbErr) {
+          console.warn("[smart-recap] Could not persist smartRecap to recording doc:", dbErr);
+        }
+      }
+
+      const inputTokens = response.usageMetadata?.promptTokenCount || 0;
+      const outputTokens = response.usageMetadata?.candidatesTokenCount || 0;
+      const duration = Date.now() - start;
+
+      await trackAIUsage({
+        userId,
+        email,
+        plan,
+        featureName,
+        modelUsed: model,
+        inputTokens,
+        outputTokens,
+        requestDuration: duration,
+        status: "success",
+      });
+
+      res.json({ smartRecap });
+    } catch (error: any) {
+      console.error(`[AI Endpoint Error] ${featureName}:`, error);
+      const duration = Date.now() - start;
+      await trackAIUsage({
+        userId,
+        email,
+        plan,
+        featureName,
+        modelUsed: model,
+        inputTokens: 0,
+        outputTokens: 0,
+        requestDuration: duration,
+        status: "failure",
+      });
+      res.status(500).json({ error: error.message || "Failed to generate AI Smart Recap" });
+    } finally {
+      slot.release();
+    }
+  });
+
+  app.post("/api/ai/automated-tagging", requireAuth, async (req: AuthenticatedRequest, res) => {
+    const { transcript, recordingId, projectId, teamMembers, tasks, autoApply = true, autoCreateTasks = false } = req.body;
+    const userCtx = await resolveUserContext(req);
+    const userId = userCtx.userId;
+    const email = userCtx.email;
+    const plan = userCtx.plan;
+
+    // Authorize resource identifiers if provided
+    if (recordingId || projectId) {
+      const accessCheck = await verifyAiResourceAccess(req.user, {
+        recordingId,
+        projectId,
+        operationType: 'read'
+      });
+      if (!accessCheck.allowed) {
+        return res.status(accessCheck.status).json({ error: "Forbidden", message: accessCheck.message });
+      }
+    }
+
+    const start = Date.now();
+    const model = 'gemini-3-flash-preview';
+    const featureName = "Automated Member Tagging";
+
+    if (!transcript) {
+      return res.status(400).json({ error: "Missing transcript data for automated tagging" });
+    }
+
+    const slot = admitExpensiveOperation(req, res, 'ai');
+    if (!slot) return;
+
+    let transcriptText = '';
+    if (Array.isArray(transcript)) {
+      transcriptText = transcript.map((s: any) => `${s.speaker || 'Speaker'}: ${s.text || ''}`).join('\n');
+    } else {
+      transcriptText = String(transcript);
+    }
+
+    // Resolve known team members
+    let resolvedMembers: Array<{ name: string; email: string; role?: string; uid?: string }> = [];
+    if (Array.isArray(teamMembers) && teamMembers.length > 0) {
+      resolvedMembers = teamMembers.map((m: any) => ({
+        name: m.name || m.displayName || m.email?.split('@')[0] || 'Team Member',
+        email: (m.email || '').toLowerCase(),
+        role: m.role || 'member',
+        uid: m.uid || ''
+      }));
+    } else if (projectId) {
+      try {
+        const [membersSnap, projectDoc] = await Promise.all([
+          db.collection('projectMembers').where('projectId', '==', projectId).limit(50).get(),
+          db.collection('projects').doc(projectId).get()
+        ]);
+
+        if (projectDoc.exists) {
+          const pData = projectDoc.data() || {};
+          if (pData.ownerEmail) {
+            resolvedMembers.push({
+              name: pData.ownerEmail.split('@')[0] + ' (Owner)',
+              email: pData.ownerEmail.toLowerCase(),
+              role: 'owner',
+              uid: pData.userId || ''
+            });
+          }
+        }
+
+        membersSnap.docs.forEach(doc => {
+          const data = doc.data();
+          if (data.email && !resolvedMembers.some(rm => rm.email === data.email.toLowerCase())) {
+            resolvedMembers.push({
+              name: data.displayName || data.name || data.email.split('@')[0],
+              email: data.email.toLowerCase(),
+              role: data.role || 'member',
+              uid: data.userId || data.uid || ''
+            });
+          }
+        });
+      } catch (err) {
+        console.warn("[automated-tagging] Error querying team members:", err);
+      }
+    }
+
+    // Resolve existing tasks
+    let resolvedTasks: Array<{ id: string; title: string; description?: string; assigneeEmail?: string; assigneeName?: string; status?: string; dueDate?: string }> = [];
+    if (Array.isArray(tasks) && tasks.length > 0) {
+      resolvedTasks = tasks.map((t: any) => ({
+        id: t.id,
+        title: t.title || 'Untitled Task',
+        description: t.description || '',
+        assigneeEmail: (t.assigneeEmail || '').toLowerCase(),
+        assigneeName: t.assigneeName || '',
+        status: t.status || 'pending',
+        dueDate: t.dueDate || ''
+      }));
+    } else if (projectId) {
+      try {
+        const tasksSnap = await db.collection('tasks').where('projectId', '==', projectId).limit(100).get();
+        resolvedTasks = tasksSnap.docs.map(doc => {
+          const d = doc.data();
+          return {
+            id: doc.id,
+            title: d.title || 'Untitled Task',
+            description: d.description || '',
+            assigneeEmail: (d.assigneeEmail || '').toLowerCase(),
+            assigneeName: d.assigneeName || '',
+            status: d.status || 'pending',
+            dueDate: d.dueDate || ''
+          };
+        });
+      } catch (err) {
+        console.warn("[automated-tagging] Error querying tasks:", err);
+      }
+    }
+
+    const membersPromptSection = resolvedMembers.length > 0
+      ? `\nKNOWN TEAM MEMBERS ON THIS PROJECT:\n` +
+        resolvedMembers.map(m => `- Name: "${m.name}", Email: "${m.email}", Role: "${m.role || 'Member'}", UID: "${m.uid}"`).join('\n')
+      : `\nNO PRE-CONFIGURED TEAM MEMBER ROSTER. Extract explicit names, mentions, and email addresses directly from the transcript conversation.\n`;
+
+    const tasksPromptSection = resolvedTasks.length > 0
+      ? `\nEXISTING PROJECT TASKS IN DATABASE:\n` +
+        resolvedTasks.map(t => `- Task ID: "${t.id}", Title: "${t.title}", Current Assignee: "${t.assigneeEmail || 'Unassigned'}", Status: "${t.status}", Due Date: "${t.dueDate || 'None'}"`).join('\n')
+      : `\nNO EXISTING TASKS SUPPLIED. Identify newly mentioned commitments or deliverables that should be tracked as tasks.\n`;
+
+    try {
+      const response = await aiGen.models.generateContent({
+        model,
+        contents: [
+          {
+            parts: [
+              {
+                text: `You are an expert AI meeting coordinator and automated project execution officer.
+Your mission is to perform automated team member mention detection and task assignment from the following meeting transcript.
+
+OBJECTIVES:
+1. Detect every mention or conversational commitment where a team member:
+   - Is assigned or volunteered for a specific task, deliverable, or action item.
+   - Verbally commits to an outcome (e.g., "I'll handle the API schema", "Sarah, can you take the QA audit?").
+   - Is referenced as the designated lead or owner of a milestone.
+2. Match the mentioned individual with high precision to the KNOWN TEAM MEMBERS list (matching by name, nickname, email, or role).
+3. If an existing task in the EXISTING PROJECT TASKS list corresponds to the discussion, map the mention to that specific Task ID.
+4. If the action item is brand new and not yet in the tasks list, formulate a concise, professional Task Title and leave taskId empty ("").
+5. Extract the verbatim quote from the transcript proving the assignment.
+6. Extract any agreed-upon deadline or target date if mentioned (e.g., "by Friday", "end of month", "tomorrow", or "YYYY-MM-DD").
+7. Assign a confidence score from 0.0 to 1.0 (only include detections with confidence >= 0.65).
+
+${membersPromptSection}
+${tasksPromptSection}
+
+TRANSCRIPT:
+${transcriptText}`,
+              },
+            ],
+          },
+        ],
+        config: {
+          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              summaryOfMentions: { type: Type.STRING },
+              detections: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    memberEmail: { type: Type.STRING, description: "Email address of the tagged team member (lowercase)" },
+                    memberName: { type: Type.STRING, description: "Display name of the tagged team member" },
+                    memberUid: { type: Type.STRING, description: "UID of the team member if known from list, else empty" },
+                    taskId: { type: Type.STRING, description: "Task ID if matching an existing task, else empty string" },
+                    taskTitle: { type: Type.STRING, description: "Title of the task being assigned or created" },
+                    actionDescription: { type: Type.STRING, description: "Action item description or scope" },
+                    transcriptQuote: { type: Type.STRING, description: "Exact excerpt or quote from the transcript" },
+                    confidence: { type: Type.NUMBER, description: "Confidence score between 0.0 and 1.0" },
+                    detectedDeadline: { type: Type.STRING, description: "Due date or deadline if specified, else empty string" }
+                  },
+                  required: ["memberEmail", "memberName", "taskTitle", "transcriptQuote", "confidence"]
+                }
+              }
+            },
+            required: ["detections"]
+          },
+        },
+      });
+
+      const parsed = JSON.parse(response.text || "{}");
+      const rawDetections = Array.isArray(parsed.detections) ? parsed.detections : [];
+
+      // Correlate with resolved members to guarantee email and uid accuracy
+      const normalizedDetections = rawDetections.map((det: any) => {
+        const foundMember = resolvedMembers.find(m => 
+          (det.memberEmail && m.email === det.memberEmail.toLowerCase()) ||
+          (det.memberName && m.name.toLowerCase().includes(det.memberName.toLowerCase())) ||
+          (det.memberName && det.memberName.toLowerCase().includes(m.name.toLowerCase()))
+        );
+
+        return {
+          memberEmail: foundMember ? foundMember.email : (det.memberEmail || '').toLowerCase(),
+          memberName: foundMember ? foundMember.name : (det.memberName || 'Team Member'),
+          memberUid: foundMember?.uid || det.memberUid || '',
+          taskId: det.taskId || '',
+          taskTitle: det.taskTitle || 'Assigned Action Item',
+          actionDescription: det.actionDescription || '',
+          transcriptQuote: det.transcriptQuote || '',
+          confidence: typeof det.confidence === 'number' ? det.confidence : 0.85,
+          detectedDeadline: det.detectedDeadline || '',
+          applied: false
+        };
+      });
+
+      const updatedTaskIds: string[] = [];
+      const createdTaskIds: string[] = [];
+
+      // Automatically update database when autoApply is true
+      if (autoApply) {
+        for (const det of normalizedDetections) {
+          if (det.taskId) {
+            try {
+              const taskRef = db.collection('tasks').doc(det.taskId);
+              const taskDoc = await taskRef.get();
+              if (taskDoc.exists) {
+                const updatePayload: Record<string, any> = {
+                  assigneeEmail: det.memberEmail.toLowerCase(),
+                  assigneeName: det.memberName,
+                  assigneeId: det.memberUid || '',
+                  updatedAt: new Date().toISOString(),
+                  activityHistory: FieldValue.arrayUnion({
+                    id: crypto.randomBytes(6).toString('hex'),
+                    action: 'automated_tagging',
+                    performedBy: 'EchoNote AI (Automated Tagging)',
+                    timestamp: new Date().toISOString(),
+                    details: `Auto-assigned to ${det.memberName} (${det.memberEmail}) from meeting transcript mention. Quote: "${det.transcriptQuote}"`
+                  })
+                };
+
+                if (det.detectedDeadline) {
+                  updatePayload.dueDate = det.detectedDeadline;
+                }
+
+                await taskRef.update(updatePayload);
+                updatedTaskIds.push(det.taskId);
+                det.applied = true;
+
+                // Send persistent in-app notification in Firestore
+                try {
+                  await db.collection('notifications').add({
+                    userId: det.memberUid || '',
+                    userEmail: det.memberEmail.toLowerCase(),
+                    title: 'Task Assigned from Meeting',
+                    message: `EchoNote AI detected your mention in the meeting transcript and assigned you "${det.taskTitle}". Quote: "${det.transcriptQuote}"`,
+                    projectId: projectId || '',
+                    taskId: det.taskId,
+                    type: 'info',
+                    isRead: false,
+                    createdAt: FieldValue.serverTimestamp()
+                  });
+                } catch (notifErr) {
+                  console.warn("[automated-tagging] Failed to write in-app notification:", notifErr);
+                }
+              }
+            } catch (updateErr) {
+              console.warn(`[automated-tagging] Failed updating task ${det.taskId}:`, updateErr);
+            }
+          } else if (autoCreateTasks && projectId && det.taskTitle && det.memberEmail) {
+            // Optionally auto-create new task in database for recognized deliverable
+            try {
+              const newTaskDoc = await db.collection('tasks').add({
+                projectId,
+                title: det.taskTitle,
+                description: (det.actionDescription || '') + `\n\n[Auto-created via meeting mention]: "${det.transcriptQuote}"`,
+                assigneeEmail: det.memberEmail.toLowerCase(),
+                assigneeName: det.memberName,
+                assigneeId: det.memberUid || '',
+                status: 'pending',
+                priority: 'medium',
+                dueDate: det.detectedDeadline || '',
+                subTasks: [],
+                activityHistory: [{
+                  id: crypto.randomBytes(6).toString('hex'),
+                  action: 'automated_tagging',
+                  performedBy: 'EchoNote AI (Automated Tagging)',
+                  timestamp: new Date().toISOString(),
+                  details: `Task auto-created and assigned to ${det.memberName} (${det.memberEmail}) based on transcript mention.`
+                }],
+                createdBy: userId || 'system',
+                creatorEmail: email || 'system',
+                createdAt: new Date().toISOString(),
+                updatedAt: new Date().toISOString()
+              });
+              createdTaskIds.push(newTaskDoc.id);
+              det.taskId = newTaskDoc.id;
+              det.applied = true;
+
+              try {
+                await db.collection('notifications').add({
+                  userId: det.memberUid || '',
+                  userEmail: det.memberEmail.toLowerCase(),
+                  title: 'New Task Created from Meeting',
+                  message: `EchoNote AI created and assigned you task "${det.taskTitle}" based on your mention in the transcript. Quote: "${det.transcriptQuote}"`,
+                  projectId: projectId || '',
+                  taskId: newTaskDoc.id,
+                  type: 'info',
+                  isRead: false,
+                  createdAt: FieldValue.serverTimestamp()
+                });
+              } catch (notifErr) {
+                console.warn("[automated-tagging] Failed to write in-app notification for new task:", notifErr);
+              }
+            } catch (createErr) {
+              console.warn("[automated-tagging] Failed creating new task:", createErr);
+            }
+          }
+        }
+      }
+
+      const inputTokens = response.usageMetadata?.promptTokenCount || 0;
+      const outputTokens = response.usageMetadata?.candidatesTokenCount || 0;
+      const duration = Date.now() - start;
+
+      await trackAIUsage({
+        userId,
+        email,
+        plan,
+        featureName,
+        modelUsed: model,
+        inputTokens,
+        outputTokens,
+        requestDuration: duration,
+        status: "success",
+      });
+
+      res.json({
+        success: true,
+        summaryOfMentions: parsed.summaryOfMentions || `Detected ${normalizedDetections.length} assignment mentions in transcript.`,
+        detections: normalizedDetections,
+        updatedTasksCount: updatedTaskIds.length,
+        createdTasksCount: createdTaskIds.length,
+        updatedTaskIds,
+        createdTaskIds,
+        message: `Successfully detected ${normalizedDetections.length} mentions and updated ${updatedTaskIds.length} tasks in the database.`
+      });
+    } catch (error: any) {
+      console.error(`[AI Endpoint Error] ${featureName}:`, error);
+      const duration = Date.now() - start;
+      await trackAIUsage({
+        userId,
+        email,
+        plan,
+        featureName,
+        modelUsed: model,
+        inputTokens: 0,
+        outputTokens: 0,
+        requestDuration: duration,
+        status: "failure",
+      });
+      res.status(500).json({ error: error.message || "Failed to perform automated tagging from transcript" });
+    } finally {
+      slot.release();
+    }
+  });
+
+  app.post("/api/ai/synthesize-speech", requireAuth, async (req: AuthenticatedRequest, res) => {
+    const { text, gender, recordingId, projectId } = req.body;
+    const userCtx = await resolveUserContext(req);
+    const userId = userCtx.userId;
+    const email = userCtx.email;
+    const plan = userCtx.plan;
+
+    // Authorize resource identifiers if provided
+    if (recordingId || projectId) {
+      const accessCheck = await verifyAiResourceAccess(req.user, {
+        recordingId,
+        projectId,
+        operationType: 'read'
+      });
+      if (!accessCheck.allowed) {
+        return res.status(accessCheck.status).json({ error: "Forbidden", message: accessCheck.message });
+      }
+    }
 
     const start = Date.now();
     const model = "gemini-3.1-flash-tts-preview";
@@ -6628,16 +8536,14 @@ async function startServer() {
     const plan = userCtx.plan;
 
     // Authorize resource identifiers if provided
-    if (recordingId && typeof recordingId === 'string' && recordingId.trim()) {
-      const authResult = await authorizeRecordingAccess(req.user, recordingId.trim());
-      if (!authResult.authorized) {
-        return res.status(authResult.status).json({ error: "Forbidden", message: authResult.message });
-      }
-    }
-    if (projectId && typeof projectId === 'string' && projectId.trim()) {
-      const projectAccess = await checkProjectAccess(db, userId, projectId.trim(), ["owner", "admin", "member", "viewer"]);
-      if (!projectAccess.hasAccess) {
-        return res.status(403).json({ error: "Forbidden", message: "Access denied to requested project." });
+    if (recordingId || projectId) {
+      const accessCheck = await verifyAiResourceAccess(req.user, {
+        recordingId,
+        projectId,
+        operationType: 'read'
+      });
+      if (!accessCheck.allowed) {
+        return res.status(accessCheck.status).json({ error: "Forbidden", message: accessCheck.message });
       }
     }
 
@@ -6782,16 +8688,14 @@ async function startServer() {
     const plan = userCtx.plan;
 
     // Authorize resource identifiers if provided
-    if (recordingId && typeof recordingId === 'string' && recordingId.trim()) {
-      const authResult = await authorizeRecordingAccess(req.user, recordingId.trim());
-      if (!authResult.authorized) {
-        return res.status(authResult.status).json({ error: "Forbidden", message: authResult.message });
-      }
-    }
-    if (projectId && typeof projectId === 'string' && projectId.trim()) {
-      const projectAccess = await checkProjectAccess(db, userId, projectId.trim(), ["owner", "admin", "member", "viewer"]);
-      if (!projectAccess.hasAccess) {
-        return res.status(403).json({ error: "Forbidden", message: "Access denied to requested project." });
+    if (recordingId || projectId) {
+      const accessCheck = await verifyAiResourceAccess(req.user, {
+        recordingId,
+        projectId,
+        operationType: 'read'
+      });
+      if (!accessCheck.allowed) {
+        return res.status(accessCheck.status).json({ error: "Forbidden", message: accessCheck.message });
       }
     }
 
@@ -6924,16 +8828,14 @@ async function startServer() {
     const plan = userCtx.plan;
 
     // Authorize resource identifiers if provided
-    if (recordingId && typeof recordingId === 'string' && recordingId.trim()) {
-      const authResult = await authorizeRecordingAccess(req.user, recordingId.trim());
-      if (!authResult.authorized) {
-        return res.status(authResult.status).json({ error: "Forbidden", message: authResult.message });
-      }
-    }
-    if (projectId && typeof projectId === 'string' && projectId.trim()) {
-      const projectAccess = await checkProjectAccess(db, userId, projectId.trim(), ["owner", "admin", "member", "viewer"]);
-      if (!projectAccess.hasAccess) {
-        return res.status(403).json({ error: "Forbidden", message: "Access denied to requested project." });
+    if (recordingId || projectId) {
+      const accessCheck = await verifyAiResourceAccess(req.user, {
+        recordingId,
+        projectId,
+        operationType: 'read'
+      });
+      if (!accessCheck.allowed) {
+        return res.status(accessCheck.status).json({ error: "Forbidden", message: accessCheck.message });
       }
     }
 
@@ -7295,16 +9197,14 @@ async function startServer() {
     const plan = userCtx.plan;
 
     // Authorize resource identifiers if provided
-    if (recordingId && typeof recordingId === 'string' && recordingId.trim()) {
-      const authResult = await authorizeRecordingAccess(req.user, recordingId.trim());
-      if (!authResult.authorized) {
-        return res.status(authResult.status).json({ error: "Forbidden", message: authResult.message });
-      }
-    }
-    if (projectId && typeof projectId === 'string' && projectId.trim()) {
-      const projectAccess = await checkProjectAccess(db, userId, projectId.trim(), ["owner", "admin", "member", "viewer"]);
-      if (!projectAccess.hasAccess) {
-        return res.status(403).json({ error: "Forbidden", message: "Access denied to requested project." });
+    if (recordingId || projectId) {
+      const accessCheck = await verifyAiResourceAccess(req.user, {
+        recordingId,
+        projectId,
+        operationType: 'write'
+      });
+      if (!accessCheck.allowed) {
+        return res.status(accessCheck.status).json({ error: "Forbidden", message: accessCheck.message });
       }
     }
 
@@ -7421,20 +9321,17 @@ async function startServer() {
     const plan = userCtx.plan;
     const userData = userCtx.userData || {};
 
-    // IDOR check: if caller specifies recording or project context, verify ownership/membership
+    // IDOR check: if caller specifies recording or project context, verify unified resource access
     const candidateRecId = context?.recordingId || context?.selected_recording_id;
-    if (candidateRecId && typeof candidateRecId === 'string' && candidateRecId !== 'none') {
-      const authResult = await authorizeRecordingAccess(req.user, candidateRecId.trim());
-      if (!authResult.authorized) {
-        return res.status(authResult.status).json({ error: "Forbidden", message: authResult.message });
-      }
-    }
-
     const candidateProjId = context?.projectId || context?.current_project_id;
-    if (candidateProjId && typeof candidateProjId === 'string' && candidateProjId !== 'none') {
-      const projectAccess = await checkProjectAccess(db, userId, candidateProjId.trim(), ["owner", "admin", "member", "viewer"]);
-      if (!projectAccess.hasAccess) {
-        return res.status(403).json({ error: "Forbidden", message: "Access denied to requested project." });
+    if (candidateRecId || candidateProjId) {
+      const accessCheck = await verifyAiResourceAccess(req.user, {
+        recordingId: candidateRecId,
+        projectId: candidateProjId,
+        operationType: 'read'
+      });
+      if (!accessCheck.allowed) {
+        return res.status(accessCheck.status).json({ error: "Forbidden", message: accessCheck.message });
       }
     }
 

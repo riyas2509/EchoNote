@@ -43,6 +43,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         orgId: tokenResult.claims.orgId as string | undefined,
         orgRole: tokenResult.claims.orgRole as any,
         role: tokenResult.claims.role as any,
+        platform_admin: Boolean(tokenResult.claims.platform_admin),
         isOwner: Boolean(tokenResult.claims.isOwner || tokenResult.claims.orgRole === 'owner')
       };
 
@@ -60,6 +61,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
                 orgId: freshTokenResult.claims.orgId as string | undefined || data.claims.orgId,
                 orgRole: freshTokenResult.claims.orgRole as any || data.claims.orgRole,
                 role: freshTokenResult.claims.role as any || data.claims.role,
+                platform_admin: Boolean(freshTokenResult.claims.platform_admin || data.claims.platform_admin),
                 isOwner: Boolean(freshTokenResult.claims.isOwner || data.claims.orgRole === 'owner')
               };
               setCustomClaims(updatedClaims);
@@ -116,6 +118,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             orgId: tokenResult.claims.orgId as string | undefined,
             orgRole: tokenResult.claims.orgRole as any,
             role: tokenResult.claims.role as any,
+            platform_admin: Boolean(tokenResult.claims.platform_admin),
             isOwner: Boolean(tokenResult.claims.isOwner || tokenResult.claims.orgRole === 'owner')
           };
           setCustomClaims(claims);
@@ -356,7 +359,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   }, [user]);
 
   return (
-    <FirebaseContext.Provider value={{ user, profile, isAuthReady }}>
+    <FirebaseContext.Provider value={{ user, profile, customClaims, isAuthReady, refreshClaims }}>
       {children}
     </FirebaseContext.Provider>
   );

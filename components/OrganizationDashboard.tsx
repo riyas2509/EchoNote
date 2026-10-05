@@ -50,7 +50,11 @@ import {
   HardDrive,
   Percent,
   ArrowUpRight,
-  Download
+  Download,
+  UserX,
+  RotateCcw,
+  ArrowRightLeft,
+  Loader2
 } from 'lucide-react';
 import { 
   db, 
@@ -77,7 +81,8 @@ import {
   SubscriptionTier,
   OrgRole,
   OrgIdentityMapping,
-  OrgJitSettings
+  OrgJitSettings,
+  normalizeOrgRole
 } from '../types';
 import { logAction } from '../services/auditService';
 import { 
@@ -99,7 +104,17 @@ import { OrganizationBilling } from './OrganizationBilling';
 import { IntegrationsView } from './IntegrationsView';
 import { IdentityMappingSettings } from './IdentityMappingSettings';
 import { EnterpriseSecurityHealth } from './EnterpriseSecurityHealth';
-import { apiFetch } from '../lib/apiClient';
+import { 
+  apiFetch,
+  cancelOrgInvitation,
+  assignMemberDepartment,
+  deactivateMember,
+  reactivateMember,
+  transferOrgOwnership,
+  removeOrgMember,
+  updateMemberRole,
+  sendOrgInvite
+} from '../lib/apiClient';
 
 // Robust local types for Organization Management
 export interface Department {
@@ -145,6 +160,9 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
   addNotification,
   userOrgRole
 }) => {
+  const isAdmin = userOrgRole === 'owner' || userOrgRole === 'org_admin';
+  const isOwner = userOrgRole === 'owner';
+
   // Navigation Tabs for Organization Management System
   const [activeTab, setActiveTab] = useState<'overview' | 'analytics' | 'departments' | 'members' | 'invitations' | 'projects' | 'roles' | 'security' | 'billing' | 'settings' | 'integrations'>('overview');
 
@@ -194,6 +212,24 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
   const [inviteEmail, setInviteEmail] = useState('');
   const [inviteRole, setInviteRole] = useState('member');
   const [inviteDeptId, setInviteDeptId] = useState('');
+
+  // Step 5D: Admin UI Action & Confirmation States
+  const [actionLoading, setActionLoading] = useState<{ [key: string]: boolean }>({});
+  const isActionInProgress = (key: string) => Boolean(actionLoading[key]);
+  const setActionState = (key: string, inProgress: boolean) => {
+    setActionLoading(prev => ({ ...prev, [key]: inProgress }));
+  };
+
+  // Confirmation Modals for Destructive/High-Impact Operations
+  const [cancellingInvite, setCancellingInvite] = useState<OrgInvitation | null>(null);
+  const [deactivatingMember, setDeactivatingMember] = useState<OrgMember | null>(null);
+  const [removingMember, setRemovingMember] = useState<OrgMember | null>(null);
+
+  // Deliberate Owner-Only Ownership Transfer Flow
+  const [isTransferModalOpen, setIsTransferModalOpen] = useState(false);
+  const [transferTargetMemberId, setTransferTargetMemberId] = useState('');
+  const [transferConfirmText, setTransferConfirmText] = useState('');
+  const [transferError, setTransferError] = useState<string | null>(null);
 
   // 4. Role Assignments & Detail State
   const [selectedRoleDetail, setSelectedRoleDetail] = useState<string>('member');
@@ -462,56 +498,28 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
     const toastId = toast.loading("Initializing Enterprise Organization...");
 
     try {
-      const orgId = 'org_' + Math.random().toString(36).substring(2, 9);
       const emailDomain = userProfile.email.split('@')[1] || 'enterprise.com';
       const companyName = emailDomain.split('.')[0].toUpperCase() + " Corporation";
 
-      // 1. Create Organization Document in Firestore
-      const orgDocRef = doc(db, 'organizations', orgId);
-      const orgPayload = {
-        name: companyName,
-        logoUrl: '🛡️',
-        industry: 'Technology & AI Research',
-        ownerId: userProfile.uid,
-        ownerEmail: userProfile.email,
-        plan: 'enterprise',
-        createdAt: new Date().toISOString(),
-        timezone: 'Asia/Kolkata',
-        country: 'India',
-        language: 'English',
-        defaultWorkspace: projects[0]?.id || '',
-        brandColor: '#4F46E5',
-        storageUsed: 0,
-        aiUsage: 0,
-        monthlyMinutesUsed: 0,
-        thinkingEngineUsage: 0,
-        monthlyAiCost: 0,
-        monthlyRevenue: 0,
-        apiCost: 0,
-        settings: {
-          allowedDomains: [emailDomain],
-          enforceMfa: true,
-          sessionTimeoutMinutes: 60,
-          logoUrl: '🛡️',
+      // 1. Authoritative Organization Creation via backend API (creates org, adds owner to orgMembers, syncs custom claims)
+      const createRes = await apiFetch('/api/organizations', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: companyName,
           industry: 'Technology & AI Research',
           timezone: 'Asia/Kolkata',
           country: 'India',
-          language: 'English',
-          defaultWorkspace: projects[0]?.id || '',
-          brandColor: '#4F46E5'
-        },
-        billingSettings: {
-          renewalDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
-          seats: 50,
-          minutesIncluded: 25000,
-          thinkingRequestsIncluded: 10000,
-          topUpBalance: 0,
-          billingContactName: userProfile.displayName || userProfile.email.split('@')[0],
-          billingContactEmail: userProfile.email,
-          billingContactPhone: ''
-        }
-      };
-      await setDoc(orgDocRef, orgPayload);
+          logoUrl: '🛡️'
+        })
+      });
+
+      if (!createRes.ok) {
+        const errJson = await createRes.json().catch(() => ({}));
+        throw new Error(errJson.message || `Failed to create organization (HTTP ${createRes.status})`);
+      }
+
+      const createData = await createRes.json();
+      const orgId = createData.organization?.id || ('org_' + Math.random().toString(36).substring(2, 9));
 
       // 2. Create primary General department
       const dId = 'dept_' + Math.random().toString(36).substring(2, 9);
@@ -528,25 +536,7 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
         createdAt: new Date().toISOString()
       });
 
-      // 3. Add current user as sole owner in orgMembers
-      const mId = 'member_' + Math.random().toString(36).substring(2, 9);
-      await setDoc(doc(db, 'orgMembers', mId), {
-        id: mId,
-        orgId,
-        userId: userProfile.uid,
-        email: userProfile.email,
-        name: userProfile.displayName || userProfile.email.split('@')[0],
-        role: 'owner',
-        status: 'active',
-        departmentId: dId,
-        minutesUsed: 0,
-        aiCost: 0,
-        aiUsage: 0,
-        lastActive: new Date().toISOString(),
-        joinedAt: new Date().toISOString()
-      });
-
-      // 4. Update Project records with orgId in Firestore
+      // 3. Update Project records with orgId in Firestore
       for (const p of projects) {
         await updateDoc(doc(db, 'projects', p.id), {
           orgId,
@@ -640,10 +630,16 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
 
     try {
       await deleteDoc(doc(db, 'departments', deptId));
-      // Reset members who belonged to this department
+      // Reset members who belonged to this department via authoritative backend API
       const affectedMembers = orgMembers.filter(m => m.departmentId === deptId);
       for (const m of affectedMembers) {
-        await updateDoc(doc(db, 'orgMembers', m.id), { departmentId: '' });
+        try {
+          if (organization) {
+            await assignMemberDepartment(organization.id, m.id, null);
+          }
+        } catch (mErr) {
+          console.warn("Failed to unassign member dept:", mErr);
+        }
       }
       toast.success(`Department "${name}" deleted.`);
     } catch (err: any) {
@@ -651,68 +647,138 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
     }
   };
 
-  // Members Role & Department Assignment Update
+  // Members Role Assignment Update (Authoritative Backend API)
   const handleUpdateMemberRole = async (memberId: string, role: string) => {
-    if (!organization) return;
+    if (!organization || !isAdmin) return;
     const targetMember = orgMembers.find(m => m.id === memberId);
+    setActionState('role_' + memberId, true);
     try {
-      // Call Authoritative Backend API
-      await apiFetch(`/api/organizations/${organization.id}/members/${memberId}/role`, {
-        method: 'PATCH',
-        body: JSON.stringify({ role })
-      });
+      await updateMemberRole(organization.id, memberId, role);
       toast.success(`Role for ${targetMember?.email || 'member'} updated to "${role}".`);
-    } catch (err: any) {
-      console.warn("⚠️ API role update fallback warning:", err.message);
-      // If offline or legacy fallback
-      try {
-        await updateDoc(doc(db, 'orgMembers', memberId), { role });
-        toast.success("Member role updated.");
-        await logAction(organization.id, {
-          action: 'Role Changed',
-          actor: userProfile?.email || 'Owner',
-          details: `Updated role of member ${targetMember?.email || 'Someone'} to "${role}".`,
-          organizationName: organization.name
-        });
-      } catch (fallbackErr: any) {
-        toast.error("Failed to update role: " + (err.message || fallbackErr.message));
-      }
-    }
-  };
-
-  const handleUpdateMemberDept = async (memberId: string, deptId: string) => {
-    try {
-      await updateDoc(doc(db, 'orgMembers', memberId), { departmentId: deptId });
-      toast.success("Member department assigned successfully.");
-    } catch (err: any) {
-      toast.error("Failed to update department assignment: " + err.message);
-    }
-  };
-
-  const handleRemoveMember = async (memberId: string, name: string) => {
-    if (!organization) return;
-    if (!window.confirm(`Remove ${name} from this organization workspace?`)) return;
-    try {
-      // Call Authoritative Backend API
-      await apiFetch(`/api/organizations/${organization.id}/members/${memberId}`, {
-        method: 'DELETE'
+      await logAction(organization.id, {
+        action: 'Role Changed',
+        actor: userProfile?.email || 'Admin',
+        details: `Updated role of member ${targetMember?.email || 'member'} to "${role}".`,
+        organizationName: organization.name
       });
-      toast.success(`${name} has been removed from organization.`);
     } catch (err: any) {
-      console.warn("⚠️ API member removal fallback warning:", err.message);
-      try {
-        await deleteDoc(doc(db, 'orgMembers', memberId));
-        toast.success(`${name} has been removed from organization.`);
-      } catch (fallbackErr: any) {
-        toast.error("Failed to remove member: " + (err.message || fallbackErr.message));
-      }
+      toast.error(err.message || "Failed to update member role.");
+    } finally {
+      setActionState('role_' + memberId, false);
     }
   };
 
-  // Create a new Invitation in Firestore
+  // Members Department Assignment Update (Authoritative Backend API)
+  const handleUpdateMemberDept = async (memberId: string, deptId: string) => {
+    if (!organization || !isAdmin) return;
+    setActionState('dept_' + memberId, true);
+    try {
+      await assignMemberDepartment(organization.id, memberId, deptId ? deptId : null);
+      toast.success(deptId ? "Member department assigned successfully." : "Member department cleared.");
+    } catch (err: any) {
+      toast.error(err.message || "Failed to update department assignment.");
+    } finally {
+      setActionState('dept_' + memberId, false);
+    }
+  };
+
+  // Remove Member from Organization (Authoritative Backend API)
+  const handleRemoveMember = async (member: OrgMember) => {
+    if (!organization || !isAdmin) return;
+    if (member.role === 'owner' || member.userId === organization.ownerId) {
+      toast.error("The organization owner cannot be removed.");
+      return;
+    }
+    setActionState('remove_' + member.id, true);
+    try {
+      await removeOrgMember(organization.id, member.id);
+      toast.success(`${member.name || member.email} has been removed from organization.`);
+      setRemovingMember(null);
+    } catch (err: any) {
+      toast.error(err.message || "Failed to remove member.");
+    } finally {
+      setActionState('remove_' + member.id, false);
+    }
+  };
+
+  // Deactivate Organization Member (Authoritative Backend API)
+  const handleDeactivateMember = async (member: OrgMember) => {
+    if (!organization || !isAdmin) return;
+    if (member.role === 'owner' || member.userId === organization.ownerId) {
+      toast.error("The organization owner cannot be deactivated.");
+      return;
+    }
+    setActionState('deactivate_' + member.id, true);
+    try {
+      await deactivateMember(organization.id, member.id);
+      toast.success(`Member ${member.name || member.email} has been deactivated.`);
+      setDeactivatingMember(null);
+    } catch (err: any) {
+      toast.error(err.message || "Failed to deactivate member.");
+    } finally {
+      setActionState('deactivate_' + member.id, false);
+    }
+  };
+
+  // Reactivate Organization Member (Authoritative Backend API)
+  const handleReactivateMember = async (member: OrgMember) => {
+    if (!organization || !isAdmin) return;
+    setActionState('reactivate_' + member.id, true);
+    try {
+      await reactivateMember(organization.id, member.id);
+      toast.success(`Member ${member.name || member.email} has been reactivated.`);
+    } catch (err: any) {
+      toast.error(err.message || "Failed to reactivate member.");
+    } finally {
+      setActionState('reactivate_' + member.id, false);
+    }
+  };
+
+  // Ownership Transfer (Authoritative Backend API, Owner-Only)
+  const handleTransferOwnership = async () => {
+    if (!organization || !isOwner) {
+      toast.error("Only the organization owner can transfer ownership.");
+      return;
+    }
+    if (!transferTargetMemberId) {
+      toast.error("Please select an active member to receive ownership.");
+      return;
+    }
+    if (transferConfirmText.trim().toUpperCase() !== 'TRANSFER') {
+      toast.error('Please type "TRANSFER" in the confirmation field to proceed.');
+      return;
+    }
+
+    const targetMember = orgMembers.find(m => m.id === transferTargetMemberId);
+    if (!targetMember) {
+      toast.error("Selected member could not be found.");
+      return;
+    }
+
+    setTransferError(null);
+    setActionState('transfer', true);
+    try {
+      await transferOrgOwnership(organization.id, {
+        targetMemberId: targetMember.id,
+        targetEmail: targetMember.email,
+        targetUserId: targetMember.userId
+      });
+      toast.success(`Ownership transferred successfully to ${targetMember.name || targetMember.email}.`);
+      setIsTransferModalOpen(false);
+      setTransferTargetMemberId('');
+      setTransferConfirmText('');
+    } catch (err: any) {
+      setTransferError(err.message || "Failed to transfer ownership.");
+      toast.error(err.message || "Failed to transfer ownership.");
+    } finally {
+      setActionState('transfer', false);
+    }
+  };
+
+  // Create a new Invitation (Authoritative Backend API)
   const handleSendInvite = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!organization || !inviteEmail.trim()) return;
+    if (!organization || !isAdmin || !inviteEmail.trim()) return;
 
     try {
       const email = inviteEmail.trim().toLowerCase();
@@ -724,89 +790,65 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
         return;
       }
 
-      // Call Authoritative Backend API
-      try {
-        await apiFetch(`/api/organizations/${organization.id}/invite`, {
-          method: 'POST',
-          body: JSON.stringify({
-            email,
-            role: inviteRole,
-            departmentId: inviteDeptId
-          })
-        });
+      setActionState('send_invite', true);
+      const res = await sendOrgInvite(organization.id, {
+        email,
+        role: inviteRole,
+        departmentId: inviteDeptId || undefined
+      });
+
+      if (res.emailSent === false) {
+        const failureReason = res.emailError || res.warning || "email delivery failed";
+        toast.warning(`Invitation created for ${email}, but delivery email failed: ${failureReason}. You can copy the invite link or retry.`);
+      } else {
         toast.success(`Invitation successfully sent to ${email}`);
-      } catch (apiErr: any) {
-        console.warn("⚠️ API invite fallback warning:", apiErr.message);
-        const invId = 'inv_' + Math.random().toString(36).substring(2, 9);
-        const invitePayload: OrgInvitation = {
-          id: invId,
-          orgId: organization.id,
-          email,
-          role: inviteRole,
-          departmentId: inviteDeptId,
-          status: 'pending',
-          invitedBy: userProfile?.email || 'Owner',
-          createdAt: new Date().toISOString(),
-          expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
-          history: [
-            { event: 'created', timestamp: new Date().toISOString(), by: userProfile?.email || 'Owner' }
-          ]
-        };
-
-        await setDoc(doc(db, 'orgInvitations', invId), invitePayload);
-        await logAction(organization.id, {
-          action: 'Member Invited',
-          actor: userProfile?.email || 'Owner',
-          details: `Invited ${email} to join the organization as "${inviteRole}" under department "${inviteDeptId || 'None'}".`,
-          organizationName: organization.name
-        });
-        toast.success(`Invitation created for ${email}`);
       }
-
       setInviteEmail('');
       setInviteRole('member');
       setInviteDeptId('');
     } catch (err: any) {
-      toast.error("Failed to send invitation: " + err.message);
+      toast.error(err.message || "Failed to send invitation.");
+    } finally {
+      setActionState('send_invite', false);
     }
   };
 
-  // Resend invitation (updates expiresAt and appends history)
+  // Resend invitation (Authoritative Backend API)
   const handleResendInvite = async (invite: OrgInvitation) => {
+    if (!organization || !isAdmin) return;
+    setActionState('resend_' + invite.id, true);
     try {
-      const updatedHistory = [
-        ...invite.history,
-        { event: 'resent' as const, timestamp: new Date().toISOString(), by: userProfile?.email || 'Owner' }
-      ];
-
-      await updateDoc(doc(db, 'orgInvitations', invite.id), {
-        status: 'pending',
-        expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
-        history: updatedHistory
+      const res = await sendOrgInvite(organization.id, {
+        email: invite.email,
+        role: invite.role,
+        departmentId: invite.departmentId || undefined,
+        resend: true
       });
-
-      toast.success(`Invitation resent to ${invite.email}. Extended by 7 days.`);
+      if (res.emailSent === false) {
+        const failureReason = res.emailError || res.warning || "email re-delivery failed";
+        toast.warning(`Invitation active for ${invite.email}, but email re-delivery could not be completed (${failureReason}).`);
+      } else {
+        toast.success(`Invitation resent to ${invite.email}.`);
+      }
     } catch (err: any) {
-      toast.error("Failed to resend invitation: " + err.message);
+      toast.error(err.message || "Failed to resend invitation.");
+    } finally {
+      setActionState('resend_' + invite.id, false);
     }
   };
 
-  // Cancel invitation (sets status to rejected/canceled)
+  // Cancel invitation (Authoritative Backend API)
   const handleCancelInvite = async (invite: OrgInvitation) => {
+    if (!organization || !isAdmin) return;
+    setActionState('cancel_' + invite.id, true);
     try {
-      const updatedHistory = [
-        ...invite.history,
-        { event: 'cancelled' as const, timestamp: new Date().toISOString(), by: userProfile?.email || 'Owner' }
-      ];
-
-      await updateDoc(doc(db, 'orgInvitations', invite.id), {
-        status: 'rejected',
-        history: updatedHistory
-      });
-
-      toast.success(`Invitation for ${invite.email} cancelled.`);
+      await cancelOrgInvitation(organization.id, invite.id);
+      toast.success(`Invitation for ${invite.email} cancelled successfully.`);
+      setCancellingInvite(null);
     } catch (err: any) {
-      toast.error("Failed to cancel invitation: " + err.message);
+      toast.error(err.message || "Failed to cancel invitation.");
+    } finally {
+      setActionState('cancel_' + invite.id, false);
     }
   };
 
@@ -814,40 +856,17 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
   const handleSimulateJoin = async (invite: OrgInvitation) => {
     if (!organization) return;
     try {
-      const updatedHistory = [
-        ...invite.history,
-        { event: 'accepted' as const, timestamp: new Date().toISOString(), by: invite.email }
-      ];
-
-      await updateDoc(doc(db, 'orgInvitations', invite.id), {
-        status: 'accepted',
-        history: updatedHistory
+      const res = await apiFetch('/api/organizations/accept-invite', {
+        method: 'POST',
+        body: JSON.stringify({ inviteId: invite.id })
       });
-
-      const mId = 'member_' + Math.random().toString(36).substring(2, 9);
-      await setDoc(doc(db, 'orgMembers', mId), {
-        id: mId,
-        orgId: organization.id,
-        userId: 'user_sim_' + Math.random().toString(36).substring(2, 9),
-        email: invite.email,
-        name: invite.email.split('@')[0],
-        role: invite.role,
-        status: 'active',
-        departmentId: invite.departmentId || '',
-        lastActive: new Date().toISOString(),
-        joinedAt: new Date().toISOString()
-      });
-
-      await logAction(organization.id, {
-        action: 'Member Joined',
-        actor: invite.email,
-        details: `Accepted corporate invitation and joined as "${invite.role}" under department "${invite.departmentId || 'None'}".`,
-        organizationName: organization.name
-      });
-
-      toast.success(`Successfully simulated ${invite.email} accepting and joining the organization!`);
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.message || data.error || 'Failed to accept invitation');
+      }
+      toast.success(`Joined organization as ${invite.email}`);
     } catch (err: any) {
-      toast.error("Failed to simulate member join: " + err.message);
+      toast.error(err.message || "Failed to accept invitation.");
     }
   };
 
@@ -890,40 +909,61 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
     toast.success("Audit Logs exported to CSV successfully!");
   };
 
-  // Save Settings directly in Firestore
+  // Save Settings via Authoritative API
   const handleSaveSettings = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!organization) return;
 
     try {
-      await updateDoc(doc(db, 'organizations', organization.id), {
-        name: settingsName.trim(),
-        logoUrl: settingsLogo.trim(),
-        industry: settingsIndustry.trim(),
-        timezone: settingsTimezone,
-        country: settingsCountry,
-        language: settingsLanguage,
-        defaultWorkspace: settingsDefaultWorkspace,
-        brandColor: settingsBrandColor,
-        'settings.enforceMfa': settingsEnforceMfa,
-        'settings.sessionTimeoutMinutes': settingsSessionTimeout,
-        'settings.logoUrl': settingsLogo.trim(),
-        'settings.industry': settingsIndustry.trim(),
-        'settings.timezone': settingsTimezone,
-        'settings.country': settingsCountry,
-        'settings.language': settingsLanguage,
-        'settings.defaultWorkspace': settingsDefaultWorkspace,
-        'settings.brandColor': settingsBrandColor
+      const res = await apiFetch(`/api/organizations/${organization.id}/settings`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          name: settingsName.trim(),
+          logoUrl: settingsLogo.trim(),
+          industry: settingsIndustry.trim(),
+          timezone: settingsTimezone,
+          country: settingsCountry,
+          securitySettings: {
+            enforceMfa: settingsEnforceMfa,
+            sessionTimeoutMinutes: settingsSessionTimeout,
+            brandColor: settingsBrandColor,
+            language: settingsLanguage,
+            defaultWorkspace: settingsDefaultWorkspace
+          }
+        })
       });
+
+      if (!res.ok) {
+        // Fallback to client write if API is unavailable
+        await updateDoc(doc(db, 'organizations', organization.id), {
+          name: settingsName.trim(),
+          logoUrl: settingsLogo.trim(),
+          industry: settingsIndustry.trim(),
+          timezone: settingsTimezone,
+          country: settingsCountry,
+          language: settingsLanguage,
+          defaultWorkspace: settingsDefaultWorkspace,
+          brandColor: settingsBrandColor,
+          'settings.enforceMfa': settingsEnforceMfa,
+          'settings.sessionTimeoutMinutes': settingsSessionTimeout,
+          'settings.logoUrl': settingsLogo.trim(),
+          'settings.industry': settingsIndustry.trim(),
+          'settings.timezone': settingsTimezone,
+          'settings.country': settingsCountry,
+          'settings.language': settingsLanguage,
+          'settings.defaultWorkspace': settingsDefaultWorkspace,
+          'settings.brandColor': settingsBrandColor
+        });
+      }
 
       await logAction(organization.id, {
         action: 'Organization Settings Updated',
-        actor: userProfile?.email || 'Owner',
-        details: `Updated general settings for organization "${settingsName.trim()}" (industry: ${settingsIndustry.trim()}, timezone: ${settingsTimezone}).`,
+        actor: userProfile?.email || 'Admin',
+        details: `Updated general settings for organization "${settingsName.trim()}".`,
         organizationName: settingsName.trim()
       });
 
-      toast.success("Organization settings saved successfully in Firestore.");
+      toast.success("Organization settings saved successfully.");
     } catch (err: any) {
       toast.error("Failed to update organization settings: " + err.message);
     }
@@ -933,7 +973,7 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
   const handleSaveSecuritySettings = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!organization) return;
-    if (userOrgRole !== 'super_admin' && userOrgRole !== 'org_admin') {
+    if (userOrgRole !== 'owner' && userOrgRole !== 'org_admin') {
       toast.error("Access Denied: Only administrators can modify security settings.");
       return;
     }
@@ -1009,7 +1049,7 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
   // Dedicated SAML 2.0 Provider Configuration & Testing Handlers (Phase 1.6)
   const handleSaveSamlConfig = async () => {
     if (!organization) return;
-    if (userOrgRole !== 'super_admin' && userOrgRole !== 'org_admin') {
+    if (userOrgRole !== 'owner' && userOrgRole !== 'org_admin') {
       toast.error("Access Denied: Only administrators can configure SAML 2.0 SSO.");
       return;
     }
@@ -1060,7 +1100,7 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
 
   const handleTestSamlConnection = async () => {
     if (!organization) return;
-    if (userOrgRole !== 'super_admin' && userOrgRole !== 'org_admin') {
+    if (userOrgRole !== 'owner' && userOrgRole !== 'org_admin') {
       toast.error("Access Denied: Only administrators can test SAML settings.");
       return;
     }
@@ -1096,7 +1136,7 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
 
   const handleDeleteSamlConfig = async () => {
     if (!organization) return;
-    if (userOrgRole !== 'super_admin' && userOrgRole !== 'org_admin') {
+    if (userOrgRole !== 'owner' && userOrgRole !== 'org_admin') {
       toast.error("Access Denied: Only administrators can delete SAML provider.");
       return;
     }
@@ -1134,7 +1174,7 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
       return;
     }
     if (!organization) return;
-    if (userOrgRole !== 'super_admin' && userOrgRole !== 'org_admin') {
+    if (userOrgRole !== 'owner' && userOrgRole !== 'org_admin') {
       toast.error("Access Denied: Only administrators can manage API Keys.");
       return;
     }
@@ -1184,7 +1224,7 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
   // Revoke API Key
   const handleRevokeApiKey = async (keyId: string, label: string) => {
     if (!organization) return;
-    if (userOrgRole !== 'super_admin' && userOrgRole !== 'org_admin') {
+    if (userOrgRole !== 'owner' && userOrgRole !== 'org_admin') {
       toast.error("Access Denied: Only administrators can revoke API Keys.");
       return;
     }
@@ -1216,7 +1256,7 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
   // Resolve Security Alert Event
   const handleResolveEvent = async (eventId: string, eventName: string) => {
     if (!organization) return;
-    if (userOrgRole !== 'super_admin' && userOrgRole !== 'org_admin') {
+    if (userOrgRole !== 'owner' && userOrgRole !== 'org_admin') {
       toast.error("Access Denied: Only administrators can resolve events.");
       return;
     }
@@ -1262,56 +1302,21 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
     if (!userProfile || !settingsName.trim()) return;
 
     try {
-      const orgId = 'org_' + Math.random().toString(36).substring(2, 9);
-      const emailDomain = userProfile.email.split('@')[1] || 'company.com';
-
-      const orgPayload = {
-        name: settingsName.trim(),
-        logoUrl: settingsLogo.trim() || '🏢',
-        industry: settingsIndustry.trim() || 'Operations',
-        ownerId: userProfile.uid,
-        ownerEmail: userProfile.email,
-        plan: 'enterprise',
-        createdAt: new Date().toISOString(),
-        timezone: settingsTimezone,
-        country: settingsCountry,
-        language: settingsLanguage,
-        defaultWorkspace: settingsDefaultWorkspace,
-        brandColor: settingsBrandColor,
-        storageUsed: 10000000, // 10 MB
-        aiUsage: 0,
-        monthlyMinutesUsed: 0,
-        thinkingEngineUsage: 0,
-        settings: {
-          allowedDomains: [emailDomain],
-          enforceMfa: settingsEnforceMfa,
-          sessionTimeoutMinutes: settingsSessionTimeout,
+      const res = await apiFetch('/api/organizations', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: settingsName.trim(),
           logoUrl: settingsLogo.trim() || '🏢',
           industry: settingsIndustry.trim() || 'Operations',
           timezone: settingsTimezone,
-          country: settingsCountry,
-          language: settingsLanguage,
-          defaultWorkspace: settingsDefaultWorkspace,
-          brandColor: settingsBrandColor
-        }
-      };
-
-      await setDoc(doc(db, 'organizations', orgId), orgPayload);
-
-      // Create owner member document
-      const mId = 'member_' + Math.random().toString(36).substring(2, 9);
-      await setDoc(doc(db, 'orgMembers', mId), {
-        id: mId,
-        orgId,
-        userId: userProfile.uid,
-        email: userProfile.email,
-        name: userProfile.displayName || userProfile.email.split('@')[0],
-        role: 'owner',
-        status: 'active',
-        departmentId: '',
-        lastActive: new Date().toISOString(),
-        joinedAt: new Date().toISOString()
+          country: settingsCountry
+        })
       });
+
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => ({}));
+        throw new Error(errJson.message || `Failed to create organization (HTTP ${res.status})`);
+      }
 
       toast.success("Corporate Organization successfully created!");
     } catch (err: any) {
@@ -2360,9 +2365,27 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
           {/* SECTION 3: MEMBERS */}
           {activeTab === 'members' && (
             <div className="space-y-6">
-              <div className="space-y-2">
-                <h2 className="text-lg font-black text-slate-900 uppercase tracking-tight">Organization Directory</h2>
-                <p className="text-xs text-slate-500">View and manage roles or department designations of all registered company employees.</p>
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                <div className="space-y-1">
+                  <h2 className="text-lg font-black text-slate-900 uppercase tracking-tight">Organization Directory</h2>
+                  <p className="text-xs text-slate-500">View and manage roles, department designations, and membership status for this organization.</p>
+                </div>
+                {isOwner && (
+                  <button
+                    onClick={() => {
+                      setTransferTargetMemberId('');
+                      setTransferConfirmText('');
+                      setTransferError(null);
+                      setIsTransferModalOpen(true);
+                    }}
+                    className="px-4 py-2.5 bg-amber-50 border border-amber-200 text-amber-900 hover:bg-amber-100 rounded-xl text-xs font-bold uppercase tracking-wider flex items-center space-x-2 transition-all shadow-sm self-start sm:self-auto"
+                    title="Transfer Organization Ownership"
+                    aria-label="Transfer organization ownership"
+                  >
+                    <ArrowRightLeft size={14} className="text-amber-600" />
+                    <span>Transfer Ownership</span>
+                  </button>
+                )}
               </div>
 
               {/* Directory Filter Panel */}
@@ -2394,8 +2417,7 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
                     <option value="all">All Roles</option>
                     <option value="owner">Owner</option>
                     <option value="org_admin">Org Admin</option>
-                    <option value="dept_manager">Dept Manager</option>
-                    <option value="project_manager">Project Manager</option>
+                    <option value="team_manager">Team Manager</option>
                     <option value="member">Member</option>
                     <option value="viewer">Viewer</option>
                   </select>
@@ -2427,6 +2449,7 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
                   >
                     <option value="all">All Status</option>
                     <option value="active">Active</option>
+                    <option value="deactivated">Deactivated</option>
                     <option value="pending">Pending</option>
                   </select>
                 </div>
@@ -2450,6 +2473,7 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
                     <tbody className="divide-y divide-slate-100 text-xs">
                       {paginatedMembers.map((member) => {
                         const memberDept = departments.find(d => d.id === member.departmentId);
+                        const isMemberOwner = member.role === 'owner' || member.userId === organization?.ownerId;
 
                         return (
                           <tr key={member.id} className="hover:bg-slate-50/50 transition-colors">
@@ -2459,55 +2483,72 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
                                   {member.name ? member.name.substring(0, 2) : member.email.substring(0, 2)}
                                 </div>
                                 <div className="flex flex-col">
-                                  <span className="font-bold text-slate-900">{member.name || 'Invited Staff'}</span>
+                                  <span className="font-bold text-slate-900">{member.name || 'Staff Member'}</span>
                                   <span className="text-[10px] text-slate-400 font-mono">{member.email}</span>
                                 </div>
                               </div>
                             </td>
                             <td className="py-4 px-6">
-                              {member.role === 'owner' ? (
+                              {isMemberOwner ? (
                                 <span className="inline-flex items-center space-x-1 px-2.5 py-1 bg-indigo-50 border border-indigo-100 text-indigo-600 rounded-lg text-[9px] font-black uppercase tracking-wider">
                                   <Shield size={10} />
                                   <span>Owner</span>
                                 </span>
-                              ) : (
+                              ) : isAdmin ? (
                                 <select
-                                  value={member.role}
+                                  value={normalizeOrgRole(member.role)}
+                                  disabled={isActionInProgress('role_' + member.id)}
                                   onChange={(e) => handleUpdateMemberRole(member.id, e.target.value)}
-                                  className="px-2.5 py-1.5 rounded-lg border border-slate-200 text-[11px] font-bold bg-white text-slate-700 focus:outline-none"
+                                  className="px-2.5 py-1.5 rounded-lg border border-slate-200 text-[11px] font-bold bg-white text-slate-700 focus:outline-none disabled:opacity-50"
                                 >
                                   <option value="org_admin">Organization Admin</option>
-                                  <option value="dept_manager">Department Manager</option>
-                                  <option value="project_manager">Project Manager</option>
+                                  <option value="team_manager">Team Manager</option>
                                   <option value="member">Member</option>
                                   <option value="viewer">Viewer</option>
                                 </select>
+                              ) : (
+                                <span className="inline-flex items-center px-2.5 py-1 bg-slate-100 text-slate-700 rounded-lg text-[9px] font-bold uppercase">
+                                  {normalizeOrgRole(member.role)}
+                                </span>
                               )}
                             </td>
                             <td className="py-4 px-6">
-                              {member.role === 'owner' ? (
+                              {isMemberOwner ? (
                                 <span className="text-[11px] italic text-slate-400">All Departments</span>
-                              ) : (
+                              ) : isAdmin ? (
                                 <select
                                   value={member.departmentId || ''}
+                                  disabled={isActionInProgress('dept_' + member.id)}
                                   onChange={(e) => handleUpdateMemberDept(member.id, e.target.value)}
-                                  className="px-2.5 py-1.5 rounded-lg border border-slate-200 text-[11px] font-bold bg-white text-slate-700 focus:outline-none"
+                                  className="px-2.5 py-1.5 rounded-lg border border-slate-200 text-[11px] font-bold bg-white text-slate-700 focus:outline-none disabled:opacity-50"
                                 >
                                   <option value="">Unassigned</option>
                                   {departments.map(d => (
                                     <option key={d.id} value={d.id}>{d.name}</option>
                                   ))}
                                 </select>
+                              ) : (
+                                <span className="text-[11px] font-medium text-slate-600">
+                                  {memberDept ? memberDept.name : 'Unassigned'}
+                                </span>
                               )}
                             </td>
                             <td className="py-4 px-6">
-                              <span className={`inline-flex items-center space-x-1 px-2.5 py-0.5 rounded-full text-[9px] font-bold uppercase ${
+                              <span className={`inline-flex items-center space-x-1.5 px-2.5 py-0.5 rounded-full text-[9px] font-bold uppercase ${
                                 member.status === 'active' 
                                   ? 'bg-emerald-50 text-emerald-600 border border-emerald-100' 
-                                  : 'bg-amber-50 text-amber-600 border border-amber-100'
+                                  : member.status === 'deactivated'
+                                    ? 'bg-rose-50 text-rose-600 border border-rose-200'
+                                    : 'bg-amber-50 text-amber-600 border border-amber-100'
                               }`}>
-                                <span className={`w-1 h-1 rounded-full ${member.status === 'active' ? 'bg-emerald-500' : 'bg-amber-500'}`}></span>
-                                <span>{member.status}</span>
+                                <span className={`w-1.5 h-1.5 rounded-full ${
+                                  member.status === 'active' 
+                                    ? 'bg-emerald-500' 
+                                    : member.status === 'deactivated'
+                                      ? 'bg-rose-500'
+                                      : 'bg-amber-500'
+                                }`}></span>
+                                <span>{member.status || 'active'}</span>
                               </span>
                             </td>
                             <td className="py-4 px-6 text-slate-500 font-mono text-[10px]">
@@ -2517,16 +2558,68 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
                               {new Date(member.joinedAt).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' })}
                             </td>
                             <td className="py-4 px-6 text-right">
-                              {member.role !== 'owner' ? (
-                                <button
-                                  onClick={() => handleRemoveMember(member.id, member.name || member.email)}
-                                  className="text-slate-400 hover:text-red-500 p-1 rounded-lg hover:bg-slate-50 transition-colors"
-                                  title="Remove Member"
-                                >
-                                  <Trash2 size={14} />
-                                </button>
+                              {!isAdmin ? (
+                                <span className="text-[11px] text-slate-300 font-mono">-</span>
+                              ) : isMemberOwner ? (
+                                <span className="text-[10px] text-slate-300 font-semibold italic">Owner</span>
                               ) : (
-                                <span className="text-[10px] text-slate-300 font-semibold italic">Immune</span>
+                                <div className="flex items-center justify-end space-x-1.5">
+                                  {/* Deactivate / Reactivate Action */}
+                                  {member.status === 'deactivated' ? (
+                                    <button
+                                      onClick={() => handleReactivateMember(member)}
+                                      disabled={isActionInProgress('reactivate_' + member.id)}
+                                      className="px-2.5 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 rounded-lg text-[10px] font-bold uppercase tracking-wider flex items-center space-x-1 transition-colors disabled:opacity-50"
+                                      title={`Reactivate ${member.name || member.email}`}
+                                      aria-label={`Reactivate member ${member.name || member.email}`}
+                                    >
+                                      {isActionInProgress('reactivate_' + member.id) ? (
+                                        <Loader2 size={12} className="animate-spin" />
+                                      ) : (
+                                        <RotateCcw size={12} />
+                                      )}
+                                      <span>Reactivate</span>
+                                    </button>
+                                  ) : (
+                                    <button
+                                      onClick={() => setDeactivatingMember(member)}
+                                      disabled={isActionInProgress('deactivate_' + member.id)}
+                                      className="p-1.5 text-slate-400 hover:text-amber-600 hover:bg-amber-50 rounded-lg transition-colors disabled:opacity-50"
+                                      title={`Deactivate ${member.name || member.email}`}
+                                      aria-label={`Deactivate member ${member.name || member.email}`}
+                                    >
+                                      <UserX size={14} />
+                                    </button>
+                                  )}
+
+                                  {/* Ownership Transfer Quick Trigger (Owner-Only, Active Members Only) */}
+                                  {isOwner && member.status === 'active' && (
+                                    <button
+                                      onClick={() => {
+                                        setTransferTargetMemberId(member.id);
+                                        setTransferConfirmText('');
+                                        setTransferError(null);
+                                        setIsTransferModalOpen(true);
+                                      }}
+                                      className="p-1.5 text-slate-400 hover:text-amber-600 hover:bg-amber-50 rounded-lg transition-colors"
+                                      title={`Transfer organization ownership to ${member.name || member.email}`}
+                                      aria-label={`Transfer organization ownership to ${member.name || member.email}`}
+                                    >
+                                      <ArrowRightLeft size={14} />
+                                    </button>
+                                  )}
+
+                                  {/* Remove Member Action */}
+                                  <button
+                                    onClick={() => setRemovingMember(member)}
+                                    disabled={isActionInProgress('remove_' + member.id)}
+                                    className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors disabled:opacity-50"
+                                    title={`Remove ${member.name || member.email}`}
+                                    aria-label={`Remove member ${member.name || member.email}`}
+                                  >
+                                    <Trash2 size={14} />
+                                  </button>
+                                </div>
                               )}
                             </td>
                           </tr>
@@ -2624,30 +2717,40 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
                                 onClick={() => handleCopyInviteLink(inv.id)}
                                 className="text-slate-400 hover:text-indigo-600 p-1.5 rounded-lg hover:bg-slate-50 transition-colors inline-flex"
                                 title="Copy Invitation Link"
+                                aria-label={`Copy invitation link for ${inv.email}`}
                               >
                                 <Copy size={13} />
                               </button>
                               
-                              {inv.status === 'pending' && (
+                              {isAdmin && inv.status === 'pending' && (
                                 <>
                                   <button
                                     onClick={() => handleSimulateJoin(inv)}
                                     className="text-slate-400 hover:text-indigo-600 p-1.5 rounded-lg hover:bg-slate-50 transition-colors inline-flex"
                                     title="Simulate Accept & Join"
+                                    aria-label={`Simulate accept invitation for ${inv.email}`}
                                   >
                                     <UserCheck size={13} />
                                   </button>
                                   <button
                                     onClick={() => handleResendInvite(inv)}
-                                    className="text-slate-400 hover:text-emerald-600 p-1.5 rounded-lg hover:bg-slate-50 transition-colors inline-flex"
+                                    disabled={isActionInProgress('resend_' + inv.id)}
+                                    className="text-slate-400 hover:text-emerald-600 p-1.5 rounded-lg hover:bg-slate-50 transition-colors inline-flex disabled:opacity-50"
                                     title="Resend Invite"
+                                    aria-label={`Resend invite for ${inv.email}`}
                                   >
-                                    <RefreshCw size={13} />
+                                    {isActionInProgress('resend_' + inv.id) ? (
+                                      <Loader2 size={13} className="animate-spin text-emerald-600" />
+                                    ) : (
+                                      <RefreshCw size={13} />
+                                    )}
                                   </button>
                                   <button
-                                    onClick={() => handleCancelInvite(inv)}
-                                    className="text-slate-400 hover:text-red-500 p-1.5 rounded-lg hover:bg-slate-50 transition-colors inline-flex"
-                                    title="Revoke / Cancel"
+                                    onClick={() => setCancellingInvite(inv)}
+                                    disabled={isActionInProgress('cancel_' + inv.id)}
+                                    className="text-slate-400 hover:text-red-500 p-1.5 rounded-lg hover:bg-slate-50 transition-colors inline-flex disabled:opacity-50"
+                                    title="Cancel Invitation"
+                                    aria-label={`Cancel invitation for ${inv.email}`}
                                   >
                                     <X size={13} />
                                   </button>
@@ -2677,59 +2780,73 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
                   <p className="text-xs text-slate-400">Authorize a registration seat for your organization</p>
                 </div>
 
-                <form onSubmit={handleSendInvite} className="space-y-4">
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-bold text-slate-700 uppercase tracking-wider">Email Address</label>
-                    <div className="relative">
-                      <Mail className="absolute left-3.5 top-3.5 text-slate-400 w-4.5 h-4.5" />
-                      <input
-                        type="email"
-                        required
-                        placeholder="e.g. name@company.com"
-                        value={inviteEmail}
-                        onChange={(e) => setInviteEmail(e.target.value)}
-                        className="w-full pl-10 pr-4 py-3 rounded-xl border border-slate-200 text-sm focus:outline-none focus:border-indigo-600 bg-slate-50 font-medium"
-                      />
+                {isAdmin ? (
+                  <form onSubmit={handleSendInvite} className="space-y-4">
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-bold text-slate-700 uppercase tracking-wider">Email Address</label>
+                      <div className="relative">
+                        <Mail className="absolute left-3.5 top-3.5 text-slate-400 w-4.5 h-4.5" />
+                        <input
+                          type="email"
+                          required
+                          placeholder="e.g. name@company.com"
+                          value={inviteEmail}
+                          onChange={(e) => setInviteEmail(e.target.value)}
+                          className="w-full pl-10 pr-4 py-3 rounded-xl border border-slate-200 text-sm focus:outline-none focus:border-indigo-600 bg-slate-50 font-medium"
+                        />
+                      </div>
                     </div>
-                  </div>
 
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-bold text-slate-700 uppercase tracking-wider">Corporate Role</label>
-                    <select
-                      value={inviteRole}
-                      onChange={(e) => setInviteRole(e.target.value)}
-                      className="w-full px-4 py-3 rounded-xl border border-slate-200 text-sm bg-slate-50 text-slate-700 focus:outline-none"
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-bold text-slate-700 uppercase tracking-wider">Corporate Role</label>
+                      <select
+                        value={inviteRole}
+                        onChange={(e) => setInviteRole(e.target.value)}
+                        className="w-full px-4 py-3 rounded-xl border border-slate-200 text-sm bg-slate-50 text-slate-700 focus:outline-none"
+                      >
+                        <option value="org_admin">Organization Admin</option>
+                        <option value="team_manager">Team Manager</option>
+                        <option value="member">Member</option>
+                        <option value="viewer">Viewer</option>
+                      </select>
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-bold text-slate-700 uppercase tracking-wider">Assign Department</label>
+                      <select
+                        value={inviteDeptId}
+                        onChange={(e) => setInviteDeptId(e.target.value)}
+                        className="w-full px-4 py-3 rounded-xl border border-slate-200 text-sm bg-slate-50 text-slate-700 focus:outline-none"
+                      >
+                        <option value="">Unassigned</option>
+                        {departments.map(d => (
+                          <option key={d.id} value={d.id}>{d.name}</option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <button
+                      type="submit"
+                      disabled={isActionInProgress('send_invite')}
+                      className="w-full py-4 bg-indigo-600 text-white rounded-xl text-xs font-bold uppercase tracking-wider hover:bg-indigo-700 transition-all flex items-center justify-center space-x-2 shadow-md disabled:opacity-50"
                     >
-                      <option value="org_admin">Organization Admin</option>
-                      <option value="dept_manager">Department Manager</option>
-                      <option value="project_manager">Project Manager</option>
-                      <option value="member">Member</option>
-                      <option value="viewer">Viewer</option>
-                    </select>
+                      {isActionInProgress('send_invite') ? (
+                        <Loader2 size={14} className="animate-spin" />
+                      ) : (
+                        <UserPlus size={14} />
+                      )}
+                      <span>{isActionInProgress('send_invite') ? 'Sending Invitation...' : 'Send Invite Link'}</span>
+                    </button>
+                  </form>
+                ) : (
+                  <div className="p-4 bg-slate-50 rounded-2xl border border-slate-200/60 text-center space-y-2">
+                    <Shield className="w-8 h-8 text-slate-400 mx-auto" />
+                    <p className="text-xs font-bold text-slate-700">Administrator Access Required</p>
+                    <p className="text-[11px] text-slate-400 leading-relaxed">
+                      Only Organization Owners and Org Admins have permission to issue new invitations.
+                    </p>
                   </div>
-
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-bold text-slate-700 uppercase tracking-wider">Assign Department</label>
-                    <select
-                      value={inviteDeptId}
-                      onChange={(e) => setInviteDeptId(e.target.value)}
-                      className="w-full px-4 py-3 rounded-xl border border-slate-200 text-sm bg-slate-50 text-slate-700 focus:outline-none"
-                    >
-                      <option value="">Unassigned</option>
-                      {departments.map(d => (
-                        <option key={d.id} value={d.id}>{d.name}</option>
-                      ))}
-                    </select>
-                  </div>
-
-                  <button
-                    type="submit"
-                    className="w-full py-4 bg-indigo-600 text-white rounded-xl text-xs font-bold uppercase tracking-wider hover:bg-indigo-700 transition-all flex items-center justify-center space-x-2 shadow-md"
-                  >
-                    <UserPlus size={14} />
-                    <span>Send Invite Link</span>
-                  </button>
-                </form>
+                )}
               </div>
             </div>
           )}
@@ -2897,15 +3014,15 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
                 </div>
                 {/* Admin Status Indicator */}
                 <div className={`px-4 py-2 rounded-2xl border text-xs font-bold flex items-center gap-2 ${
-                  userOrgRole === 'super_admin' || userOrgRole === 'org_admin'
+                  isAdmin
                     ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
                     : 'bg-amber-50 text-amber-800 border-amber-200'
                 }`}>
                   <span className={`w-2 h-2 rounded-full ${
-                    userOrgRole === 'super_admin' || userOrgRole === 'org_admin' ? 'bg-emerald-500' : 'bg-amber-500'
+                    isAdmin ? 'bg-emerald-500' : 'bg-amber-500'
                   }`}></span>
                   <span>
-                    {userOrgRole === 'super_admin' || userOrgRole === 'org_admin'
+                    {isAdmin
                       ? 'Administrator Mode'
                       : 'Read-Only Mode'
                     }
@@ -2987,7 +3104,7 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
                 <div className="lg:col-span-3 space-y-6 bg-white border border-slate-200 p-8 rounded-[32px] shadow-sm">
                   
                   {/* WARNING BANNER FOR NON-ADMINS */}
-                  {(userOrgRole !== 'super_admin' && userOrgRole !== 'org_admin') && (
+                  {(!isAdmin) && (
                     <div className="flex items-start gap-3 bg-amber-50 border border-amber-200 p-4 rounded-2xl text-amber-900 text-xs leading-relaxed">
                       <AlertCircle className="shrink-0 text-amber-600 mt-0.5" size={16} />
                       <div>
@@ -3021,7 +3138,7 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
                             <div className="space-y-1.5">
                               <label className="text-[10px] font-extrabold text-slate-600 uppercase tracking-wider">SSO Connection Status</label>
                               <select
-                                disabled={!(userOrgRole === 'super_admin' || userOrgRole === 'org_admin')}
+                                disabled={!isAdmin}
                                 value={ssoStatus}
                                 onChange={(e) => setSsoStatus(e.target.value as any)}
                                 className="w-full px-3 py-2.5 rounded-xl border border-slate-200 text-xs bg-white text-slate-800 font-bold focus:outline-none"
@@ -3034,7 +3151,7 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
                             <div className="space-y-1.5">
                               <label className="text-[10px] font-extrabold text-slate-600 uppercase tracking-wider">Federated Protocol</label>
                               <select
-                                disabled={ssoStatus === 'disabled' || !(userOrgRole === 'super_admin' || userOrgRole === 'org_admin')}
+                                disabled={ssoStatus === 'disabled' || !isAdmin}
                                 value={ssoProtocol}
                                 onChange={(e) => setSsoProtocol(e.target.value as any)}
                                 className="w-full px-3 py-2.5 rounded-xl border border-slate-200 text-xs bg-white text-slate-800 font-bold focus:outline-none"
@@ -3048,7 +3165,7 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
                               <label className="text-[10px] font-extrabold text-slate-600 uppercase tracking-wider">IdP Metadata URL</label>
                               <input
                                 type="text"
-                                disabled={ssoStatus === 'disabled' || !(userOrgRole === 'super_admin' || userOrgRole === 'org_admin')}
+                                disabled={ssoStatus === 'disabled' || !isAdmin}
                                 value={ssoIdpUrl}
                                 onChange={(e) => setSsoIdpUrl(e.target.value)}
                                 placeholder="https://login.microsoftonline.com/{tenant-id}/v2.0"
@@ -3069,7 +3186,7 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
                             <label className="relative inline-flex items-center cursor-pointer shrink-0 ml-4">
                               <input
                                 type="checkbox"
-                                disabled={ssoStatus === 'disabled' || !(userOrgRole === 'super_admin' || userOrgRole === 'org_admin')}
+                                disabled={ssoStatus === 'disabled' || !isAdmin}
                                 checked={enforceSso}
                                 onChange={(e) => setEnforceSso(e.target.checked)}
                                 className="sr-only peer"
@@ -3094,7 +3211,7 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
                                 <label className="text-[10px] font-extrabold text-slate-600 uppercase tracking-wider">Azure Entra Directory (Tenant) ID</label>
                                 <input
                                   type="text"
-                                  disabled={!(userOrgRole === 'super_admin' || userOrgRole === 'org_admin')}
+                                  disabled={!isAdmin}
                                   value={entraTenantId}
                                   onChange={(e) => setEntraTenantId(e.target.value)}
                                   placeholder="e.g. 8f4b2319-715a-4648-958a-ef048f72a441"
@@ -3106,7 +3223,7 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
                                 <label className="text-[10px] font-extrabold text-slate-600 uppercase tracking-wider">Azure Application (Client) ID</label>
                                 <input
                                   type="text"
-                                  disabled={!(userOrgRole === 'super_admin' || userOrgRole === 'org_admin')}
+                                  disabled={!isAdmin}
                                   value={entraClientId}
                                   onChange={(e) => setEntraClientId(e.target.value)}
                                   placeholder="e.g. 1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d"
@@ -3130,7 +3247,7 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
                             <label className="relative inline-flex items-center cursor-pointer">
                               <input
                                 type="checkbox"
-                                disabled={!(userOrgRole === 'super_admin' || userOrgRole === 'org_admin')}
+                                disabled={!isAdmin}
                                 checked={googleAuthEnabled}
                                 onChange={(e) => setGoogleAuthEnabled(e.target.checked)}
                                 className="sr-only peer"
@@ -3145,7 +3262,7 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
                                 <label className="text-[10px] font-extrabold text-slate-500 uppercase tracking-wider">Google Client ID</label>
                                 <input
                                   type="text"
-                                  disabled={!(userOrgRole === 'super_admin' || userOrgRole === 'org_admin')}
+                                  disabled={!isAdmin}
                                   value={googleClientId}
                                   onChange={(e) => setGoogleClientId(e.target.value)}
                                   placeholder="12345678-abcdef.apps.googleusercontent.com"
@@ -3156,7 +3273,7 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
                                 <label className="text-[10px] font-extrabold text-slate-500 uppercase tracking-wider">Google Client Secret</label>
                                 <input
                                   type="password"
-                                  disabled={!(userOrgRole === 'super_admin' || userOrgRole === 'org_admin')}
+                                  disabled={!isAdmin}
                                   value={googleClientSecret}
                                   onChange={(e) => setGoogleClientSecret(e.target.value)}
                                   placeholder="••••••••••••••••••••••••"
@@ -3177,7 +3294,7 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
                             <label className="relative inline-flex items-center cursor-pointer">
                               <input
                                 type="checkbox"
-                                disabled={!(userOrgRole === 'super_admin' || userOrgRole === 'org_admin')}
+                                disabled={!isAdmin}
                                 checked={microsoftAuthEnabled}
                                 onChange={(e) => setMicrosoftAuthEnabled(e.target.checked)}
                                 className="sr-only peer"
@@ -3192,7 +3309,7 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
                                 <label className="text-[10px] font-extrabold text-slate-500 uppercase tracking-wider">Microsoft Application (Client) ID</label>
                                 <input
                                   type="text"
-                                  disabled={!(userOrgRole === 'super_admin' || userOrgRole === 'org_admin')}
+                                  disabled={!isAdmin}
                                   value={microsoftClientId}
                                   onChange={(e) => setMicrosoftClientId(e.target.value)}
                                   placeholder="9f8c12a4-b09e-4c31-b0e6..."
@@ -3203,7 +3320,7 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
                                 <label className="text-[10px] font-extrabold text-slate-500 uppercase tracking-wider">Microsoft Application Secret</label>
                                 <input
                                   type="password"
-                                  disabled={!(userOrgRole === 'super_admin' || userOrgRole === 'org_admin')}
+                                  disabled={!isAdmin}
                                   value={microsoftClientSecret}
                                   onChange={(e) => setMicrosoftClientSecret(e.target.value)}
                                   placeholder="••••••••••••••••••••••••"
@@ -3229,7 +3346,7 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
                             <label className="relative inline-flex items-center cursor-pointer">
                               <input
                                 type="checkbox"
-                                disabled={!(userOrgRole === 'super_admin' || userOrgRole === 'org_admin')}
+                                disabled={!isAdmin}
                                 checked={samlStatus === 'enabled'}
                                 onChange={(e) => {
                                   const nextStatus = e.target.checked ? 'enabled' : 'disabled';
@@ -3253,7 +3370,7 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
                                 <div className="space-y-1.5">
                                   <label className="text-[10px] font-extrabold text-slate-600 uppercase tracking-wider">Identity Provider Preset / Type</label>
                                   <select
-                                    disabled={!(userOrgRole === 'super_admin' || userOrgRole === 'org_admin')}
+                                    disabled={!isAdmin}
                                     value={
                                       samlDisplayName.toLowerCase().includes('okta') ? 'okta' :
                                       samlDisplayName.toLowerCase().includes('onelogin') ? 'onelogin' :
@@ -3282,7 +3399,7 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
                                   <label className="text-[10px] font-extrabold text-slate-600 uppercase tracking-wider">Display Name in Login UI</label>
                                   <input
                                     type="text"
-                                    disabled={!(userOrgRole === 'super_admin' || userOrgRole === 'org_admin')}
+                                    disabled={!isAdmin}
                                     value={samlDisplayName}
                                     onChange={(e) => setSamlDisplayName(e.target.value)}
                                     placeholder="e.g. Okta SSO / ASK Corporate IdP"
@@ -3302,7 +3419,7 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
                                     <input
                                       type="text"
                                       required
-                                      disabled={!(userOrgRole === 'super_admin' || userOrgRole === 'org_admin')}
+                                      disabled={!isAdmin}
                                       value={samlEntityId}
                                       onChange={(e) => setSamlEntityId(e.target.value)}
                                       placeholder="https://idp.example.com/entityid or urn:okta:..."
@@ -3319,7 +3436,7 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
                                     <input
                                       type="text"
                                       required
-                                      disabled={!(userOrgRole === 'super_admin' || userOrgRole === 'org_admin')}
+                                      disabled={!isAdmin}
                                       value={samlSsoUrl}
                                       onChange={(e) => setSamlSsoUrl(e.target.value)}
                                       placeholder="https://idp.example.com/app/sso/saml"
@@ -3341,7 +3458,7 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
                                   <textarea
                                     rows={4}
                                     required
-                                    disabled={!(userOrgRole === 'super_admin' || userOrgRole === 'org_admin')}
+                                    disabled={!isAdmin}
                                     value={samlCertificate}
                                     onChange={(e) => setSamlCertificate(e.target.value)}
                                     placeholder="-----BEGIN CERTIFICATE-----&#10;MIIDHzCCAgegAwIBAgIU...&#10;-----END CERTIFICATE-----"
@@ -3446,7 +3563,7 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
                                 <div className="flex items-center gap-2">
                                   <button
                                     type="button"
-                                    disabled={samlTesting || samlSaving || !samlEntityId || !samlSsoUrl || !samlCertificate || !(userOrgRole === 'super_admin' || userOrgRole === 'org_admin')}
+                                    disabled={samlTesting || samlSaving || !samlEntityId || !samlSsoUrl || !samlCertificate || !isAdmin}
                                     onClick={handleTestSamlConnection}
                                     className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white rounded-xl font-bold text-xs uppercase tracking-wider transition-all flex items-center gap-1.5 cursor-pointer shadow-sm active:scale-95"
                                   >
@@ -3456,7 +3573,7 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
 
                                   <button
                                     type="button"
-                                    disabled={samlSaving || !samlEntityId || !samlSsoUrl || !samlCertificate || !(userOrgRole === 'super_admin' || userOrgRole === 'org_admin')}
+                                    disabled={samlSaving || !samlEntityId || !samlSsoUrl || !samlCertificate || !isAdmin}
                                     onClick={handleSaveSamlConfig}
                                     className="px-4 py-2 bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white rounded-xl font-bold text-xs uppercase tracking-wider transition-all flex items-center gap-1.5 cursor-pointer shadow-sm active:scale-95"
                                   >
@@ -3468,7 +3585,7 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
                                 {samlProviderMeta && (
                                   <button
                                     type="button"
-                                    disabled={!(userOrgRole === 'super_admin' || userOrgRole === 'org_admin')}
+                                    disabled={!isAdmin}
                                     onClick={handleDeleteSamlConfig}
                                     className="px-3 py-2 text-rose-600 hover:bg-rose-50 rounded-xl font-bold text-xs transition-colors flex items-center gap-1 cursor-pointer"
                                   >
@@ -3515,7 +3632,7 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
                             </label>
                             <input
                               type="text"
-                              disabled={!(userOrgRole === 'super_admin' || userOrgRole === 'org_admin')}
+                              disabled={!isAdmin}
                               value={allowedDomainsStr}
                               onChange={(e) => setAllowedDomainsStr(e.target.value)}
                               placeholder="company.com, enterprise.org"
@@ -3533,7 +3650,7 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
                             </label>
                             <input
                               type="text"
-                              disabled={!(userOrgRole === 'super_admin' || userOrgRole === 'org_admin')}
+                              disabled={!isAdmin}
                               value={blockedDomainsStr}
                               onChange={(e) => setBlockedDomainsStr(e.target.value)}
                               placeholder="malicious.com, competitors.org"
@@ -3554,7 +3671,7 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
                               2FA Status / MFA Enforcement
                             </label>
                             <select
-                              disabled={!(userOrgRole === 'super_admin' || userOrgRole === 'org_admin')}
+                              disabled={!isAdmin}
                               value={twoFactorStatus}
                               onChange={(e) => setTwoFactorStatus(e.target.value as any)}
                               className="w-full px-3 py-2.5 rounded-xl border border-slate-200 text-xs bg-white text-slate-800 font-bold focus:outline-none"
@@ -3571,7 +3688,7 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
                               Session Timeout (Inactivity)
                             </label>
                             <select
-                              disabled={!(userOrgRole === 'super_admin' || userOrgRole === 'org_admin')}
+                              disabled={!isAdmin}
                               value={sessionTimeout}
                               onChange={(e) => setSessionTimeout(e.target.value)}
                               className="w-full px-3 py-2.5 rounded-xl border border-slate-200 text-xs bg-white text-slate-800 font-bold focus:outline-none"
@@ -3598,7 +3715,7 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
                               <label className="text-[10px] font-extrabold text-slate-500 uppercase tracking-wider">Minimum Password Length</label>
                               <input
                                 type="number"
-                                disabled={!(userOrgRole === 'super_admin' || userOrgRole === 'org_admin')}
+                                disabled={!isAdmin}
                                 value={pwdMinLength}
                                 onChange={(e) => setPwdMinLength(Number(e.target.value))}
                                 min={6}
@@ -3610,7 +3727,7 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
                               <label className="text-[10px] font-extrabold text-slate-500 uppercase tracking-wider">Max Password Age (Days)</label>
                               <input
                                 type="number"
-                                disabled={!(userOrgRole === 'super_admin' || userOrgRole === 'org_admin')}
+                                disabled={!isAdmin}
                                 value={pwdMaxAge}
                                 onChange={(e) => setPwdMaxAge(Number(e.target.value))}
                                 min={0}
@@ -3625,7 +3742,7 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
                             <label className="flex items-center gap-2 cursor-pointer text-xs text-slate-700">
                               <input
                                 type="checkbox"
-                                disabled={!(userOrgRole === 'super_admin' || userOrgRole === 'org_admin')}
+                                disabled={!isAdmin}
                                 checked={pwdEnforceSpecial}
                                 onChange={(e) => setPwdEnforceSpecial(e.target.checked)}
                                 className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
@@ -3636,7 +3753,7 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
                             <label className="flex items-center gap-2 cursor-pointer text-xs text-slate-700">
                               <input
                                 type="checkbox"
-                                disabled={!(userOrgRole === 'super_admin' || userOrgRole === 'org_admin')}
+                                disabled={!isAdmin}
                                 checked={pwdEnforceNumbers}
                                 onChange={(e) => setPwdEnforceNumbers(e.target.checked)}
                                 className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
@@ -3657,7 +3774,7 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
                         </div>
 
                         {/* Create API key form */}
-                        {(userOrgRole === 'super_admin' || userOrgRole === 'org_admin') && (
+                        {isAdmin && (
                           <div className="p-5 bg-slate-50 rounded-2xl border border-slate-100 space-y-4">
                             <h4 className="text-xs font-bold text-indigo-900 uppercase tracking-wider flex items-center gap-1">
                               <Plus size={14} /> Generate New API Access Credentials
@@ -3779,7 +3896,7 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
                                       {k.status === 'active' ? (
                                         <button
                                           type="button"
-                                          disabled={!(userOrgRole === 'super_admin' || userOrgRole === 'org_admin')}
+                                          disabled={!isAdmin}
                                           onClick={() => handleRevokeApiKey(k.id, k.label)}
                                           className="text-rose-600 hover:text-rose-800 font-bold uppercase tracking-wider text-[10px] disabled:opacity-50"
                                         >
@@ -3858,7 +3975,7 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
                                 {e.status === 'active' && (
                                   <button
                                     type="button"
-                                    disabled={!(userOrgRole === 'super_admin' || userOrgRole === 'org_admin')}
+                                    disabled={!isAdmin}
                                     onClick={() => handleResolveEvent(e.id, e.event)}
                                     className="bg-white hover:bg-slate-100 text-slate-800 font-extrabold text-[10px] uppercase tracking-wider px-3 py-1.5 rounded-lg border border-slate-200 transition-all shrink-0"
                                   >
@@ -4075,7 +4192,7 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
                         </button>
                         <button
                           type="submit"
-                          disabled={!(userOrgRole === 'super_admin' || userOrgRole === 'org_admin')}
+                          disabled={!isAdmin}
                           className="px-6 py-3 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-200 disabled:text-slate-400 disabled:cursor-not-allowed text-white rounded-xl text-xs font-bold uppercase tracking-wider transition-all shadow-sm flex items-center gap-1.5"
                         >
                           <ShieldCheck size={14} />
@@ -4298,6 +4415,290 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
           )}
         </motion.div>
       </AnimatePresence>
+
+      {/* MODAL 1: OWNERSHIP TRANSFER (Owner-Only) */}
+      {isOwner && isTransferModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="transfer-ownership-title">
+          <div className="bg-white border border-slate-200 rounded-[32px] p-6 sm:p-8 max-w-lg w-full shadow-2xl space-y-6">
+            <div className="flex items-start justify-between">
+              <div className="flex items-center space-x-3">
+                <div className="w-10 h-10 rounded-2xl bg-amber-50 border border-amber-200 text-amber-600 flex items-center justify-center">
+                  <ArrowRightLeft size={20} />
+                </div>
+                <div>
+                  <h3 id="transfer-ownership-title" className="text-base font-black text-slate-900 uppercase tracking-wide">
+                    Transfer Ownership
+                  </h3>
+                  <p className="text-xs text-slate-500">Permanently assign primary owner privileges</p>
+                </div>
+              </div>
+              <button
+                onClick={() => {
+                  setIsTransferModalOpen(false);
+                  setTransferTargetMemberId('');
+                  setTransferConfirmText('');
+                  setTransferError(null);
+                }}
+                className="text-slate-400 hover:text-slate-600 p-1.5 rounded-xl hover:bg-slate-100 transition-colors"
+                aria-label="Close transfer modal"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            {/* Explanatory Warning Callout */}
+            <div className="p-4 bg-amber-50/80 border border-amber-200 rounded-2xl space-y-2">
+              <div className="flex items-center space-x-2 text-amber-900 font-bold text-xs uppercase tracking-wider">
+                <AlertTriangle size={14} className="text-amber-600" />
+                <span>Irreversible Action Warning</span>
+              </div>
+              <ul className="text-xs text-amber-800/90 space-y-1 list-disc pl-4 leading-relaxed font-medium">
+                <li>The selected member will become the sole <strong>Organization Owner</strong>.</li>
+                <li>Your role will be demoted to <strong>Organization Admin</strong>.</li>
+                <li>You will lose permissions to transfer ownership or delete this organization workspace.</li>
+              </ul>
+            </div>
+
+            {transferError && (
+              <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-700 font-semibold flex items-center space-x-2">
+                <XCircle size={14} className="text-rose-600 shrink-0" />
+                <span>{transferError}</span>
+              </div>
+            )}
+
+            <div className="space-y-4">
+              <div className="space-y-1.5">
+                <label htmlFor="transfer-target-select" className="text-xs font-bold text-slate-700 uppercase tracking-wider">
+                  Select New Owner
+                </label>
+                <select
+                  id="transfer-target-select"
+                  value={transferTargetMemberId}
+                  onChange={(e) => setTransferTargetMemberId(e.target.value)}
+                  className="w-full px-4 py-3 rounded-xl border border-slate-200 text-xs font-bold bg-slate-50 text-slate-800 focus:outline-none focus:border-indigo-600"
+                >
+                  <option value="">-- Choose an active member --</option>
+                  {orgMembers
+                    .filter(m => m.status === 'active' && m.role !== 'owner' && m.userId !== organization?.ownerId && m.userId !== userProfile?.uid)
+                    .map(m => (
+                      <option key={m.id} value={m.id}>
+                        {m.name || m.email} ({m.email}) - {normalizeOrgRole(m.role)}
+                      </option>
+                    ))}
+                </select>
+                {orgMembers.filter(m => m.status === 'active' && m.role !== 'owner' && m.userId !== organization?.ownerId && m.userId !== userProfile?.uid).length === 0 && (
+                  <p className="text-[11px] text-amber-600 font-medium mt-1">
+                    No eligible active members found. Please invite or activate a member before initiating ownership transfer.
+                  </p>
+                )}
+              </div>
+
+              <div className="space-y-1.5">
+                <label htmlFor="transfer-confirm-input" className="text-xs font-bold text-slate-700 uppercase tracking-wider">
+                  Type <span className="font-mono text-rose-600">TRANSFER</span> to confirm
+                </label>
+                <input
+                  id="transfer-confirm-input"
+                  type="text"
+                  placeholder="TRANSFER"
+                  value={transferConfirmText}
+                  onChange={(e) => setTransferConfirmText(e.target.value)}
+                  className="w-full px-4 py-2.5 rounded-xl border border-slate-200 text-xs font-mono font-bold uppercase tracking-wider focus:outline-none focus:border-indigo-600 bg-slate-50 text-slate-900"
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end space-x-3 pt-2">
+              <button
+                onClick={() => {
+                  setIsTransferModalOpen(false);
+                  setTransferTargetMemberId('');
+                  setTransferConfirmText('');
+                  setTransferError(null);
+                }}
+                disabled={isActionInProgress('transfer')}
+                className="px-4 py-2.5 rounded-xl border border-slate-200 text-xs font-bold text-slate-600 hover:bg-slate-50 transition-colors disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleTransferOwnership}
+                disabled={
+                  transferConfirmText.trim().toUpperCase() !== 'TRANSFER' ||
+                  !transferTargetMemberId ||
+                  isActionInProgress('transfer')
+                }
+                className="px-5 py-2.5 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-bold uppercase tracking-wider flex items-center space-x-2 transition-all shadow-md disabled:opacity-40 disabled:cursor-not-allowed"
+                aria-label="Confirm ownership transfer"
+              >
+                {isActionInProgress('transfer') ? (
+                  <Loader2 size={14} className="animate-spin" />
+                ) : (
+                  <ArrowRightLeft size={14} />
+                )}
+                <span>{isActionInProgress('transfer') ? 'Transferring...' : 'Transfer Ownership'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL 2: DEACTIVATE MEMBER CONFIRMATION */}
+      {deactivatingMember && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="deactivate-member-title">
+          <div className="bg-white border border-slate-200 rounded-[32px] p-6 sm:p-8 max-w-md w-full shadow-2xl space-y-5">
+            <div className="flex items-center space-x-3">
+              <div className="w-10 h-10 rounded-2xl bg-amber-50 border border-amber-200 text-amber-600 flex items-center justify-center shrink-0">
+                <UserX size={20} />
+              </div>
+              <div>
+                <h3 id="deactivate-member-title" className="text-base font-black text-slate-900 uppercase tracking-wide">
+                  Deactivate Member
+                </h3>
+                <p className="text-xs text-slate-500">Temporarily suspend organization access</p>
+              </div>
+            </div>
+
+            <div className="p-4 bg-amber-50/70 border border-amber-200/80 rounded-2xl space-y-2">
+              <p className="text-xs text-amber-900 font-bold">
+                Are you sure you want to deactivate {deactivatingMember.name || deactivatingMember.email}?
+              </p>
+              <ul className="text-[11px] text-amber-800/90 space-y-1 list-disc pl-4 leading-relaxed font-medium">
+                <li>The user will immediately lose access to this organization and all related projects.</li>
+                <li>Their historical activity and audit logs will be preserved.</li>
+                <li>You can reactivate this member at any time from the Directory.</li>
+              </ul>
+            </div>
+
+            <div className="flex items-center justify-end space-x-3 pt-2">
+              <button
+                onClick={() => setDeactivatingMember(null)}
+                disabled={isActionInProgress('deactivate_' + deactivatingMember.id)}
+                className="px-4 py-2.5 rounded-xl border border-slate-200 text-xs font-bold text-slate-600 hover:bg-slate-50 transition-colors disabled:opacity-50"
+              >
+                Keep Active
+              </button>
+              <button
+                onClick={() => handleDeactivateMember(deactivatingMember)}
+                disabled={isActionInProgress('deactivate_' + deactivatingMember.id)}
+                className="px-5 py-2.5 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-bold uppercase tracking-wider flex items-center space-x-2 transition-all shadow-md disabled:opacity-50"
+                aria-label={`Confirm deactivation of member ${deactivatingMember.name || deactivatingMember.email}`}
+              >
+                {isActionInProgress('deactivate_' + deactivatingMember.id) ? (
+                  <Loader2 size={14} className="animate-spin" />
+                ) : (
+                  <UserX size={14} />
+                )}
+                <span>{isActionInProgress('deactivate_' + deactivatingMember.id) ? 'Deactivating...' : 'Deactivate Member'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL 3: REMOVE MEMBER CONFIRMATION */}
+      {removingMember && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="remove-member-title">
+          <div className="bg-white border border-slate-200 rounded-[32px] p-6 sm:p-8 max-w-md w-full shadow-2xl space-y-5">
+            <div className="flex items-center space-x-3">
+              <div className="w-10 h-10 rounded-2xl bg-rose-50 border border-rose-200 text-rose-600 flex items-center justify-center shrink-0">
+                <Trash2 size={20} />
+              </div>
+              <div>
+                <h3 id="remove-member-title" className="text-base font-black text-slate-900 uppercase tracking-wide">
+                  Remove Member
+                </h3>
+                <p className="text-xs text-slate-500">Revoke membership permanently</p>
+              </div>
+            </div>
+
+            <div className="p-4 bg-rose-50/70 border border-rose-200/80 rounded-2xl space-y-2">
+              <p className="text-xs text-rose-900 font-bold">
+                Remove {removingMember.name || removingMember.email} from {organization?.name || 'this organization'}?
+              </p>
+              <ul className="text-[11px] text-rose-800/90 space-y-1 list-disc pl-4 leading-relaxed font-medium">
+                <li>Their membership will be permanently removed.</li>
+                <li>All direct assignments to organization departments and projects will be cleared.</li>
+                <li>To rejoin, a new invitation will need to be issued.</li>
+              </ul>
+            </div>
+
+            <div className="flex items-center justify-end space-x-3 pt-2">
+              <button
+                onClick={() => setRemovingMember(null)}
+                disabled={isActionInProgress('remove_' + removingMember.id)}
+                className="px-4 py-2.5 rounded-xl border border-slate-200 text-xs font-bold text-slate-600 hover:bg-slate-50 transition-colors disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => handleRemoveMember(removingMember)}
+                disabled={isActionInProgress('remove_' + removingMember.id)}
+                className="px-5 py-2.5 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-bold uppercase tracking-wider flex items-center space-x-2 transition-all shadow-md disabled:opacity-50"
+                aria-label={`Confirm removal of member ${removingMember.name || removingMember.email}`}
+              >
+                {isActionInProgress('remove_' + removingMember.id) ? (
+                  <Loader2 size={14} className="animate-spin" />
+                ) : (
+                  <Trash2 size={14} />
+                )}
+                <span>{isActionInProgress('remove_' + removingMember.id) ? 'Removing...' : 'Remove Member'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL 4: CANCEL INVITATION CONFIRMATION */}
+      {cancellingInvite && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="cancel-invite-title">
+          <div className="bg-white border border-slate-200 rounded-[32px] p-6 sm:p-8 max-w-md w-full shadow-2xl space-y-5">
+            <div className="flex items-center space-x-3">
+              <div className="w-10 h-10 rounded-2xl bg-rose-50 border border-rose-200 text-rose-600 flex items-center justify-center shrink-0">
+                <X size={20} />
+              </div>
+              <div>
+                <h3 id="cancel-invite-title" className="text-base font-black text-slate-900 uppercase tracking-wide">
+                  Cancel Invitation
+                </h3>
+                <p className="text-xs text-slate-500">Revoke pending invitation link</p>
+              </div>
+            </div>
+
+            <div className="p-4 bg-rose-50/70 border border-rose-200/80 rounded-2xl space-y-2">
+              <p className="text-xs text-rose-900 font-bold">
+                Cancel invitation for {cancellingInvite.email}?
+              </p>
+              <p className="text-[11px] text-rose-800/90 leading-relaxed font-medium">
+                The invitation token will be permanently revoked. Any attempt to join using the previous link will be rejected by the server.
+              </p>
+            </div>
+
+            <div className="flex items-center justify-end space-x-3 pt-2">
+              <button
+                onClick={() => setCancellingInvite(null)}
+                disabled={isActionInProgress('cancel_' + cancellingInvite.id)}
+                className="px-4 py-2.5 rounded-xl border border-slate-200 text-xs font-bold text-slate-600 hover:bg-slate-50 transition-colors disabled:opacity-50"
+              >
+                Keep Invitation
+              </button>
+              <button
+                onClick={() => handleCancelInvite(cancellingInvite)}
+                disabled={isActionInProgress('cancel_' + cancellingInvite.id)}
+                className="px-5 py-2.5 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-bold uppercase tracking-wider flex items-center space-x-2 transition-all shadow-md disabled:opacity-50"
+                aria-label={`Confirm cancellation of invitation for ${cancellingInvite.email}`}
+              >
+                {isActionInProgress('cancel_' + cancellingInvite.id) ? (
+                  <Loader2 size={14} className="animate-spin" />
+                ) : (
+                  <X size={14} />
+                )}
+                <span>{isActionInProgress('cancel_' + cancellingInvite.id) ? 'Cancelling...' : 'Revoke Invitation'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

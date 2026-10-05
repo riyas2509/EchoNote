@@ -167,7 +167,7 @@ export const OrganizationBilling: React.FC<OrganizationBillingProps> = ({
   // Save modified Billing Contact details
   const handleSaveBillingContact = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (userOrgRole !== 'super_admin' && userOrgRole !== 'org_admin' && organization.ownerEmail !== userProfile?.email) {
+    if (userOrgRole !== 'owner' && userOrgRole !== 'org_admin' && organization.ownerEmail !== userProfile?.email) {
       toast.error("Access Denied: Only organization administrators can change billing contacts.");
       return;
     }
@@ -214,7 +214,7 @@ export const OrganizationBilling: React.FC<OrganizationBillingProps> = ({
       return;
     }
 
-    if (userOrgRole !== 'super_admin' && userOrgRole !== 'org_admin' && organization.ownerEmail !== userProfile?.email) {
+    if (userOrgRole !== 'owner' && userOrgRole !== 'org_admin' && organization.ownerEmail !== userProfile?.email) {
       toast.error("Access Denied: Only administrators can upgrade the organization plan.");
       return;
     }
@@ -379,7 +379,7 @@ export const OrganizationBilling: React.FC<OrganizationBillingProps> = ({
 
   // Downgrade Plan
   const handleDowngrade = async (targetPlanId: string) => {
-    if (userOrgRole !== 'super_admin' && userOrgRole !== 'org_admin' && organization.ownerEmail !== userProfile?.email) {
+    if (userOrgRole !== 'owner' && userOrgRole !== 'org_admin' && organization.ownerEmail !== userProfile?.email) {
       toast.error("Access Denied: Only administrators can downgrade corporate plans.");
       return;
     }

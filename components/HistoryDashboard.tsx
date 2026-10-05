@@ -1,8 +1,9 @@
 
 import React, { useState, useMemo, useEffect, useRef } from 'react';
+import { Sparkles } from 'lucide-react';
 import { AudioToTextRecord, TextToAudioRecord, TranscriptSegment, ReadStatus, CollaborationRole, PlaybackMetadata, PlaybackStatus, Bookmark, AuthStatus, UserProfile, Project, UsageStats, StrategicAnalysis, UnifiedMeetingIntelligence, ExecutionTracker, OrgRole, ProductEventName } from '../types';
 import { executeDownload, generateTranscriptBlob } from '../services/downloadService';
-import { analyzeStrategically, processUnifiedMeetingIntelligence } from '../services/geminiService';
+import { analyzeStrategically, processUnifiedMeetingIntelligence, generateSmartRecap } from '../services/geminiService';
 import { PLAN_FEATURES } from '../config/planConfig';
 import { db, collection, query, where, getDocs, onSnapshot } from '../firebase';
 import { trackProductEvent, trackDecisionRetrieved } from '../services/productAnalyticsService';
@@ -10,6 +11,7 @@ import MeetingIntelligenceView from './MeetingIntelligenceView';
 import ExecutionTrackerView from './ExecutionTrackerView';
 import SmartReminderView from './SmartReminderView';
 import UnresolvedTopicsDetector from './UnresolvedTopicsDetector';
+import { SmartRecapModal } from './SmartRecapModal';
 
 interface HistoryDashboardProps {
   audioHistory: AudioToTextRecord[];
@@ -98,6 +100,78 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
   const [expandedTextIds, setExpandedTextIds] = useState<Set<string>>(new Set());
   const isGuest = usageStats.mode === 'guest';
   const searchDebounceRef = useRef<any>(null);
+
+  // AI Smart Recap State
+  const [smartRecapRecord, setSmartRecapRecord] = useState<AudioToTextRecord | null>(null);
+  const [isSmartRecapOpen, setIsSmartRecapOpen] = useState(false);
+  const [isGeneratingRecap, setIsGeneratingRecap] = useState(false);
+
+  const handleTriggerSmartRecap = async (record: AudioToTextRecord) => {
+    setSmartRecapRecord(record);
+    setIsSmartRecapOpen(true);
+
+    if (record.smartRecap) {
+      return;
+    }
+
+    setIsGeneratingRecap(true);
+    try {
+      const project = (projects as Project[]).find(p => p.name === record.group || p.id === record.projectId);
+      const recap = await generateSmartRecap(
+        record.id,
+        record.transcript,
+        project?.id
+      );
+
+      const updated = { ...record, smartRecap: recap };
+      setSmartRecapRecord(updated);
+      onUpdateAudio(updated);
+
+      addNotification({
+        title: 'AI Smart Recap Ready',
+        message: 'Synthesized 3-bullet executive summary and tagged team members.',
+        type: 'success'
+      });
+    } catch (err: any) {
+      console.error('Smart recap failed:', err);
+      addNotification({
+        title: 'Smart Recap Failed',
+        message: err.message || 'Could not synthesize AI smart recap.',
+        type: 'error'
+      });
+    } finally {
+      setIsGeneratingRecap(false);
+    }
+  };
+
+  const handleRegenerateRecap = async () => {
+    if (!smartRecapRecord) return;
+    setIsGeneratingRecap(true);
+    try {
+      const project = (projects as Project[]).find(p => p.name === smartRecapRecord.group || p.id === smartRecapRecord.projectId);
+      const recap = await generateSmartRecap(
+        smartRecapRecord.id,
+        smartRecapRecord.transcript,
+        project?.id
+      );
+      const updated = { ...smartRecapRecord, smartRecap: recap };
+      setSmartRecapRecord(updated);
+      onUpdateAudio(updated);
+      addNotification({
+        title: 'AI Smart Recap Refreshed',
+        message: 'Regenerated 3-bullet executive summary and tagged team members.',
+        type: 'success'
+      });
+    } catch (err: any) {
+      addNotification({
+        title: 'Smart Recap Failed',
+        message: err.message || 'Failed to refresh smart recap.',
+        type: 'error'
+      });
+    } finally {
+      setIsGeneratingRecap(false);
+    }
+  };
 
   // Track History Archive Viewed
   useEffect(() => {
@@ -370,7 +444,7 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
   };
 
   const checkPermission = (record: AudioToTextRecord | TextToAudioRecord, action: 'edit' | 'delete'): boolean => {
-    if (userOrgRole === 'super_admin' || userOrgRole === 'org_admin') return true;
+    if (userOrgRole === 'owner' || userOrgRole === 'org_admin') return true;
     if (userOrgRole === 'viewer') return false;
 
     if (record.group === 'General') return true;
@@ -997,8 +1071,9 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
                             onChange={(e) => setInviteRole(e.target.value as CollaborationRole)}
                           >
                             <option value="viewer">Viewer</option>
+                            <option value="commenter">Commenter</option>
                             <option value="editor">Editor</option>
-                            <option value="owner">Owner</option>
+                            <option value="admin">Admin</option>
                           </select>
                           <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none text-brand-primary opacity-50">
                             <i className="fa-solid fa-chevron-down text-[10px]"></i>
@@ -1595,6 +1670,16 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
                              <div className="flex gap-1.5">
                                 {activeTab !== 'trash' && (
                                   <>
+                                    {/* AI Smart Recap Button */}
+                                    <button 
+                                      onClick={() => handleTriggerSmartRecap(item)} 
+                                      className="px-3.5 py-3.5 rounded-lg bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white font-black text-[9px] uppercase tracking-wider flex items-center gap-1.5 shadow-md transition-all active:scale-95" 
+                                      title="AI Smart Recap: 3-Bullet Executive Summary & Tagged Members"
+                                    >
+                                      <Sparkles className="w-3 h-3 text-amber-300" />
+                                      <span>AI Recap</span>
+                                    </button>
+
                                     <button 
                                       onClick={() => {
                                         if (usageStats.mode === 'guest') {
@@ -1665,6 +1750,53 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
                       {/* Expanded View */}
                       {expandedRecordId === item.id && (
                         <div className="pt-8 border-t border-brand-divider/10 space-y-10 animate-in slide-in-from-top-4 duration-500">
+                          {/* AI Smart Recap Banner */}
+                          {item.smartRecap && (
+                            <div className="bg-gradient-to-r from-indigo-950 via-slate-900 to-indigo-950 text-white rounded-2xl p-6 border border-indigo-500/30 shadow-lg space-y-4">
+                              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-indigo-800/50 pb-3">
+                                <div className="flex items-center gap-2">
+                                  <Sparkles className="w-4 h-4 text-indigo-400" />
+                                  <h4 className="text-xs font-black uppercase tracking-wider text-white">AI Executive Smart Recap</h4>
+                                  <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-indigo-500/30 text-indigo-200 border border-indigo-400/30">
+                                    3-Point Synthesis
+                                  </span>
+                                </div>
+                                <button
+                                  onClick={() => handleTriggerSmartRecap(item)}
+                                  className="text-[11px] font-bold text-indigo-300 hover:text-white flex items-center gap-1 transition-colors"
+                                >
+                                  <span>View & Refresh</span>
+                                  <i className="fa-solid fa-arrow-right text-[10px]"></i>
+                                </button>
+                              </div>
+
+                              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-left">
+                                {item.smartRecap.executiveSummary.map((bullet, bIdx) => (
+                                  <div key={bIdx} className="p-3.5 rounded-xl bg-white/5 border border-white/10 space-y-1.5">
+                                    <span className="text-[10px] font-black uppercase tracking-wider text-indigo-300">
+                                      {bIdx === 0 ? '1. Strategic Context' : bIdx === 1 ? '2. Key Decisions' : '3. Trajectory'}
+                                    </span>
+                                    <p className="text-xs text-slate-200 leading-relaxed font-medium">
+                                      {bullet}
+                                    </p>
+                                  </div>
+                                ))}
+                              </div>
+
+                              {item.smartRecap.taggedMembers?.length > 0 && (
+                                <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-indigo-900/40 text-left">
+                                  <span className="text-[10px] font-black uppercase tracking-widest text-indigo-300">Tagged Members:</span>
+                                  {item.smartRecap.taggedMembers.map((m, mIdx) => (
+                                    <span key={mIdx} className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold bg-indigo-500/20 text-indigo-200 border border-indigo-400/30">
+                                      <span className="w-1.5 h-1.5 rounded-full bg-indigo-400" />
+                                      @{m.name} {m.role ? `(${m.role})` : ''}
+                                    </span>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          )}
+
                           {/* Summary */}
                           {item.summary && !isThinkingLimitReached ? (
                             <div className="bg-brand-background rounded-xl p-8 border border-brand-divider/10 space-y-6">
@@ -2373,6 +2505,16 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
           })
         )}
       </div>
+
+      {/* AI Smart Recap Modal */}
+      <SmartRecapModal
+        isOpen={isSmartRecapOpen}
+        onClose={() => setIsSmartRecapOpen(false)}
+        recap={smartRecapRecord?.smartRecap || null}
+        recordingTitle={smartRecapRecord?.fileName}
+        isGenerating={isGeneratingRecap}
+        onRegenerate={handleRegenerateRecap}
+      />
     </div>
   );
 };

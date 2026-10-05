@@ -1,6 +1,6 @@
 {
   "name": "EchoNote",
-  "description": "EchoNote turns important conversations into searchable decisions, context, ownership, and follow-through, giving teams a persistent organizational memory.",
+  "description": "EchoNote turns audio recordings and team meetings into searchable decisions, AI smart recaps, ownership tagging, and interactive project analytics over time.",
   "requestFramePermissions": [
     "microphone"
   ],

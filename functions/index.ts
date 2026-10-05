@@ -13,9 +13,8 @@ import { GoogleGenAI } from '@google/genai';
 import { Resend } from 'resend';
 import * as crypto from 'crypto';
 import axios from 'axios';
+import { db } from '../lib/firebaseAdmin.ts';
 
-admin.initializeApp();
-const db = admin.firestore();
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || '' });
 
 const resend = new Resend(process.env.RESEND_API_KEY);

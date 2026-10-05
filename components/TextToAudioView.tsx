@@ -27,7 +27,7 @@ const TextToAudioView: React.FC<TextToAudioViewProps> = ({
   activePlaybackId, playbackStatus, onPlay, onPause, addNotification, userOrgRole
 }) => {
   const checkPermission = (groupName: string, action: 'edit' | 'delete') => {
-    if (userOrgRole === 'super_admin' || userOrgRole === 'org_admin') return true;
+    if (userOrgRole === 'owner' || userOrgRole === 'org_admin') return true;
     if (userOrgRole === 'viewer') return false;
 
     if (groupName === 'General') return true;

@@ -1,4 +1,4 @@
-import { SubscriptionTier, TranscriptSegment, CallSummary, DecisionIntelligenceResult, StrategicAnalysis, UnifiedMeetingIntelligence } from "../types";
+import { SubscriptionTier, TranscriptSegment, CallSummary, DecisionIntelligenceResult, StrategicAnalysis, UnifiedMeetingIntelligence, SmartRecap } from "../types";
 import { apiFetch, ApiNetworkError } from "../lib/apiClient";
 
 export const transcribeAudio = async (
@@ -281,3 +281,76 @@ export const processUnifiedMeetingIntelligence = async (transcript: string, tier
     throw err;
   }
 };
+
+export const generateSmartRecap = async (
+  recordingId: string,
+  transcript: TranscriptSegment[] | string,
+  projectId?: string,
+  knownMembers?: { email?: string; name?: string; role?: string }[]
+): Promise<SmartRecap> => {
+  try {
+    const response = await apiFetch('/api/ai/smart-recap', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        recordingId,
+        transcript,
+        projectId,
+        knownMembers
+      })
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.error || 'AI Smart Recap generation failed');
+    }
+
+    const data = await response.json();
+    return data.smartRecap;
+  } catch (err: any) {
+    if (err instanceof ApiNetworkError) {
+      throw new Error("EchoNote couldn't reach the AI Smart Recap service. Please check your connection.");
+    }
+    throw err;
+  }
+};
+
+export const detectAndAssignTeamMentions = async (params: {
+  transcript: TranscriptSegment[] | string;
+  recordingId?: string;
+  projectId?: string;
+  teamMembers?: Array<{ name?: string; email: string; role?: string; uid?: string }>;
+  tasks?: Array<{ id: string; title: string; description?: string; assigneeEmail?: string; status?: string; dueDate?: string }>;
+  autoApply?: boolean;
+  autoCreateTasks?: boolean;
+}): Promise<{
+  success: boolean;
+  summaryOfMentions?: string;
+  detections: any[];
+  updatedTasksCount: number;
+  createdTasksCount: number;
+  updatedTaskIds: string[];
+  createdTaskIds?: string[];
+  message: string;
+}> => {
+  try {
+    const response = await apiFetch('/api/ai/automated-tagging', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params)
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.error || 'Automated member tagging failed');
+    }
+
+    return await response.json();
+  } catch (err: any) {
+    if (err instanceof ApiNetworkError) {
+      throw new Error("EchoNote couldn't reach the automated tagging service. Please check your connection.");
+    }
+    throw err;
+  }
+};
+

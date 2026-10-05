@@ -21,6 +21,7 @@ import SecurityPage from './components/SecurityPage';
 import ContactPage from './components/ContactPage';
 import BookDemoPage from './components/BookDemoPage';
 import JoinPage from './pages/JoinPage';
+import OrgInviteAcceptPage from './pages/OrgInviteAcceptPage';
 import PricingPage from './pages/PricingPage';
 import EchoNoteAssistant from './components/EchoNoteAssistant';
 import Home from './pages/Home';
@@ -29,7 +30,7 @@ import Solutions from './pages/Solutions';
 import SubscriptionModal from './components/SubscriptionModal';
 import { CollaborationDashboard } from './components/CollaborationDashboard';
 import { OrganizationDashboard } from './components/OrganizationDashboard';
-import { AppWorkflow, AudioToTextRecord, TextToAudioRecord, AuthStatus, UserProfile, PlaybackMetadata, PlaybackStatus, AppNotification, UsageStats, SubscriptionTier, Project, ProjectMember, CollaborationRole, MainView, ProjectActivity, OrgRole, OrgMember, Team } from './types';
+import { AppWorkflow, AudioToTextRecord, TextToAudioRecord, AuthStatus, UserProfile, PlaybackMetadata, PlaybackStatus, AppNotification, UsageStats, SubscriptionTier, Project, ProjectMember, CollaborationRole, MainView, ProjectActivity, OrgRole, OrgMember, Team, normalizeOrgRole } from './types';
 import { PLAN_FEATURES } from './config/planConfig';
 import { useFirebase } from './components/FirebaseProvider';
 import { Toaster } from 'sonner';
@@ -37,7 +38,7 @@ import { auth, db, collection, query, where, getDocs, onSnapshot, doc, setDoc, u
 import { summarizeTranscript, analyzeDecisionIntelligence, analyzeStrategically } from './services/geminiService';
 import { getMinutesUsage, getThinkingUsage, formatRefreshDate } from './lib/usageUtils';
 import { logAction } from './services/auditService';
-import { apiFetch } from './lib/apiClient';
+import { apiFetch, safeApiJson } from './lib/apiClient';
 
 const ScrollToTop = () => {
   const { pathname } = useLocation();
@@ -50,7 +51,14 @@ const ScrollToTop = () => {
 const App: React.FC = () => {
   const navigate = useNavigate();
   const location = useLocation();
-  const { user, profile, isAuthReady } = useFirebase();
+  const { user, profile, customClaims, isAuthReady } = useFirebase();
+
+  // Platform administrator capability is independent of organization-specific roles
+  const isPlatformAdmin = Boolean(
+    profile?.role === 'admin' ||
+    customClaims?.role === 'admin' ||
+    customClaims?.platform_admin === true
+  );
 
   const handleLogin = () => {
     navigate('/auth');
@@ -107,9 +115,10 @@ const App: React.FC = () => {
           localStorage.removeItem('remembered_user');
         }
         
-        // Handle redirect after login (e.g. from invitation)
-        const redirectPath = localStorage.getItem('redirectAfterLogin');
+        // Handle redirect after login (e.g. from invitation) - check sessionStorage first to avoid persisting token
+        const redirectPath = sessionStorage.getItem('redirectAfterLogin') || localStorage.getItem('redirectAfterLogin');
         if (redirectPath) {
+          sessionStorage.removeItem('redirectAfterLogin');
           localStorage.removeItem('redirectAfterLogin');
           navigate(redirectPath);
           return;
@@ -405,8 +414,8 @@ const App: React.FC = () => {
         handleFirestoreError(error, OperationType.LIST, 'transcriptions', false);
       });
 
-      // Fetch projects based on permissions (super_admins see all, standard/org users see their own)
-      const allProjectsQuery = (userOrgRole === 'super_admin')
+      // Fetch projects based on permissions (platform admins have supervisory view across all projects)
+      const allProjectsQuery = isPlatformAdmin
         ? query(collection(db, 'projects'))
         : query(collection(db, 'projects'), where('userId', '==', user.uid));
       
@@ -422,14 +431,14 @@ const App: React.FC = () => {
       const updateMergedProjects = () => {
         let visibleProjects: Project[] = [];
 
-        if (userOrgRole === 'super_admin') {
+        if (isPlatformAdmin) {
           visibleProjects = [...allProjectsList];
         } else if (currentOrg) {
           const orgOwnerEmail = currentOrg.ownerEmail;
           const orgTeamProjIds = new Set(orgTeams.flatMap(t => t.projectIds || []));
 
-          if (userOrgRole === 'org_admin') {
-            // Org Admins see all projects belonging to the org
+          if (userOrgRole === 'owner' || userOrgRole === 'org_admin') {
+            // Org Owners and Admins see all projects belonging to the org
             visibleProjects = allProjectsList.filter(p => 
               p.userId === user.uid || 
               p.ownerEmail === orgOwnerEmail || 
@@ -505,11 +514,44 @@ const App: React.FC = () => {
         handleFirestoreError(error, OperationType.LIST, 'projectMembers', false);
       });
 
+      // Real-time in-app notifications listener for authenticated user
+      const notificationsQuery = query(
+        collection(db, 'notifications'),
+        where('userId', '==', user.uid)
+      );
+
+      const unsubscribeNotifications = onSnapshot(notificationsQuery, (snapshot) => {
+        const notifList: AppNotification[] = snapshot.docs.map(doc => {
+          const data = doc.data();
+          const timestamp = data.createdAt?.toMillis
+            ? data.createdAt.toMillis()
+            : (data.createdAt?.toDate ? data.createdAt.toDate().getTime() : (typeof data.createdAt === 'string' ? new Date(data.createdAt).getTime() : Date.now()));
+          return {
+            id: doc.id,
+            title: data.title || 'Notification',
+            message: data.message || '',
+            timestamp,
+            isRead: Boolean(data.isRead),
+            type: data.type || 'info',
+            link: data.link,
+            recordId: data.recordId || data.recordingId
+          };
+        });
+        setNotifications(prev => {
+          // Preserve transient local notifications that are not yet persisted to Firestore
+          const localOnly = prev.filter(p => !snapshot.docs.some(d => d.id === p.id) && p.id.length < 15);
+          return [...notifList, ...localOnly].sort((a, b) => b.timestamp - a.timestamp);
+        });
+      }, (error) => {
+        console.warn('Notifications listener notice:', error);
+      });
+
       return () => {
         unsubscribeAudio();
         unsubscribeText();
         unsubscribeAllProjects();
         unsubscribeShared();
+        unsubscribeNotifications();
       };
     } else {
       setAudioHistory([]);
@@ -556,11 +598,8 @@ const App: React.FC = () => {
         setCurrentOrg(orgDoc);
         activeOrgId = orgDoc.id;
         
-        if (profile?.role === 'admin') {
-          setUserOrgRole('super_admin');
-        } else {
-          setUserOrgRole('org_admin');
-        }
+        // Authoritative organization role for organization owner is always 'owner'
+        setUserOrgRole('owner');
       }
     }, (error) => {
       handleFirestoreError(error, OperationType.LIST, 'organizations', false);
@@ -578,30 +617,34 @@ const App: React.FC = () => {
           onSnapshot(orgRef, (orgSnap) => {
             if (isUnsubscribed) return;
             if (orgSnap.exists()) {
-              setCurrentOrg(orgSnap.data());
+              const orgData = orgSnap.data();
+              setCurrentOrg(orgData);
+              if (orgData?.ownerId === user.uid || (user.email && orgData?.ownerEmail?.toLowerCase() === user.email.toLowerCase())) {
+                setUserOrgRole('owner');
+                return;
+              }
             }
           }, (error) => {
             handleFirestoreError(error, OperationType.GET, 'organizations', false);
           });
         }
 
-        if (profile?.role === 'admin') {
-          setUserOrgRole('super_admin');
-        } else if (memberDoc.role === 'owner' || memberDoc.role === 'admin') {
-          setUserOrgRole('org_admin');
-        } else if (memberDoc.role === 'team_lead') {
-          setUserOrgRole('team_manager');
-        } else if (memberDoc.role === 'member') {
-          setUserOrgRole('member');
-        } else if (memberDoc.role === 'guest') {
-          setUserOrgRole('viewer');
+        // If active organization belongs to the user as owner, ensure role is 'owner'
+        if (activeOrgId && currentOrg && (currentOrg.ownerId === user.uid || currentOrg.ownerEmail?.toLowerCase() === user.email?.toLowerCase())) {
+          setUserOrgRole('owner');
+        } else {
+          // Normalize member role (owner, org_admin, team_manager, member, viewer)
+          const normalized = normalizeOrgRole(memberDoc.role);
+          setUserOrgRole(normalized);
         }
       } else {
-        if (profile?.role === 'admin') {
-          setUserOrgRole('super_admin');
-        } else {
-          // Default to personal workspace: treat as org_admin for personal scope
-          setUserOrgRole('org_admin');
+        // If not found in orgMembers and user has no owned org
+        if (!activeOrgId) {
+          if (customClaims?.orgRole) {
+            setUserOrgRole(customClaims.isOwner ? 'owner' : normalizeOrgRole(customClaims.orgRole));
+          } else {
+            setUserOrgRole('viewer');
+          }
         }
       }
     }, (error) => {
@@ -1144,12 +1187,20 @@ const App: React.FC = () => {
     }
   };
 
-  const markNotificationRead = (id: string) => {
+  const markNotificationRead = async (id: string) => {
     const notif = notifications.find(n => n.id === id);
     if (!notif) return;
 
     setNotifications(prev => prev.map(n => n.id === id ? { ...n, isRead: true } : n));
     
+    if (authStatus === AuthStatus.LOGGED_IN && user) {
+      try {
+        await updateDoc(doc(db, 'notifications', id), { isRead: true });
+      } catch (e) {
+        // Safe fallback for transient local notifications
+      }
+    }
+
     if (notif.link) {
       navigate(notif.link);
     } else if (notif.recordId) {
@@ -1158,8 +1209,18 @@ const App: React.FC = () => {
     }
   };
 
-  const clearNotifications = () => {
+  const clearNotifications = async () => {
     setNotifications(prev => prev.map(n => ({ ...n, isRead: true })));
+    if (authStatus === AuthStatus.LOGGED_IN && user) {
+      try {
+        const unreadNotifs = notifications.filter(n => !n.isRead);
+        for (const n of unreadNotifs) {
+          await updateDoc(doc(db, 'notifications', n.id), { isRead: true });
+        }
+      } catch (e) {
+        // Safe fallback
+      }
+    }
   };
 
   const [isCreateProjectModalOpen, setIsCreateProjectModalOpen] = useState(false);
@@ -1195,6 +1256,20 @@ const App: React.FC = () => {
         try {
           await setDoc(doc(db, 'projects', id), newProject);
           setLastCreatedProjectId(id);
+
+          try {
+            await setDoc(doc(db, 'projectMembers', `${user.uid}_${id}`), {
+              id: `${user.uid}_${id}`,
+              projectId: id,
+              userId: user.uid,
+              role: 'admin',
+              email: user.email || '',
+              displayName: userProfile?.displayName || userProfile?.name || user?.displayName || user?.email?.split('@')[0] || 'Owner',
+              joinedAt: new Date().toISOString()
+            });
+          } catch (pmErr) {
+            console.warn("ℹ️ Could not write initial projectMember record:", pmErr);
+          }
 
           if (currentOrg) {
             await logAction(currentOrg.id, {
@@ -1284,49 +1359,68 @@ const App: React.FC = () => {
       return;
     }
 
-    try {
-      // Generate unique token on client and write to Firestore directly (authenticated user)
-      const inviteToken = crypto.randomUUID();
-      const inviteData = {
-        id: inviteToken,
-        email,
-        role,
-        projectId: project.id,
-        projectName: project.name,
-        invitedBy: user.email || "Someone",
-        ownerId: project.userId || null,
-        status: "pending",
-        createdAt: serverTimestamp()
-      };
+    if ((role as string) === 'owner') {
+      addToast('Invalid Role', 'Project ownership cannot be assigned via invitation. Use Transfer Ownership instead.', 'error');
+      return;
+    }
 
-      await setDoc(doc(db, "invites", inviteToken), inviteData);
+    try {
+      const inviteToken = crypto.randomUUID();
 
       const response = await apiFetch('/api/invite-member', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          email,
+          email: email.trim().toLowerCase(),
           role,
           projectId: project.id,
           projectName: project.name,
-          ownerId: project.userId,
+          ownerId: project.userId || user.uid,
           inviteToken // pass the client-generated token
         })
       });
 
-      if (!response.ok) {
-        const data = await response.json();
-        throw new Error(data.error || 'Failed to send invitation');
-      }
+      const inviteResult = await safeApiJson<{ 
+        success: boolean; 
+        inviteToken: string; 
+        emailSent?: boolean; 
+        emailError?: string; 
+        emailErrorCode?: string; 
+        message?: string; 
+        warning?: string; 
+      }>(response);
 
-      const inviteResult = await response.json();
+      // Best-effort client-side Firestore record for offline caching/immediate UI reflection
+      try {
+        const inviteData = {
+          id: inviteResult.inviteToken || inviteToken,
+          email: email.trim().toLowerCase(),
+          role,
+          projectId: project.id,
+          projectName: project.name,
+          invitedBy: user.email || "Someone",
+          ownerId: project.userId || user.uid,
+          status: "pending",
+          createdAt: serverTimestamp()
+        };
+        await setDoc(doc(db, "invites", inviteResult.inviteToken || inviteToken), inviteData);
+      } catch (clientWriteErr) {
+        console.warn("ℹ️ Client-side invite sync skipped (server authoritative):", clientWriteErr);
+      }
       
-      addToast('Success', `Invitation sent to ${email}`, 'success');
+      const failureDetail = inviteResult.emailError || inviteResult.warning || 'email delivery failed';
+      if (inviteResult.emailSent === false) {
+        addToast('Invite Created (Email Undelivered)', `Invitation record created for ${email}, but the email could not be delivered: ${failureDetail}. You can copy and share the invitation link directly.`, 'info');
+      } else {
+        addToast('Success', `Invitation sent to ${email}`, 'success');
+      }
       
       addNotification({
-        title: 'Invite Sent',
-        message: `You invited ${email} to join ${projectName} as ${role}.`,
-        type: 'success'
+        title: inviteResult.emailSent === false ? 'Invite Created (Email Undelivered)' : 'Invite Sent',
+        message: inviteResult.emailSent === false
+          ? `Invitation record created for ${email}, but delivery email could not be sent: ${failureDetail}.`
+          : `You invited ${email} to join ${projectName} as ${role}.`,
+        type: inviteResult.emailSent === false ? 'info' : 'success'
       });
 
       const uName = userProfile?.displayName || user.displayName || user.email?.split('@')[0] || 'Someone';
@@ -1335,10 +1429,12 @@ const App: React.FC = () => {
         'invite_member',
         `${uName} invited ${email} to join project "${projectName}" as ${role}`
       );
-      
+
+      return inviteResult;
     } catch (error: any) {
       console.error('Invite Error:', error);
-      addToast('Invite Failed', error.message, 'error');
+      addToast('Invite Failed', error.message || 'Failed to send invitation', 'error');
+      throw error;
     }
   };
 
@@ -1581,6 +1677,7 @@ const App: React.FC = () => {
             addNotification={addNotification}
             onInviteToProject={inviteToProject}
             userOrgRole={userOrgRole}
+            onUpdateAudio={updateAudioRecord}
           />
         );
       case AppWorkflow.ORGANIZATION_DASHBOARD:
@@ -1802,6 +1899,12 @@ const App: React.FC = () => {
         <Route path="/privacy" element={renderPublicPage(<PrivacyPolicy />)} />
         <Route path="/terms" element={renderPublicPage(<TermsOfService />)} />
         <Route path="/security" element={renderPublicPage(<SecurityPage />)} />
+        
+        {/* Project Invitation Route */}
+        <Route path="/join" element={<JoinPage />} />
+
+        {/* Organization Invitation Deep-Link Acceptance Route (Phase 1B) */}
+        <Route path="/invite/accept" element={<OrgInviteAcceptPage />} />
         
         {/* Auth Route */}
         <Route path="/auth" element={

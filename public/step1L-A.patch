@@ -1,0 +1,705 @@
+diff --git a/scripts/deploy-cloud-run.sh b/scripts/deploy-cloud-run.sh
+new file mode 100755
+index 0000000..75ff941
+--- /dev/null
++++ b/scripts/deploy-cloud-run.sh
+@@ -0,0 +1,292 @@
++#!/usr/bin/env bash
++# ==============================================================================
++# EchoNote Production Cloud Run Deployment & Environment Variables Configuration
++# ==============================================================================
++# Hardened for production deployment safety.
++#
++# Production Target Lock:
++#   Project:         echonote-2509
++#   Region:          us-west1
++#   Service:         echonote
++#   Service Account: 200551109142-compute@developer.gserviceaccount.com
++#   Razorpay Mode:   live
++#
++# Rollback Reference:
++#   Last known verified production revision: echonote-00008-lw9
++#   Rollback command:
++#     gcloud run services update-traffic echonote \
++#       --to-revisions=echonote-00008-lw9=100 \
++#       --region=us-west1 \
++#       --project=echonote-2509
++#
++# Usage:
++#   chmod +x scripts/deploy-cloud-run.sh
++#   ./scripts/deploy-cloud-run.sh [update-env | deploy | verify <URL>]
++# ==============================================================================
++
++set -euo pipefail
++
++# Production Hard-Locked Target Constants
++readonly EXPECTED_PROJECT_ID="echonote-2509"
++readonly EXPECTED_REGION="us-west1"
++readonly EXPECTED_SERVICE_NAME="echonote"
++readonly EXPECTED_SERVICE_ACCOUNT="200551109142-compute@developer.gserviceaccount.com"
++readonly LAST_KNOWN_PROD_REVISION="echonote-00008-lw9"
++
++# Target variables (subject to strict validation against expected production constants)
++SERVICE_NAME="${CLOUD_RUN_SERVICE:-$EXPECTED_SERVICE_NAME}"
++REGION="${CLOUD_RUN_REGION:-$EXPECTED_REGION}"
++PROJECT_ID="${GOOGLE_CLOUD_PROJECT:-$EXPECTED_PROJECT_ID}"
++
++# Plan IDs configured for EchoNote
++PLAN_PRO_MONTHLY="${RAZORPAY_PRO_MONTHLY_PLAN_ID-plan_TambUyuTkGL4zY}"
++PLAN_PRO_YEARLY="${RAZORPAY_PRO_YEARLY_PLAN_ID-plan_Tamd1Ef89GKQNk}"
++PLAN_TEAM_MONTHLY="${RAZORPAY_TEAM_MONTHLY_PLAN_ID-plan_TamdizBJ9W7kJo}"
++PLAN_TEAM_YEARLY="${RAZORPAY_TEAM_YEARLY_PLAN_ID-plan_TameI4cjPUzRpn}"
++
++# Production Secret Manager Mappings (Cloud Run Secret Integration)
++# References use Secret Manager secret names and versions only; no plaintext secret values.
++readonly SECRET_GEMINI_API_KEY="GEMINI_API_KEY=echonote-gemini-api-key:latest"
++readonly SECRET_RAZORPAY_KEY_SECRET="RAZORPAY_KEY_SECRET=echonote-razorpay-key-secret:latest"
++readonly SECRET_RAZORPAY_WEBHOOK_SECRET="RAZORPAY_WEBHOOK_SECRET=echonote-razorpay-webhook-secret:latest"
++readonly SECRET_RESEND_API_KEY="RESEND_API_KEY=echonote-resend-api-key:latest"
++readonly SECRET_PLAYBACK_SECRET="PLAYBACK_SECRET=echonote-playback-secret:latest"
++readonly SECRET_CRON_SECRET="CRON_SECRET=echonote-cron-secret:latest"
++
++readonly CLOUD_RUN_SECRETS="${SECRET_GEMINI_API_KEY},${SECRET_RAZORPAY_KEY_SECRET},${SECRET_RAZORPAY_WEBHOOK_SECRET},${SECRET_RESEND_API_KEY},${SECRET_PLAYBACK_SECRET},${SECRET_CRON_SECRET}"
++
++TARGET_RAZORPAY_MODE="live"
++ACTION="${1:-update-env}"
++
++# ------------------------------------------------------------------------------
++# 1. Target Validation: Reject any override differing from production
++# ------------------------------------------------------------------------------
++validate_target() {
++  if [ "$PROJECT_ID" != "$EXPECTED_PROJECT_ID" ] || \
++     [ "$REGION" != "$EXPECTED_REGION" ] || \
++     [ "$SERVICE_NAME" != "$EXPECTED_SERVICE_NAME" ]; then
++    echo "ERROR: Production deployment target mismatch." >&2
++    echo "Expected:" >&2
++    echo "  project: $EXPECTED_PROJECT_ID" >&2
++    echo "  region: $EXPECTED_REGION" >&2
++    echo "  service: $EXPECTED_SERVICE_NAME" >&2
++    echo "Received:" >&2
++    echo "  project: $PROJECT_ID" >&2
++    echo "  region: $REGION" >&2
++    echo "  service: $SERVICE_NAME" >&2
++    exit 1
++  fi
++}
++
++# ------------------------------------------------------------------------------
++# 2. Active gcloud Project Verification
++# ------------------------------------------------------------------------------
++validate_active_gcloud_project() {
++  if ! command -v gcloud &>/dev/null; then
++    echo "ERROR: gcloud CLI is required but not found in PATH." >&2
++    exit 1
++  fi
++
++  local active_proj
++  active_proj="$(gcloud config get-value project 2>/dev/null || true)"
++  if [ -z "$active_proj" ] || [ "$active_proj" = "(unset)" ]; then
++    echo "ERROR: Active gcloud project is not set." >&2
++    echo "Expected project: $EXPECTED_PROJECT_ID" >&2
++    echo "Please set active project using: gcloud config set project $EXPECTED_PROJECT_ID" >&2
++    exit 1
++  fi
++
++  if [ "$active_proj" != "$EXPECTED_PROJECT_ID" ]; then
++    echo "ERROR: Active gcloud project mismatch." >&2
++    echo "Active project: '$active_proj'" >&2
++    echo "Expected project: '$EXPECTED_PROJECT_ID'" >&2
++    echo "Please switch your active gcloud project using:" >&2
++    echo "  gcloud config set project $EXPECTED_PROJECT_ID" >&2
++    exit 1
++  fi
++}
++
++# ------------------------------------------------------------------------------
++# 3. Plan IDs Validation: Must match ^plan_[A-Za-z0-9]+$
++# ------------------------------------------------------------------------------
++validate_plan_ids() {
++  local regex='^plan_[A-Za-z0-9]+$'
++  local has_error=0
++
++  if [ -z "$PLAN_PRO_MONTHLY" ] || ! [[ "$PLAN_PRO_MONTHLY" =~ $regex ]]; then
++    echo "ERROR: Invalid or missing RAZORPAY_PRO_MONTHLY_PLAN_ID." >&2
++    echo "Must be non-empty and match pattern ^plan_[A-Za-z0-9]+$" >&2
++    has_error=1
++  fi
++
++  if [ -z "$PLAN_PRO_YEARLY" ] || ! [[ "$PLAN_PRO_YEARLY" =~ $regex ]]; then
++    echo "ERROR: Invalid or missing RAZORPAY_PRO_YEARLY_PLAN_ID." >&2
++    echo "Must be non-empty and match pattern ^plan_[A-Za-z0-9]+$" >&2
++    has_error=1
++  fi
++
++  if [ -z "$PLAN_TEAM_MONTHLY" ] || ! [[ "$PLAN_TEAM_MONTHLY" =~ $regex ]]; then
++    echo "ERROR: Invalid or missing RAZORPAY_TEAM_MONTHLY_PLAN_ID." >&2
++    echo "Must be non-empty and match pattern ^plan_[A-Za-z0-9]+$" >&2
++    has_error=1
++  fi
++
++  if [ -z "$PLAN_TEAM_YEARLY" ] || ! [[ "$PLAN_TEAM_YEARLY" =~ $regex ]]; then
++    echo "ERROR: Invalid or missing RAZORPAY_TEAM_YEARLY_PLAN_ID." >&2
++    echo "Must be non-empty and match pattern ^plan_[A-Za-z0-9]+$" >&2
++    has_error=1
++  fi
++
++  if [ "$has_error" -ne 0 ]; then
++    echo "Deployment aborted due to invalid Razorpay plan ID(s)." >&2
++    exit 1
++  fi
++}
++
++# ------------------------------------------------------------------------------
++# 4. Razorpay Mode Validation: Must be strictly 'live'
++# ------------------------------------------------------------------------------
++validate_razorpay_mode() {
++  if [ -n "${RAZORPAY_MODE:-}" ] && [ "$RAZORPAY_MODE" != "live" ]; then
++    echo "ERROR: Invalid ambient RAZORPAY_MODE='$RAZORPAY_MODE'. Production deployment requires RAZORPAY_MODE=live." >&2
++    exit 1
++  fi
++  TARGET_RAZORPAY_MODE="live"
++}
++
++# ------------------------------------------------------------------------------
++# 5. Local Pre-flight: npm run lint && npm run build
++# ------------------------------------------------------------------------------
++run_preflight() {
++  echo "======================================================================"
++  echo "Running Local Pre-flight Checks (lint & build)..."
++  echo "======================================================================"
++
++  echo "--> Running: npm run lint"
++  if ! npm run lint; then
++    echo "ERROR: Local pre-flight failed at 'npm run lint'. Aborting deployment." >&2
++    exit 1
++  fi
++
++  echo "--> Running: npm run build"
++  if ! npm run build; then
++    echo "ERROR: Local pre-flight failed at 'npm run build'. Aborting deployment." >&2
++    exit 1
++  fi
++
++  echo ""
++  echo "PRE-FLIGHT PASSED"
++  echo "======================================================================"
++}
++
++# ------------------------------------------------------------------------------
++# 6. Safe Deployment Summary (No secrets, only validity status)
++# ------------------------------------------------------------------------------
++print_deployment_summary() {
++  echo "======================================================================"
++  echo "Production deployment target:"
++  echo "  Project: $EXPECTED_PROJECT_ID"
++  echo "  Region: $EXPECTED_REGION"
++  echo "  Service: $EXPECTED_SERVICE_NAME"
++  echo "  Service Account: $EXPECTED_SERVICE_ACCOUNT"
++  echo "  Razorpay Mode: $TARGET_RAZORPAY_MODE"
++  echo "  Razorpay Pro Monthly Plan: VALID"
++  echo "  Razorpay Pro Yearly Plan: VALID"
++  echo "  Razorpay Team Monthly Plan: VALID"
++  echo "  Razorpay Team Yearly Plan: VALID"
++  echo "  Secret Manager References (6 production secrets):"
++  echo "    - GEMINI_API_KEY -> echonote-gemini-api-key:latest"
++  echo "    - RAZORPAY_KEY_SECRET -> echonote-razorpay-key-secret:latest"
++  echo "    - RAZORPAY_WEBHOOK_SECRET -> echonote-razorpay-webhook-secret:latest"
++  echo "    - RESEND_API_KEY -> echonote-resend-api-key:latest"
++  echo "    - PLAYBACK_SECRET -> echonote-playback-secret:latest"
++  echo "    - CRON_SECRET -> echonote-cron-secret:latest"
++  echo "  Rollback Reference Revision: $LAST_KNOWN_PROD_REVISION"
++  echo "======================================================================"
++}
++
++case "$ACTION" in
++  update-env)
++    validate_target
++    validate_active_gcloud_project
++    validate_plan_ids
++    validate_razorpay_mode
++    print_deployment_summary
++
++    echo "Updating Cloud Run Service Environment Variables & Secret References"
++    echo "Service: $SERVICE_NAME (Region: $REGION, Project: $PROJECT_ID)"
++
++    if [ "${DRY_RUN:-0}" = "1" ]; then
++      echo "DRY RUN: Validation passed. Skipping remote gcloud execution."
++      exit 0
++    fi
++
++    gcloud run services update "$SERVICE_NAME" \
++      --project="$PROJECT_ID" \
++      --region="$REGION" \
++      --update-env-vars="RAZORPAY_MODE=live,\
++NODE_ENV=production,\
++RAZORPAY_PRO_MONTHLY_PLAN_ID=$PLAN_PRO_MONTHLY,\
++RAZORPAY_PRO_YEARLY_PLAN_ID=$PLAN_PRO_YEARLY,\
++RAZORPAY_TEAM_MONTHLY_PLAN_ID=$PLAN_TEAM_MONTHLY,\
++RAZORPAY_TEAM_YEARLY_PLAN_ID=$PLAN_TEAM_YEARLY" \
++      --set-secrets="$CLOUD_RUN_SECRETS"
++
++    echo "✅ Cloud Run environment variables successfully updated."
++    echo "100% of traffic is automatically routed to the newly deployed revision."
++    ;;
++
++  deploy)
++    validate_target
++    validate_active_gcloud_project
++    validate_plan_ids
++    validate_razorpay_mode
++    run_preflight
++    print_deployment_summary
++
++    echo "Building and Deploying New Image to Cloud Run"
++    echo "Service: $SERVICE_NAME (Region: $REGION, Project: $PROJECT_ID)"
++
++    if [ "${DRY_RUN:-0}" = "1" ]; then
++      echo "DRY RUN: Pre-flight and safety validations passed. Skipping remote gcloud execution."
++      exit 0
++    fi
++
++    gcloud run deploy "$SERVICE_NAME" \
++      --source . \
++      --project="$PROJECT_ID" \
++      --region="$REGION" \
++      --service-account="$EXPECTED_SERVICE_ACCOUNT" \
++      --allow-unauthenticated \
++      --port=3000 \
++      --update-env-vars="RAZORPAY_MODE=live,\
++NODE_ENV=production,\
++RAZORPAY_PRO_MONTHLY_PLAN_ID=$PLAN_PRO_MONTHLY,\
++RAZORPAY_PRO_YEARLY_PLAN_ID=$PLAN_PRO_YEARLY,\
++RAZORPAY_TEAM_MONTHLY_PLAN_ID=$PLAN_TEAM_MONTHLY,\
++RAZORPAY_TEAM_YEARLY_PLAN_ID=$PLAN_TEAM_YEARLY" \
++      --set-secrets="$CLOUD_RUN_SECRETS"
++
++    echo "✅ Deployment completed and active."
++    ;;
++
++  verify)
++    if [ -z "${2:-}" ]; then
++      echo "Usage: ./scripts/deploy-cloud-run.sh verify <BACKEND_URL>"
++      exit 1
++    fi
++    BACKEND_URL="${2%/}"
++    echo "Verifying Health: $BACKEND_URL/api/health"
++    curl -s "$BACKEND_URL/api/health" | grep -o '"status":"[^"]*"' || true
++    echo ""
++    echo "Verifying Payment Diagnostics: $BACKEND_URL/api/payment/config-status"
++    curl -s "$BACKEND_URL/api/payment/config-status"
++    echo ""
++    ;;
++
++  *)
++    echo "Unknown action: $ACTION"
++    echo "Usage: ./scripts/deploy-cloud-run.sh [update-env | deploy | verify <URL>]"
++    exit 1
++    ;;
++esac
+diff --git a/tests/test_deploy_cloud_run_safety.sh b/tests/test_deploy_cloud_run_safety.sh
+new file mode 100755
+index 0000000..00e66ee
+--- /dev/null
++++ b/tests/test_deploy_cloud_run_safety.sh
+@@ -0,0 +1,401 @@
++#!/usr/bin/env bash
++# ==============================================================================
++# EchoNote Production Deployment Script Safety Test Suite (Step 1J)
++# ==============================================================================
++# Tests all security invariants and guardrails for scripts/deploy-cloud-run.sh
++# WITHOUT executing any real deployment or gcloud remote commands.
++# ==============================================================================
++
++set -uo pipefail
++
++SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++WORKSPACE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
++DEPLOY_SCRIPT="$WORKSPACE_ROOT/scripts/deploy-cloud-run.sh"
++
++PASSED_COUNT=0
++FAILED_COUNT=0
++
++# Create sandbox test directory for mock binaries
++TEST_SANDBOX="$(mktemp -d)"
++trap 'rm -rf "$TEST_SANDBOX"' EXIT
++
++MOCK_BIN="$TEST_SANDBOX/bin"
++mkdir -p "$MOCK_BIN"
++
++REAL_NPM="$(command -v npm)"
++
++# Helper for creating a mock npm for pre-flight testing
++setup_mock_npm() {
++  local lint_exit="${1:-0}"
++  local build_exit="${2:-0}"
++  cat <<EOF > "$MOCK_BIN/npm"
++#!/usr/bin/env bash
++if [ "\$1" = "run" ] && [ "\$2" = "lint" ]; then
++  if [ "$lint_exit" -ne 0 ]; then
++    echo "Simulated lint failure" >&2
++    exit $lint_exit
++  fi
++  echo "Mock lint passed"
++  exit 0
++fi
++
++if [ "\$1" = "run" ] && [ "\$2" = "build" ]; then
++  if [ "$build_exit" -ne 0 ]; then
++    echo "Simulated build failure" >&2
++    exit $build_exit
++  fi
++  echo "Mock build passed"
++  exit 0
++fi
++
++exec "$REAL_NPM" "\$@"
++EOF
++  chmod +x "$MOCK_BIN/npm"
++}
++
++# Helper for creating a mock gcloud
++setup_mock_gcloud() {
++  local mock_project="${1:-echonote-2509}"
++  cat <<EOF > "$MOCK_BIN/gcloud"
++#!/usr/bin/env bash
++if [ "\$1" = "config" ] && [ "\$2" = "get-value" ] && [ "\$3" = "project" ]; then
++  echo "$mock_project"
++  exit 0
++fi
++
++if [ "\$1" = "run" ] && [ "\$2" = "deploy" ]; then
++  echo "MOCK_GCLOUD_DEPLOY_INVOKED: \$*"
++  exit 0
++fi
++
++if [ "\$1" = "run" ] && [ "\$2" = "services" ] && [ "\$3" = "update" ]; then
++  echo "MOCK_GCLOUD_SERVICES_UPDATE_INVOKED: \$*"
++  exit 0
++fi
++
++echo "MOCK_GCLOUD_UNKNOWN: \$*"
++exit 0
++EOF
++  chmod +x "$MOCK_BIN/gcloud"
++}
++
++# Helper to log test results
++assert_test() {
++  local test_name="$1"
++  local expected_exit="$2" # 0 or nonzero
++  local expected_text="$3"
++  local actual_exit="$4"
++  local actual_output="$5"
++
++  local success=1
++  if [ "$expected_exit" = "0" ] && [ "$actual_exit" -ne 0 ]; then
++    success=0
++  elif [ "$expected_exit" = "nonzero" ] && [ "$actual_exit" -eq 0 ]; then
++    success=0
++  fi
++
++  if [ -n "$expected_text" ]; then
++    if ! echo "$actual_output" | grep -q -F -- "$expected_text"; then
++      success=0
++    fi
++  fi
++
++  if [ "$success" -eq 1 ]; then
++    echo "  ✅ $test_name ... PASSED"
++    PASSED_COUNT=$((PASSED_COUNT + 1))
++  else
++    echo "  ❌ $test_name ... FAILED"
++    echo "     Expected exit: $expected_exit, got: $actual_exit"
++    echo "     Expected text: '$expected_text'"
++    echo "     Output was:"
++    echo "$actual_output" | sed 's/^/       /'
++    FAILED_COUNT=$((FAILED_COUNT + 1))
++  fi
++}
++
++# Helper to assert forbidden text is absent
++assert_absent() {
++  local test_name="$1"
++  local forbidden_text="$2"
++  local actual_output="$3"
++
++  if echo "$actual_output" | grep -q -F -- "$forbidden_text"; then
++    echo "  ❌ $test_name ... FAILED"
++    echo "     Forbidden text '$forbidden_text' was found in output!"
++    FAILED_COUNT=$((FAILED_COUNT + 1))
++  else
++    echo "  ✅ $test_name ... PASSED"
++    PASSED_COUNT=$((PASSED_COUNT + 1))
++  fi
++}
++
++echo "======================================================================"
++echo "🚀 RUNNING STEP 1J & 1L-A DEPLOYMENT SAFETY & SECRET MANAGER TESTS"
++echo "======================================================================"
++
++# Default mock npm to successful pre-flight
++setup_mock_npm 0 0
++
++# ----------------------------------------------------------------------------
++# Test A: Correct Target & Validation Success with DRY_RUN=1
++# ----------------------------------------------------------------------------
++setup_mock_gcloud "echonote-2509"
++OUT=$(PATH="$MOCK_BIN:$PATH" DRY_RUN=1 "$DEPLOY_SCRIPT" deploy 2>&1)
++EXIT_CODE=$?
++assert_test "Test A: Correct target with DRY_RUN=1 passes pre-flight and validations" \
++  "0" "PRE-FLIGHT PASSED" "$EXIT_CODE" "$OUT"
++
++# Verify no gcloud deploy was called
++if echo "$OUT" | grep -q "MOCK_GCLOUD_DEPLOY_INVOKED"; then
++  echo "  ❌ Test A: gcloud deploy was unexpectedly invoked during dry run!"
++  FAILED_COUNT=$((FAILED_COUNT + 1))
++else
++  echo "  ✅ Test A: Confirmed no remote gcloud deploy was executed"
++  PASSED_COUNT=$((PASSED_COUNT + 1))
++fi
++
++# ----------------------------------------------------------------------------
++# Test B: Wrong CLOUD_RUN_SERVICE
++# ----------------------------------------------------------------------------
++OUT=$(PATH="$MOCK_BIN:$PATH" CLOUD_RUN_SERVICE="rogue-service" "$DEPLOY_SCRIPT" deploy 2>&1)
++EXIT_CODE=$?
++assert_test "Test B: Rejects wrong CLOUD_RUN_SERVICE override" \
++  "nonzero" "ERROR: Production deployment target mismatch" "$EXIT_CODE" "$OUT"
++
++# ----------------------------------------------------------------------------
++# Test C: Wrong CLOUD_RUN_REGION
++# ----------------------------------------------------------------------------
++OUT=$(PATH="$MOCK_BIN:$PATH" CLOUD_RUN_REGION="europe-west1" "$DEPLOY_SCRIPT" deploy 2>&1)
++EXIT_CODE=$?
++assert_test "Test C: Rejects wrong CLOUD_RUN_REGION override" \
++  "nonzero" "ERROR: Production deployment target mismatch" "$EXIT_CODE" "$OUT"
++
++# ----------------------------------------------------------------------------
++# Test D1: Wrong GOOGLE_CLOUD_PROJECT
++# ----------------------------------------------------------------------------
++OUT=$(PATH="$MOCK_BIN:$PATH" GOOGLE_CLOUD_PROJECT="other-project" "$DEPLOY_SCRIPT" deploy 2>&1)
++EXIT_CODE=$?
++assert_test "Test D1: Rejects wrong GOOGLE_CLOUD_PROJECT override" \
++  "nonzero" "ERROR: Production deployment target mismatch" "$EXIT_CODE" "$OUT"
++
++# ----------------------------------------------------------------------------
++# Test D2: Active gcloud project mismatch
++# ----------------------------------------------------------------------------
++setup_mock_gcloud "rogue-gcloud-project"
++OUT=$(PATH="$MOCK_BIN:$PATH" "$DEPLOY_SCRIPT" deploy 2>&1)
++EXIT_CODE=$?
++assert_test "Test D2: Rejects mismatched active gcloud project" \
++  "nonzero" "ERROR: Active gcloud project mismatch" "$EXIT_CODE" "$OUT"
++
++# Reset mock gcloud to correct project for subsequent tests
++setup_mock_gcloud "echonote-2509"
++
++# ----------------------------------------------------------------------------
++# Test E1: Missing/Empty Plan ID
++# ----------------------------------------------------------------------------
++OUT=$(PATH="$MOCK_BIN:$PATH" RAZORPAY_PRO_MONTHLY_PLAN_ID="" "$DEPLOY_SCRIPT" deploy 2>&1)
++EXIT_CODE=$?
++assert_test "Test E1: Rejects empty RAZORPAY_PRO_MONTHLY_PLAN_ID" \
++  "nonzero" "ERROR: Invalid or missing RAZORPAY_PRO_MONTHLY_PLAN_ID" "$EXIT_CODE" "$OUT"
++
++# ----------------------------------------------------------------------------
++# Test E2: Invalid Plan ID regex format
++# ----------------------------------------------------------------------------
++OUT=$(PATH="$MOCK_BIN:$PATH" RAZORPAY_TEAM_YEARLY_PLAN_ID="invalid_plan_format" "$DEPLOY_SCRIPT" deploy 2>&1)
++EXIT_CODE=$?
++assert_test "Test E2: Rejects invalid Plan ID regex format" \
++  "nonzero" "ERROR: Invalid or missing RAZORPAY_TEAM_YEARLY_PLAN_ID" "$EXIT_CODE" "$OUT"
++
++# ----------------------------------------------------------------------------
++# Test F: Invalid Razorpay Mode
++# ----------------------------------------------------------------------------
++OUT=$(PATH="$MOCK_BIN:$PATH" RAZORPAY_MODE="test" "$DEPLOY_SCRIPT" deploy 2>&1)
++EXIT_CODE=$?
++assert_test "Test F: Rejects non-live RAZORPAY_MODE override" \
++  "nonzero" "ERROR: Invalid ambient RAZORPAY_MODE" "$EXIT_CODE" "$OUT"
++
++# ----------------------------------------------------------------------------
++# Test G: Preflight failure on 'npm run lint'
++# ----------------------------------------------------------------------------
++setup_mock_npm 1 0
++OUT=$(PATH="$MOCK_BIN:$PATH" "$DEPLOY_SCRIPT" deploy 2>&1)
++EXIT_CODE=$?
++assert_test "Test G: Stops immediately when npm run lint fails" \
++  "nonzero" "ERROR: Local pre-flight failed at 'npm run lint'" "$EXIT_CODE" "$OUT"
++
++# ----------------------------------------------------------------------------
++# Test H: Preflight failure on 'npm run build'
++# ----------------------------------------------------------------------------
++setup_mock_npm 0 2
++OUT=$(PATH="$MOCK_BIN:$PATH" "$DEPLOY_SCRIPT" deploy 2>&1)
++EXIT_CODE=$?
++assert_test "Test H: Stops immediately when npm run build fails" \
++  "nonzero" "ERROR: Local pre-flight failed at 'npm run build'" "$EXIT_CODE" "$OUT"
++
++# Reset mock npm to success
++setup_mock_npm 0 0
++
++# ----------------------------------------------------------------------------
++# Test I: Service Account Pinning & Env Flags in Command Construction
++# ----------------------------------------------------------------------------
++setup_mock_gcloud "echonote-2509"
++OUT=$(PATH="$MOCK_BIN:$PATH" DRY_RUN=0 "$DEPLOY_SCRIPT" deploy 2>&1)
++EXIT_CODE=$?
++
++assert_test "Test I1: Command specifies explicit service account" \
++  "0" "--service-account=200551109142-compute@developer.gserviceaccount.com" "$EXIT_CODE" "$OUT"
++
++assert_test "Test I2: Command uses --update-env-vars (preserving existing env)" \
++  "0" "--update-env-vars=RAZORPAY_MODE=live" "$EXIT_CODE" "$OUT"
++
++assert_test "Test I3: Summary logs only VALID status without secret exposure" \
++  "0" "Razorpay Pro Monthly Plan: VALID" "$EXIT_CODE" "$OUT"
++
++# ----------------------------------------------------------------------------
++# Test J: Step 1L-A Deploy Action Secret Manager Integration
++# ----------------------------------------------------------------------------
++assert_test "Test J1: Deploy specifies --set-secrets flag" \
++  "0" "--set-secrets=" "$EXIT_CODE" "$OUT"
++
++assert_test "Test J2: Deploy maps GEMINI_API_KEY to echonote-gemini-api-key:latest" \
++  "0" "GEMINI_API_KEY=echonote-gemini-api-key:latest" "$EXIT_CODE" "$OUT"
++
++assert_test "Test J3: Deploy maps RAZORPAY_KEY_SECRET to echonote-razorpay-key-secret:latest" \
++  "0" "RAZORPAY_KEY_SECRET=echonote-razorpay-key-secret:latest" "$EXIT_CODE" "$OUT"
++
++assert_test "Test J4: Deploy maps RAZORPAY_WEBHOOK_SECRET to echonote-razorpay-webhook-secret:latest" \
++  "0" "RAZORPAY_WEBHOOK_SECRET=echonote-razorpay-webhook-secret:latest" "$EXIT_CODE" "$OUT"
++
++assert_test "Test J5: Deploy maps RESEND_API_KEY to echonote-resend-api-key:latest" \
++  "0" "RESEND_API_KEY=echonote-resend-api-key:latest" "$EXIT_CODE" "$OUT"
++
++assert_test "Test J6: Deploy maps PLAYBACK_SECRET to echonote-playback-secret:latest" \
++  "0" "PLAYBACK_SECRET=echonote-playback-secret:latest" "$EXIT_CODE" "$OUT"
++
++assert_test "Test J7: Deploy maps CRON_SECRET to echonote-cron-secret:latest" \
++  "0" "CRON_SECRET=echonote-cron-secret:latest" "$EXIT_CODE" "$OUT"
++
++assert_test "Test J8: Deploy preserves NODE_ENV=production in env vars" \
++  "0" "NODE_ENV=production" "$EXIT_CODE" "$OUT"
++
++assert_test "Test J9: Deploy preserves RAZORPAY_MODE=live in env vars" \
++  "0" "RAZORPAY_MODE=live" "$EXIT_CODE" "$OUT"
++
++assert_absent "Test J10: Deploy does NOT use --set-env-vars (which would wipe unmentioned vars)" \
++  "--set-env-vars" "$OUT"
++
++# Extract the value of --update-env-vars to verify none of the 6 secret names are in it
++UPDATE_ENV_PART="$(echo "$OUT" | grep -o -- '--update-env-vars=[^ ]*' || true)"
++assert_absent "Test J11: GEMINI_API_KEY is absent from --update-env-vars" \
++  "GEMINI_API_KEY" "$UPDATE_ENV_PART"
++assert_absent "Test J12: RAZORPAY_KEY_SECRET is absent from --update-env-vars" \
++  "RAZORPAY_KEY_SECRET" "$UPDATE_ENV_PART"
++assert_absent "Test J13: RAZORPAY_WEBHOOK_SECRET is absent from --update-env-vars" \
++  "RAZORPAY_WEBHOOK_SECRET" "$UPDATE_ENV_PART"
++assert_absent "Test J14: RESEND_API_KEY is absent from --update-env-vars" \
++  "RESEND_API_KEY" "$UPDATE_ENV_PART"
++assert_absent "Test J15: PLAYBACK_SECRET is absent from --update-env-vars" \
++  "PLAYBACK_SECRET" "$UPDATE_ENV_PART"
++assert_absent "Test J16: CRON_SECRET is absent from --update-env-vars" \
++  "CRON_SECRET" "$UPDATE_ENV_PART"
++
++# ----------------------------------------------------------------------------
++# Test K: Step 1L-A Update-Env Action Secret Manager Integration
++# ----------------------------------------------------------------------------
++OUT_UPDATE=$(PATH="$MOCK_BIN:$PATH" DRY_RUN=0 "$DEPLOY_SCRIPT" update-env 2>&1)
++EXIT_CODE_UPDATE=$?
++
++assert_test "Test K1: Update-env succeeds and invokes services update" \
++  "0" "MOCK_GCLOUD_SERVICES_UPDATE_INVOKED" "$EXIT_CODE_UPDATE" "$OUT_UPDATE"
++
++assert_test "Test K2: Update-env specifies --set-secrets flag" \
++  "0" "--set-secrets=" "$EXIT_CODE_UPDATE" "$OUT_UPDATE"
++
++assert_test "Test K3: Update-env contains all 6 Secret Manager mappings" \
++  "0" "GEMINI_API_KEY=echonote-gemini-api-key:latest,RAZORPAY_KEY_SECRET=echonote-razorpay-key-secret:latest,RAZORPAY_WEBHOOK_SECRET=echonote-razorpay-webhook-secret:latest,RESEND_API_KEY=echonote-resend-api-key:latest,PLAYBACK_SECRET=echonote-playback-secret:latest,CRON_SECRET=echonote-cron-secret:latest" \
++  "$EXIT_CODE_UPDATE" "$OUT_UPDATE"
++
++assert_test "Test K4: Update-env uses --update-env-vars to preserve other non-secret env vars" \
++  "0" "--update-env-vars=RAZORPAY_MODE=live" "$EXIT_CODE_UPDATE" "$OUT_UPDATE"
++
++assert_absent "Test K5: Update-env does NOT use --set-env-vars" \
++  "--set-env-vars" "$OUT_UPDATE"
++
++UPDATE_ENV_PART_K="$(echo "$OUT_UPDATE" | grep -o -- '--update-env-vars=[^ ]*' || true)"
++assert_absent "Test K6: Update-env does NOT place GEMINI_API_KEY in --update-env-vars" \
++  "GEMINI_API_KEY" "$UPDATE_ENV_PART_K"
++assert_absent "Test K7: Update-env does NOT place RAZORPAY_KEY_SECRET in --update-env-vars" \
++  "RAZORPAY_KEY_SECRET" "$UPDATE_ENV_PART_K"
++assert_absent "Test K8: Update-env does NOT place RAZORPAY_WEBHOOK_SECRET in --update-env-vars" \
++  "RAZORPAY_WEBHOOK_SECRET" "$UPDATE_ENV_PART_K"
++assert_absent "Test K9: Update-env does NOT place RESEND_API_KEY in --update-env-vars" \
++  "RESEND_API_KEY" "$UPDATE_ENV_PART_K"
++assert_absent "Test K10: Update-env does NOT place PLAYBACK_SECRET in --update-env-vars" \
++  "PLAYBACK_SECRET" "$UPDATE_ENV_PART_K"
++assert_absent "Test K11: Update-env does NOT place CRON_SECRET in --update-env-vars" \
++  "CRON_SECRET" "$UPDATE_ENV_PART_K"
++
++# Test K12: Update-env with DRY_RUN=1 does not invoke gcloud
++OUT_UPDATE_DRY=$(PATH="$MOCK_BIN:$PATH" DRY_RUN=1 "$DEPLOY_SCRIPT" update-env 2>&1)
++if echo "$OUT_UPDATE_DRY" | grep -q "MOCK_GCLOUD_SERVICES_UPDATE_INVOKED"; then
++  echo "  ❌ Test K12: gcloud services update was unexpectedly invoked during dry run!"
++  FAILED_COUNT=$((FAILED_COUNT + 1))
++else
++  echo "  ✅ Test K12: Confirmed update-env with DRY_RUN=1 does not execute remote gcloud update"
++  PASSED_COUNT=$((PASSED_COUNT + 1))
++fi
++
++# ----------------------------------------------------------------------------
++# Test L: Static Security & Hardening Invariants
++# ----------------------------------------------------------------------------
++# Check that scripts/deploy-cloud-run.sh does not contain raw secret values
++assert_test "Test L1: Summary displays Secret Manager References header" \
++  "0" "Secret Manager References (6 production secrets):" "$EXIT_CODE" "$OUT"
++
++assert_test "Test L2: Summary lists GEMINI_API_KEY mapping" \
++  "0" "GEMINI_API_KEY -> echonote-gemini-api-key:latest" "$EXIT_CODE" "$OUT"
++
++assert_test "Test L3: Summary lists RAZORPAY_KEY_SECRET mapping" \
++  "0" "RAZORPAY_KEY_SECRET -> echonote-razorpay-key-secret:latest" "$EXIT_CODE" "$OUT"
++
++# Helper to assert that a regex pattern matching raw credentials is absent
++assert_pattern_absent() {
++  local test_name="$1"
++  local pattern="$2"
++  local target_file="$3"
++  local pattern_description="$4"
++
++  if grep -E -q "$pattern" "$target_file"; then
++    echo "  ❌ $test_name ... FAILED"
++    echo "     Detected raw credential pattern: $pattern_description"
++    FAILED_COUNT=$((FAILED_COUNT + 1))
++  else
++    echo "  ✅ $test_name ... PASSED"
++    PASSED_COUNT=$((PASSED_COUNT + 1))
++  fi
++}
++
++# Verify no plaintext secret values or recognizable credential patterns in deploy script file
++assert_pattern_absent "Test L4: No Razorpay live/test secret-like values in deploy script" \
++  "(rzp_(live|test)_[A-Za-z0-9]{10,}|RAZORPAY_KEY_SECRET=[A-Za-z0-9]{16,})" "$DEPLOY_SCRIPT" "Razorpay key/secret format"
++
++assert_pattern_absent "Test L5: No Gemini API-key-like values in deploy script" \
++  "AIza[0-9A-Za-z_-]{30,}" "$DEPLOY_SCRIPT" "Gemini/Google API key format"
++
++assert_pattern_absent "Test L6: No Resend API-key-like values in deploy script" \
++  "re_[A-Za-z0-9_]{16,}" "$DEPLOY_SCRIPT" "Resend API key format"
++
++assert_pattern_absent "Test L7: No raw 64-character hex secret tokens in deploy script" \
++  "[0-9a-fA-F]{64}" "$DEPLOY_SCRIPT" "Raw 64-character hex secret format"
++
++# ----------------------------------------------------------------------------
++# Summary
++# ----------------------------------------------------------------------------
++echo "======================================================================"
++echo "TEST RESULTS SUMMARY: $PASSED_COUNT PASSED, $FAILED_COUNT FAILED"
++echo "======================================================================"
++
++if [ "$FAILED_COUNT" -gt 0 ]; then
++  exit 1
++fi
++exit 0

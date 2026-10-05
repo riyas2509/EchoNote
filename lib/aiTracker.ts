@@ -1,32 +1,18 @@
-import { initializeApp, getApps } from "firebase-admin/app";
-import { getFirestore, FieldValue } from "firebase-admin/firestore";
-import admin from "firebase-admin";
 import fs from "fs";
 import path from "path";
+import { FieldValue } from "firebase-admin/firestore";
+import admin from "firebase-admin";
 import crypto from "crypto";
 import { calculateCost } from "./geminiPricing.js";
-
-let dbInstance: admin.firestore.Firestore | null = null;
+import { getAdminFirestore } from "./firebaseAdmin.ts";
 
 export function getDb(): admin.firestore.Firestore | null {
   try {
-    if (!dbInstance) {
-      const firebaseConfigPath = path.join(process.cwd(), "firebase-applet-config.json");
-      if (fs.existsSync(firebaseConfigPath)) {
-        const firebaseConfig = JSON.parse(fs.readFileSync(firebaseConfigPath, "utf8"));
-        const appAdmin = !getApps().length
-          ? initializeApp({
-              credential: admin.credential.applicationDefault(),
-              projectId: firebaseConfig.projectId || process.env.GOOGLE_CLOUD_PROJECT || "echonote-2509",
-            })
-          : getApps()[0];
-        dbInstance = getFirestore(appAdmin, firebaseConfig.firestoreDatabaseId);
-      }
-    }
+    return getAdminFirestore();
   } catch (err) {
     console.warn("[aiTracker] Firebase Admin init notice:", err);
+    return null;
   }
-  return dbInstance;
 }
 
 export interface AIUsagePayload {

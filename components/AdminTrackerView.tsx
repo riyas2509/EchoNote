@@ -11,6 +11,7 @@ import {
 } from '../firebase';
 import { UserProfile } from '../types';
 import { apiFetch } from '../lib/apiClient';
+import { AuditLoggingFeed } from './AuditLoggingFeed';
 
 const SUB_REVENUE_MAPPING: Record<string, number> = {
   "guest": 0,
@@ -122,7 +123,7 @@ interface FeatureAnalytic {
   totalResponseTime: number;
 }
 
-type AdminTab = 'overview' | 'users' | 'teams' | 'features' | 'stream';
+type AdminTab = 'overview' | 'users' | 'teams' | 'features' | 'stream' | 'audit';
 
 export const AdminTrackerView: React.FC<AdminTrackerViewProps> = ({ userProfile, onAnalyticsUpdate }) => {
   const [activeTab, setActiveTab] = useState<AdminTab>('overview');
@@ -510,6 +511,18 @@ export const AdminTrackerView: React.FC<AdminTrackerViewProps> = ({ userProfile,
 
   const orgReportItems = Object.values(orgMap).sort((a, b) => b.cost - a.cost);
 
+  const handleDownloadAuditCsv = () => {
+    if (activeTab === 'audit') {
+      window.dispatchEvent(new CustomEvent('echonote:download-audit-csv'));
+    } else {
+      setActiveTab('audit');
+      // Delay dispatch slightly to ensure the AuditLoggingFeed component has mounted and attached its listener
+      setTimeout(() => {
+        window.dispatchEvent(new CustomEvent('echonote:download-audit-csv'));
+      }, 200);
+    }
+  };
+
   return (
     <div className="space-y-8 animate-in fade-in duration-500 max-w-7xl mx-auto px-4 py-6">
       {/* Admin Title Block */}
@@ -528,7 +541,18 @@ export const AdminTrackerView: React.FC<AdminTrackerViewProps> = ({ userProfile,
           </p>
         </div>
 
-        <div>
+        <div className="flex flex-wrap items-center gap-2.5">
+          <button 
+            id="admin-header-download-csv-btn"
+            data-testid="admin-download-csv-btn"
+            onClick={handleDownloadAuditCsv}
+            className="flex items-center gap-2 px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold uppercase tracking-wider shadow-xs transition cursor-pointer"
+            title="Download currently filtered audit log entries as CSV for external review"
+          >
+            <i className="fa-solid fa-file-csv" />
+            Download CSV
+          </button>
+
           <button 
             disabled={refreshing}
             onClick={fetchData}
@@ -588,7 +612,7 @@ export const AdminTrackerView: React.FC<AdminTrackerViewProps> = ({ userProfile,
         </button>
         <button
           onClick={() => setActiveTab('stream')}
-          className={`px-5 py-3 text-xs font-black uppercase tracking-wider border-b-2 transition-all ${
+          className={`px-5 py-3 text-xs font-black uppercase tracking-wider border-b-2 transition-all mr-6 ${
             activeTab === 'stream' 
               ? 'border-slate-900 text-slate-900' 
               : 'border-transparent text-slate-400 hover:text-slate-600'
@@ -596,6 +620,18 @@ export const AdminTrackerView: React.FC<AdminTrackerViewProps> = ({ userProfile,
         >
           <i className="fa-solid fa-terminal mr-2" />
           Real-time Event Stream
+        </button>
+        <button
+          id="admin-tab-security-audit"
+          onClick={() => setActiveTab('audit')}
+          className={`px-5 py-3 text-xs font-black uppercase tracking-wider border-b-2 transition-all ${
+            activeTab === 'audit' 
+              ? 'border-red-600 text-red-600 bg-red-50/40' 
+              : 'border-transparent text-slate-400 hover:text-red-500'
+          }`}
+        >
+          <i className="fa-solid fa-shield-halved mr-2 text-red-500" />
+          Security & Audit Feed
         </button>
       </div>
 
@@ -690,6 +726,46 @@ export const AdminTrackerView: React.FC<AdminTrackerViewProps> = ({ userProfile,
                   <p className="text-[11px] text-slate-400 font-mono mt-1">Latency bounds of server runtime</p>
                 </div>
 
+              </div>
+
+              {/* Security & Authorization Audit Quick-Access Banner */}
+              <div className="bg-linear-to-r from-slate-900 to-slate-800 text-white p-5 rounded-2xl shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4">
+                <div className="flex items-center gap-3.5">
+                  <div className="w-10 h-10 rounded-xl bg-red-500/20 border border-red-500/30 flex items-center justify-center text-red-400 text-lg">
+                    <i className="fa-solid fa-shield-halved" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-black text-white flex items-center gap-2">
+                      Authorization & Security Audit Logging
+                      <span className="px-2 py-0.5 rounded-full bg-red-500/20 text-red-300 text-[10px] font-bold tracking-wide uppercase border border-red-500/30">
+                        Live Monitor
+                      </span>
+                    </h3>
+                    <p className="text-xs text-slate-300 mt-0.5">
+                      Chronological stream of authorization evaluations, access denials (403/401/410), tenant boundaries, and JIT privilege caps.
+                    </p>
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-2.5 self-start md:self-auto">
+                  <button
+                    id="admin-overview-download-csv-btn"
+                    onClick={handleDownloadAuditCsv}
+                    className="px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-100 border border-slate-700 rounded-xl text-xs font-bold transition-colors inline-flex items-center gap-2 whitespace-nowrap cursor-pointer shadow-xs"
+                    title="Export currently filtered audit logs as CSV for external review"
+                  >
+                    <i className="fa-solid fa-file-csv text-emerald-400" />
+                    Download CSV
+                  </button>
+                  <button
+                    id="admin-overview-view-audit-feed-btn"
+                    onClick={() => setActiveTab('audit')}
+                    className="px-4 py-2 bg-red-600 hover:bg-red-500 text-white rounded-xl text-xs font-bold transition-colors inline-flex items-center gap-2 whitespace-nowrap cursor-pointer shadow-xs"
+                  >
+                    <i className="fa-solid fa-shield text-xs" />
+                    View Audit Feed
+                    <i className="fa-solid fa-arrow-right text-[10px]" />
+                  </button>
+                </div>
               </div>
 
               {/* Advanced charts division in overview */}
@@ -1138,6 +1214,11 @@ export const AdminTrackerView: React.FC<AdminTrackerViewProps> = ({ userProfile,
               </div>
 
             </div>
+          )}
+
+          {/* TAB 6: SECURITY & AUTHORIZATION AUDIT FEED */}
+          {activeTab === 'audit' && (
+            <AuditLoggingFeed userProfile={userProfile} />
           )}
         </motion.div>
       </AnimatePresence>

@@ -43,7 +43,7 @@ export const IdentityMappingSettings: React.FC<IdentityMappingSettingsProps> = (
   identityMappings,
   onRefreshMappings
 }) => {
-  const isAuthorizedAdmin = userOrgRole === 'owner' || userOrgRole === 'org_admin' || userOrgRole === 'super_admin';
+  const isAuthorizedAdmin = userOrgRole === 'owner' || userOrgRole === 'org_admin';
 
   // JIT Settings State
   const initialJit = organization?.securitySettings?.jitSettings || {};

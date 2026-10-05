@@ -43,10 +43,30 @@
         "projectId": { "type": "string" },
         "userId": { "type": "string" },
         "email": { "type": "string" },
-        "role": { "type": "string", "enum": ["owner", "editor", "viewer"] },
+        "role": { "type": "string", "enum": ["owner", "admin", "editor", "commenter", "viewer"] },
         "joinedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["projectId", "userId", "role"]
+    },
+    "Comment": {
+      "title": "Comment",
+      "description": "Collaboration comment on a recording or transcript.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "recordingId": { "type": "string" },
+        "projectId": { "type": "string" },
+        "organizationId": { "type": "string" },
+        "userId": { "type": "string" },
+        "userEmail": { "type": "string" },
+        "userName": { "type": "string" },
+        "content": { "type": "string" },
+        "timestampSeconds": { "type": "number" },
+        "parentCommentId": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "recordingId", "projectId", "userId", "userEmail", "userName", "content", "createdAt"]
     },
     "Invitation": {
       "title": "Invitation",
@@ -352,6 +372,48 @@
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["id", "enabled", "status"]
+    },
+    "Task": {
+      "title": "Task",
+      "description": "Collaborative project task assigned to team members.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "projectId": { "type": "string" },
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "assigneeEmail": { "type": "string" },
+        "assigneeName": { "type": "string" },
+        "assigneeId": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "in_progress", "completed"] },
+        "priority": { "type": "string", "enum": ["low", "medium", "high", "urgent"] },
+        "dueDate": { "type": "string" },
+        "subTasks": { "type": "array", "items": { "type": "object" } },
+        "activityHistory": { "type": "array", "items": { "type": "object" } },
+        "createdBy": { "type": "string" },
+        "creatorEmail": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["projectId", "title", "assigneeEmail", "status"]
+    },
+    "Notification": {
+      "title": "Notification",
+      "description": "User notification for task assignments and system events.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "userEmail": { "type": "string" },
+        "title": { "type": "string" },
+        "message": { "type": "string" },
+        "type": { "type": "string", "enum": ["audio", "text", "error", "success", "info"] },
+        "projectId": { "type": "string" },
+        "taskId": { "type": "string" },
+        "isRead": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["title", "message", "isRead"]
     }
   },
   "firestore": {
@@ -360,9 +422,12 @@
     "/projects/{projectId}": { "schema": "Project", "description": "Collaboration projects" },
     "/recordings/{recordingId}": { "schema": "Recording", "description": "Audio recordings" },
     "/transcriptions/{transcriptionId}": { "schema": "Transcription", "description": "AI transcriptions" },
+    "/tasks/{taskId}": { "schema": "Task", "description": "Collaborative assigned project tasks" },
+    "/notifications/{id}": { "schema": "Notification", "description": "In-app notifications" },
     "/usage/{userId}": { "schema": "Usage", "description": "Usage tracking" },
     "/subscriptions/{id}": { "schema": "Subscription", "description": "Razorpay subscriptions" },
     "/projectMembers/{id}": { "schema": "ProjectMember", "description": "Project membership" },
+    "/comments/{id}": { "schema": "Comment", "description": "Collaboration comments on recordings" },
     "/invites/{id}": { "schema": "Invitation", "description": "Project invitations" },
     "/userIntegrations/{userId}": { "schema": "UserIntegration", "description": "Third-party integrations" },
     "/jiraStates/{userId}": { "schema": "JiraState", "description": "Jira OAuth state" },

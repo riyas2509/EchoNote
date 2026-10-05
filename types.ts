@@ -50,9 +50,184 @@ export interface SpeakerMapping {
   [label: string]: string; // "Speaker 1" -> "John Doe"
 }
 
-export type CollaborationRole = 'owner' | 'editor' | 'viewer';
+// ============================================================================
+// PROJECT COLLABORATION ROLES (Phase 1 Target Model & Backward Compatibility)
+// ============================================================================
+
+/**
+ * Target canonical project collaboration roles:
+ * - owner: Full project control, deletion, settings, and member management.
+ * - admin: Manage project members/invites, edit/manage recordings, transcripts, and tasks.
+ * - commenter: View permitted project recordings and transcripts; create and manage own comments.
+ * - viewer: Read-only access to permitted project recordings and transcripts.
+ */
+export type TargetProjectRole = 'owner' | 'admin' | 'commenter' | 'viewer';
+
+/**
+ * Legacy project collaboration role preserved for non-destructive, backward-compatible
+ * reading of existing Firestore documents without requiring immediate database migration.
+ */
+export type LegacyProjectRole = 'editor';
+
+/**
+ * Authoritative project collaboration role type representing both canonical target roles
+ * and legacy stored roles.
+ */
+export type CollaborationRole = TargetProjectRole | LegacyProjectRole;
+
+/**
+ * Explicit alias to clearly distinguish Project-level collaboration role from Organization-level role.
+ */
+export type ProjectCollaborationRole = CollaborationRole;
+
+/**
+ * Normalizes any project collaboration role string (including legacy 'editor')
+ * into the canonical target role: 'owner' | 'admin' | 'commenter' | 'viewer'.
+ * 
+ * Non-destructive mapping:
+ * - editor -> admin
+ * - admin -> admin
+ * - owner -> owner
+ * - commenter -> commenter
+ * - viewer -> viewer
+ * 
+ * Safe default:
+ * Unknown, missing, or invalid role values safely resolve to 'viewer' (least privilege).
+ * Unknown values NEVER become admin.
+ */
+export function normalizeProjectRole(role?: string | null): TargetProjectRole {
+  if (!role || typeof role !== 'string') return 'viewer';
+  const normalized = role.toLowerCase().trim();
+  switch (normalized) {
+    case 'owner':
+      return 'owner';
+    case 'admin':
+    case 'editor':
+      return 'admin';
+    case 'commenter':
+      return 'commenter';
+    case 'viewer':
+      return 'viewer';
+    default:
+      return 'viewer';
+  }
+}
+
+/**
+ * Granular project capability permissions evaluated during server-side authorization.
+ */
+export type ProjectPermission = 
+  | 'VIEW'
+  | 'COMMENT'
+  | 'EDIT_CONTENT'
+  | 'MANAGE_PROJECT'
+  | 'MANAGE_MEMBERS'
+  | 'DELETE_PROJECT';
+
+export interface ProjectPermissions {
+  canView: boolean;
+  canComment: boolean;
+  canEditContent: boolean;
+  canManageProject: boolean;
+  canManageMembers: boolean;
+  canDeleteProject: boolean;
+}
+
+export interface ProjectAccessResolution {
+  hasAccess: boolean;
+  role: TargetProjectRole | null;
+  rawRole?: string | null;
+  isOwner: boolean;
+  isDirectCreator: boolean;
+  isOrgAdmin: boolean;
+  isPlatformAdmin: boolean;
+  organizationId?: string | null;
+  project?: any;
+  permissions: ProjectPermissions;
+  reason?: string;
+  notFound?: boolean;
+}
+
+/**
+ * Maps a canonical TargetProjectRole to its default permission capabilities.
+ */
+export function getProjectRolePermissions(role: TargetProjectRole | null): ProjectPermissions {
+  if (!role) {
+    return {
+      canView: false,
+      canComment: false,
+      canEditContent: false,
+      canManageProject: false,
+      canManageMembers: false,
+      canDeleteProject: false
+    };
+  }
+  switch (role) {
+    case 'owner':
+      return {
+        canView: true,
+        canComment: true,
+        canEditContent: true,
+        canManageProject: true,
+        canManageMembers: true,
+        canDeleteProject: true
+      };
+    case 'admin':
+      return {
+        canView: true,
+        canComment: true,
+        canEditContent: true,
+        canManageProject: true,
+        canManageMembers: true,
+        canDeleteProject: false
+      };
+    case 'commenter':
+      return {
+        canView: true,
+        canComment: true,
+        canEditContent: false,
+        canManageProject: false,
+        canManageMembers: false,
+        canDeleteProject: false
+      };
+    case 'viewer':
+    default:
+      return {
+        canView: true,
+        canComment: false,
+        canEditContent: false,
+        canManageProject: false,
+        canManageMembers: false,
+        canDeleteProject: false
+      };
+  }
+}
+
+// ============================================================================
+// ORGANIZATION ROLES (Preserved for Custom Claims and Enterprise Hierarchy)
+// ============================================================================
 export type AuthoritativeOrgRole = 'owner' | 'org_admin' | 'team_manager' | 'member' | 'viewer';
-export type OrgRole = AuthoritativeOrgRole | 'super_admin' | 'admin' | 'team_lead' | 'guest';
+export type OrgRole = AuthoritativeOrgRole;
+
+/**
+ * Normalizes any legacy or arbitrary role string into an authoritative OrgRole.
+ * Legacy mapping:
+ * - 'owner', 'super_admin' -> 'owner'
+ * - 'org_admin', 'admin' -> 'org_admin'
+ * - 'team_manager', 'team_lead', 'manager', 'dept_manager', 'project_manager' -> 'team_manager'
+ * - 'member' -> 'member'
+ * - 'viewer', 'guest', or anything else -> 'viewer'
+ */
+export function normalizeOrgRole(role?: string | null): OrgRole {
+  if (!role || typeof role !== 'string') return 'viewer';
+  const r = role.toLowerCase().trim();
+  if (r === 'owner' || r === 'super_admin') return 'owner';
+  if (r === 'org_admin' || r === 'admin') return 'org_admin';
+  if (r === 'team_manager' || r === 'team_lead' || r === 'manager' || r === 'dept_manager' || r === 'project_manager') return 'team_manager';
+  if (r === 'member') return 'member';
+  return 'viewer';
+}
+
 export type ReadStatus = 'not-read' | 'in-progress' | 'read';
 
 export interface CustomClaims {
@@ -81,6 +256,8 @@ export interface OrgAuditEvent {
     | 'MEMBER_REACTIVATED' 
     | 'MEMBER_INVITED' 
     | 'MEMBER_REMOVED' 
+    | 'INVITATION_CANCELLED'
+    | 'MEMBER_DEPARTMENT_ASSIGNED'
     | 'ORGANIZATION_CREATED' 
     | 'SECURITY_UPDATED' 
     | 'SSO_LOGIN_SUCCESS' 
@@ -130,21 +307,41 @@ export interface OrgAuditEvent {
 export interface ProjectMember {
   projectId: string;
   uid: string;
+  userId?: string;
   email: string;
   role: CollaborationRole;
   status?: ReadStatus;
   isOnline?: boolean;
   joinedAt: string;
+  displayName?: string;
+  lastActive?: string | null;
+  photoURL?: string | null;
 }
 
 export interface Invitation {
   id: string;
   email: string;
   projectId: string;
+  projectName?: string;
   role: CollaborationRole;
   status: 'pending' | 'accepted' | 'declined';
   invitedBy: string;
   createdAt: string;
+}
+
+export interface Comment {
+  id: string;
+  recordingId: string;
+  projectId: string;
+  organizationId?: string;
+  userId: string;
+  userEmail: string;
+  userName: string;
+  content: string;
+  timestampSeconds?: number;
+  parentCommentId?: string;
+  createdAt: string;
+  updatedAt?: string;
 }
 
 export interface Project {
@@ -249,6 +446,24 @@ export interface DecisionHistoryItem {
   createdAt: string;
 }
 
+export interface TaggedTeamMember {
+  name: string;
+  email?: string;
+  role?: string;
+  reason: string;
+  actionItems?: string[];
+  avatarUrl?: string;
+}
+
+export interface SmartRecap {
+  executiveSummary: [string, string, string] | string[]; // Exactly 3-bullet point executive summary
+  taggedMembers: TaggedTeamMember[];
+  generatedAt: string;
+  recordingId?: string;
+  meetingTopic?: string;
+  strategicTakeaway?: string;
+}
+
 export interface AudioToTextRecord {
   id: string;
   userId: string;
@@ -260,6 +475,7 @@ export interface AudioToTextRecord {
   transcriptText?: string;
   speakers?: string[];
   summary?: CallSummary;
+  smartRecap?: SmartRecap;
   status: 'pending' | 'processing' | 'completed' | 'error' | 'draft';
   processingStep?: string; 
   errorMessage?: string; 
@@ -640,7 +856,7 @@ export interface ProjectActivity {
   userId: string;
   userEmail: string;
   userName: string;
-  actionType: 'upload_file' | 'create_bookmark' | 'generate_decision' | 'create_transcript' | 'invite_member' | 'join_project' | 'decline_invite';
+  actionType: 'upload_file' | 'create_bookmark' | 'generate_decision' | 'create_transcript' | 'invite_member' | 'join_project' | 'decline_invite' | 'comment_added' | 'comment_updated' | 'comment_deleted';
   description: string;
   createdAt: any;
   metadata?: any;
@@ -796,3 +1012,120 @@ export interface PlaybackMetadata {
 }
 
 export type PlaybackStatus = 'playing' | 'paused' | 'stopped';
+
+export interface SubTask {
+  id: string;
+  title: string;
+  completed: boolean;
+}
+
+export interface TaskActivity {
+  id: string;
+  action: string;
+  performedBy: string;
+  timestamp: string;
+  details?: string;
+}
+
+export interface ProjectTask {
+  id: string;
+  projectId: string;
+  title: string;
+  description?: string;
+  assigneeEmail: string;
+  assigneeName?: string;
+  assigneeId?: string;
+  status: 'pending' | 'in_progress' | 'completed';
+  priority: 'low' | 'medium' | 'high' | 'urgent';
+  dueDate?: string;
+  startDate?: string;
+  milestoneId?: string;
+  milestoneTitle?: string;
+  subTasks?: SubTask[];
+  activityHistory?: TaskActivity[];
+  createdBy: string;
+  creatorEmail?: string;
+  createdAt: string;
+  updatedAt?: string;
+}
+
+export interface AutomatedTaggingDetection {
+  memberEmail: string;
+  memberName: string;
+  memberUid?: string;
+  taskId?: string;
+  taskTitle: string;
+  actionDescription: string;
+  transcriptQuote: string;
+  confidence: number;
+  detectedDeadline?: string;
+  applied?: boolean;
+}
+
+export interface AutomatedTaggingResult {
+  success: boolean;
+  detections: AutomatedTaggingDetection[];
+  updatedTasksCount: number;
+  createdTasksCount: number;
+  updatedTaskIds: string[];
+  createdTaskIds?: string[];
+  message?: string;
+}
+
+export interface ProjectMilestone {
+  id: string;
+  projectId: string;
+  title: string;
+  description?: string;
+  startDate: string;
+  dueDate: string;
+  status: 'completed' | 'in_progress' | 'pending' | 'at_risk' | 'overdue';
+  progressPercentage: number;
+  totalTasks: number;
+  completedTasks: number;
+  targetDeliverable?: string;
+  ownerName?: string;
+}
+
+export interface TimelineGanttItem {
+  id: string;
+  name: string;
+  category: 'Milestone' | 'Task';
+  assignee: string;
+  status: 'completed' | 'in_progress' | 'pending' | 'overdue';
+  priority: 'low' | 'medium' | 'high' | 'urgent';
+  startDateStr: string;
+  dueDateStr: string;
+  startOffsetDays: number;
+  completedDays: number;
+  remainingDays: number;
+  totalDurationDays: number;
+  progress: number;
+  daysRemaining: number;
+  isOverdue: boolean;
+  details?: string;
+}
+
+export interface AuthAuditLog {
+  id: string;
+  eventType: string;
+  action: string;
+  status: 'denied' | 'allowed' | 'warning';
+  severity: 'low' | 'medium' | 'high' | 'critical';
+  actorUserId?: string | null;
+  actorEmail?: string | null;
+  organizationId?: string | null;
+  projectId?: string | null;
+  resourceId?: string | null;
+  resourceType?: string | null;
+  requiredPermission?: string | null;
+  callerRole?: string | null;
+  reason?: string;
+  details?: string;
+  ipAddress?: string | null;
+  userAgent?: string | null;
+  metadata?: Record<string, any>;
+  timestamp: string;
+}
+
+

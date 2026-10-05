@@ -1,15 +1,7 @@
-import { getFirestore } from 'firebase-admin/firestore';
-import { initializeApp, getApps } from 'firebase-admin/app';
-import firebaseConfig from '../firebase-applet-config.json';
+import { db, FIRESTORE_DATABASE_ID } from '../lib/firebaseAdmin.ts';
 
 async function initDb() {
-  if (getApps().length === 0) {
-    initializeApp();
-  }
-  // Use the default database if possible, or the one from config
-  const db = getFirestore(firebaseConfig.firestoreDatabaseId); 
-  
-  console.log(`Initializing database for project: [DEFAULT], database: ${firebaseConfig.firestoreDatabaseId}...`);
+  console.log(`Initializing database for project: [DEFAULT], database: ${FIRESTORE_DATABASE_ID}...`);
   
   try {
     await db.collection('healthcheck').doc('ping').set({

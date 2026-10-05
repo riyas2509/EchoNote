@@ -161,9 +161,11 @@ export async function evaluateIdentityMappings(
         console.warn(`⚠️ [JIT CONFLICT] Equal priority mapping conflict for ${userContext.email}. Resolved safely to lowest privilege: ${chosenRole}`);
       }
 
-      // Owner is NEVER assigned via JIT
-      if (chosenRole === 'owner') {
-        chosenRole = 'org_admin';
+      // Security hardening: Neither 'owner' nor 'org_admin' can EVER be assigned automatically via JIT provisioning.
+      // Administrative roles must be explicitly conferred by an existing organization administrator or owner in the management dashboard.
+      if (chosenRole === 'owner' || chosenRole === 'org_admin') {
+        console.warn(`⚠️ [JIT SECURITY] Target role ${chosenRole} cannot be self-assigned or JIT-provisioned for ${userContext.email}. Downgrading to team_manager.`);
+        chosenRole = 'team_manager';
       }
 
       const chosenMapping = topMatches[0];
@@ -179,8 +181,9 @@ export async function evaluateIdentityMappings(
     // Single top match
     const primary = topMatches[0];
     let role = primary.targetRole;
-    if (role === 'owner') {
-      role = 'org_admin';
+    if (role === 'owner' || role === 'org_admin') {
+      console.warn(`⚠️ [JIT SECURITY] Target role ${role} cannot be self-assigned or JIT-provisioned for ${userContext.email}. Downgrading to team_manager.`);
+      role = 'team_manager';
     }
 
     return {
@@ -499,7 +502,11 @@ export async function processEnterpriseJitOrSync(
     defaultDeptId
   );
 
-  const initialRole = mappingResult.targetRole;
+  let initialRole = mappingResult.targetRole;
+  if (initialRole === 'owner' || initialRole === 'org_admin') {
+    console.warn(`⚠️ [JIT SECURITY] JIT provisioning cannot assign administrative role ${initialRole} to new user ${callerEmail}. Capping at team_manager.`);
+    initialRole = 'team_manager';
+  }
   const initialDeptId = mappingResult.targetDepartmentId || defaultDeptId || null;
   const initialDeptName = mappingResult.targetDepartmentName || null;
 

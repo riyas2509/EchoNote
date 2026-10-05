@@ -8,6 +8,10 @@ export const GEMINI_PRICING: Record<string, ModelPricing> = {
     inputCostPerMillionTokens: 0.075,
     outputCostPerMillionTokens: 0.30
   },
+  "gemini-3.8-flash": {
+    inputCostPerMillionTokens: 0.075,
+    outputCostPerMillionTokens: 0.30
+  },
   "gemini-3-flash-preview": {
     inputCostPerMillionTokens: 0.075,
     outputCostPerMillionTokens: 0.30

@@ -1,11 +1,13 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { MessageSquareOff, ArrowRight, AlertTriangle } from 'lucide-react';
+import { MessageSquareOff, ArrowRight, AlertTriangle, Sparkles } from 'lucide-react';
 import FirstValueActivation from './FirstValueActivation';
 import UnresolvedTopicsDetector from './UnresolvedTopicsDetector';
 import MeetingIntelligenceView from './MeetingIntelligenceView';
 import ExecutionTrackerView from './ExecutionTrackerView';
 import SmartReminderView from './SmartReminderView';
-import { transcribeAudio, summarizeTranscript, analyzeStrategically, processUnifiedMeetingIntelligence } from '../services/geminiService';
+import { SmartRecapModal } from './SmartRecapModal';
+import RecordingCommentPanel from './RecordingCommentPanel';
+import { transcribeAudio, summarizeTranscript, analyzeStrategically, processUnifiedMeetingIntelligence, generateSmartRecap } from '../services/geminiService';
 import { uploadAudioToStorage } from '../services/recordingService';
 import { getApiUrl } from '../lib/apiClient';
 import { PLAN_FEATURES } from '../config/planConfig';
@@ -54,7 +56,7 @@ const AudioToTextView: React.FC<AudioToTextViewProps> = ({
   const isPro = usageStats.plan === 'pro';
 
   const checkPermission = (record: AudioToTextRecord, action: 'edit' | 'delete') => {
-    if (userOrgRole === 'super_admin' || userOrgRole === 'org_admin') return true;
+    if (userOrgRole === 'owner' || userOrgRole === 'org_admin') return true;
     if (userOrgRole === 'viewer') return false;
 
     if (record.group === 'General') return true;
@@ -96,6 +98,19 @@ const AudioToTextView: React.FC<AudioToTextViewProps> = ({
   const [expandedIntelligenceIds, setExpandedIntelligenceIds] = useState<Set<string>>(new Set());
   const [expandedExecutionTrackerIds, setExpandedExecutionTrackerIds] = useState<Set<string>>(new Set());
   const [expandedSmartReminderIds, setExpandedSmartReminderIds] = useState<Set<string>>(new Set());
+  const [expandedCommentIds, setExpandedCommentIds] = useState<Set<string>>(new Set());
+
+  const toggleComments = (id: string) => {
+    setExpandedCommentIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  };
   const [editingFileName, setEditingFileName] = useState<{ id: string, name: string } | null>(null);
   const [showUsageModal, setShowUsageModal] = useState(false);
   const [usageError, setUsageError] = useState<string | null>(null);
@@ -431,6 +446,78 @@ const AudioToTextView: React.FC<AudioToTextViewProps> = ({
     isLive: boolean;
   } | null>(null);
   const [selectedModules, setSelectedModules] = useState<string[]>(['summary', 'insights']);
+  const [smartRecapRecord, setSmartRecapRecord] = useState<AudioToTextRecord | null>(null);
+  const [isSmartRecapOpen, setIsSmartRecapOpen] = useState(false);
+  const [isGeneratingRecap, setIsGeneratingRecap] = useState(false);
+
+  const handleTriggerSmartRecap = async (record: AudioToTextRecord) => {
+    setSmartRecapRecord(record);
+    setIsSmartRecapOpen(true);
+
+    if (record.smartRecap) {
+      return;
+    }
+
+    setIsGeneratingRecap(true);
+    try {
+      const project = projects.find(p => p.name === record.group || p.id === record.projectId);
+      const recap = await generateSmartRecap(
+        record.id,
+        record.transcript,
+        project?.id
+      );
+
+      const updatedRecord = { ...record, smartRecap: recap };
+      setSmartRecapRecord(updatedRecord);
+      setRecordedQueue(prev => prev.map(r => r.id === record.id ? updatedRecord : r));
+      onSave(updatedRecord);
+
+      addNotification({
+        title: 'AI Smart Recap Ready',
+        message: 'Synthesized 3-bullet executive summary and tagged team members.',
+        type: 'success'
+      });
+    } catch (err: any) {
+      console.error('Smart recap error:', err);
+      addNotification({
+        title: 'Smart Recap Failed',
+        message: err.message || 'Could not synthesize AI smart recap.',
+        type: 'error'
+      });
+    } finally {
+      setIsGeneratingRecap(false);
+    }
+  };
+
+  const handleRegenerateRecap = async () => {
+    if (!smartRecapRecord) return;
+    setIsGeneratingRecap(true);
+    try {
+      const project = projects.find(p => p.name === smartRecapRecord.group || p.id === smartRecapRecord.projectId);
+      const recap = await generateSmartRecap(
+        smartRecapRecord.id,
+        smartRecapRecord.transcript,
+        project?.id
+      );
+      const updated = { ...smartRecapRecord, smartRecap: recap };
+      setSmartRecapRecord(updated);
+      setRecordedQueue(prev => prev.map(r => r.id === smartRecapRecord.id ? updated : r));
+      onSave(updated);
+      addNotification({
+        title: 'AI Smart Recap Refreshed',
+        message: 'Regenerated 3-bullet executive summary and tagged team members.',
+        type: 'success'
+      });
+    } catch (err: any) {
+      addNotification({
+        title: 'Smart Recap Failed',
+        message: err.message || 'Failed to refresh smart recap.',
+        type: 'error'
+      });
+    } finally {
+      setIsGeneratingRecap(false);
+    }
+  };
 
   useEffect(() => {
     const handleVisibilityChange = () => {
@@ -1399,17 +1486,47 @@ const AudioToTextView: React.FC<AudioToTextViewProps> = ({
                 </div>
 
                 <div className="flex items-center space-x-3">
-                  {item.status === 'completed' && item.originalAudioUrl && (
+                  {item.status === 'completed' && (
                     <>
-                      <button 
-                        onClick={() => handlePlayContent(item)} 
-                        className={`px-6 py-3 rounded-lg font-black text-[10px] transition-all shadow-md ${activePlaybackId === item.id && activePlaybackSegIdx === undefined && playbackStatus === 'playing' ? 'bg-brand-secondary text-[#0F172A]' : 'bg-brand-primary text-white shadow-brand-primary/10'}`}
+                      {item.originalAudioUrl && (
+                        <button 
+                          onClick={() => handlePlayContent(item)} 
+                          className={`px-6 py-3 rounded-lg font-black text-[10px] transition-all shadow-md ${activePlaybackId === item.id && activePlaybackSegIdx === undefined && playbackStatus === 'playing' ? 'bg-brand-secondary text-[#0F172A]' : 'bg-brand-primary text-white shadow-brand-primary/10'}`}
+                        >
+                          <i className={`fa-solid ${activePlaybackId === item.id && activePlaybackSegIdx === undefined && playbackStatus === 'playing' ? 'fa-pause' : 'fa-play'} mr-2`}></i>
+                          Play content
+                        </button>
+                      )}
+                      
+                      {/* AI Smart Recap Button */}
+                      <button
+                        onClick={() => handleTriggerSmartRecap(item)}
+                        className="px-4 py-3 rounded-lg font-black text-[10px] uppercase tracking-wider bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white transition-all shadow-md flex items-center gap-1.5 active:scale-95"
+                        title="Synthesize 3-bullet executive summary and tag relevant team members"
                       >
-                        <i className={`fa-solid ${activePlaybackId === item.id && activePlaybackSegIdx === undefined && playbackStatus === 'playing' ? 'fa-pause' : 'fa-play'} mr-2`}></i>
-                        Play content
+                        <Sparkles className="w-3.5 h-3.5 text-amber-300" />
+                        <span>AI Smart Recap</span>
                       </button>
+
                       <div className="flex gap-2">
-                        <button onClick={() => triggerDownload(item.id, item.fileName, item.originalAudioUrl!, 'audio')} className="p-3 rounded-lg bg-brand-background text-brand-primary hover:bg-brand-primary hover:text-[#0F172A] transition-all shadow-sm" title="Download Audio Asset"><i className="fa-solid fa-file-audio"></i></button>
+                        {/* Comments Toggle Button */}
+                        <button
+                          onClick={() => toggleComments(item.id)}
+                          className={`px-3.5 py-3 rounded-lg font-black text-[10px] uppercase tracking-wider transition-all shadow-sm flex items-center gap-1.5 active:scale-95 ${
+                            expandedCommentIds.has(item.id)
+                              ? 'bg-brand-primary text-[#0F172A]'
+                              : 'bg-brand-background text-brand-primary hover:bg-brand-primary/10'
+                          }`}
+                          title="Open Comments & Discussion"
+                          data-testid={`toggle-comments-btn-${item.id}`}
+                        >
+                          <i className="fa-solid fa-comments text-xs"></i>
+                          <span>Comments</span>
+                        </button>
+
+                        {item.originalAudioUrl && (
+                          <button onClick={() => triggerDownload(item.id, item.fileName, item.originalAudioUrl!, 'audio')} className="p-3 rounded-lg bg-brand-background text-brand-primary hover:bg-brand-primary hover:text-[#0F172A] transition-all shadow-sm" title="Download Audio Asset"><i className="fa-solid fa-file-audio"></i></button>
+                        )}
                         <button onClick={() => triggerDownload(item.id, item.fileName, '', 'transcript')} className="p-3 rounded-lg bg-brand-background text-brand-primary hover:bg-brand-primary hover:text-[#0F172A] transition-all shadow-sm" title="Download Transcript Intelligence"><i className="fa-solid fa-file-lines"></i></button>
                         {authStatus === AuthStatus.LOGGED_IN && (() => {
                           const project = projects.find(p => p.name === item.group);
@@ -1433,6 +1550,71 @@ const AudioToTextView: React.FC<AudioToTextViewProps> = ({
 
               {item.status === 'completed' && (
                 <div className="space-y-12">
+                  {/* Team Comments & Discussion Panel */}
+                  {expandedCommentIds.has(item.id) && (
+                    <div className="animate-in slide-in-from-top-4 duration-300">
+                      <RecordingCommentPanel
+                        recordingId={item.id}
+                        recordingTitle={item.fileName}
+                        originalAudioUrl={item.originalAudioUrl}
+                        onPlay={onPlay}
+                        project={projects.find(p => p.name === item.group || p.id === item.projectId)}
+                        userProfile={userProfile}
+                        userOrgRole={userOrgRole}
+                        authStatus={authStatus}
+                        addNotification={addNotification}
+                        onClose={() => toggleComments(item.id)}
+                      />
+                    </div>
+                  )}
+
+                  {/* AI Smart Recap Executive Banner if generated */}
+                  {item.smartRecap && (
+                    <div className="bg-gradient-to-r from-indigo-950 via-slate-900 to-indigo-950 text-white rounded-2xl p-6 border border-indigo-500/30 shadow-lg space-y-4">
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-indigo-800/50 pb-3">
+                        <div className="flex items-center gap-2">
+                          <Sparkles className="w-4 h-4 text-indigo-400" />
+                          <h4 className="text-xs font-black uppercase tracking-wider text-white">AI Executive Smart Recap</h4>
+                          <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-indigo-500/30 text-indigo-200 border border-indigo-400/30">
+                            3-Point Briefing
+                          </span>
+                        </div>
+                        <button
+                          onClick={() => handleTriggerSmartRecap(item)}
+                          className="text-[11px] font-bold text-indigo-300 hover:text-white flex items-center gap-1 transition-colors"
+                        >
+                          <span>Full Recap & Member Tags</span>
+                          <ArrowRight className="w-3 h-3" />
+                        </button>
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-left">
+                        {item.smartRecap.executiveSummary.map((bullet, bIdx) => (
+                          <div key={bIdx} className="p-3.5 rounded-xl bg-white/5 border border-white/10 space-y-1.5">
+                            <span className="text-[10px] font-black uppercase tracking-wider text-indigo-300">
+                              {bIdx === 0 ? '1. Strategic Context' : bIdx === 1 ? '2. Key Decisions' : '3. Trajectory'}
+                            </span>
+                            <p className="text-xs text-slate-200 leading-relaxed font-medium">
+                              {bullet}
+                            </p>
+                          </div>
+                        ))}
+                      </div>
+
+                      {item.smartRecap.taggedMembers?.length > 0 && (
+                        <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-indigo-900/40 text-left">
+                          <span className="text-[10px] font-black uppercase tracking-widest text-indigo-300">Tagged Members:</span>
+                          {item.smartRecap.taggedMembers.map((m, mIdx) => (
+                            <span key={mIdx} className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold bg-indigo-500/20 text-indigo-200 border border-indigo-400/30">
+                              <span className="w-1.5 h-1.5 rounded-full bg-indigo-400" />
+                              @{m.name} {m.role ? `(${m.role})` : ''}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
                   {/* Call Summary Section */}
                   {item.summary && (
                     <div className={`bg-brand-background rounded-xl border border-brand-divider/20 overflow-hidden transition-all shadow-sm ${authStatus === AuthStatus.GUEST ? 'opacity-75 grayscale-[0.5]' : ''}`}>
@@ -2132,8 +2314,9 @@ const AudioToTextView: React.FC<AudioToTextViewProps> = ({
                           onChange={(e) => onInviteToProject(projectToManage.name, member.email, e.target.value as CollaborationRole)}
                         >
                           <option value="viewer">Viewer</option>
+                          <option value="commenter">Commenter</option>
                           <option value="editor">Editor</option>
-                          <option value="owner">Owner</option>
+                          <option value="admin">Admin</option>
                         </select>
                       </div>
                     </div>
@@ -2162,15 +2345,16 @@ const AudioToTextView: React.FC<AudioToTextViewProps> = ({
                         value={inviteEmail}
                         onChange={(e) => setInviteEmail(e.target.value)}
                       />
-                      <select 
-                        className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2.5 text-sm outline-none focus:ring-2 focus:ring-brand-primary/20"
-                        value={inviteRole}
-                        onChange={(e) => setInviteRole(e.target.value as CollaborationRole)}
-                      >
-                        <option value="viewer">Viewer</option>
-                        <option value="editor">Editor</option>
-                        <option value="owner">Owner</option>
-                      </select>
+                        <select 
+                          className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2.5 text-sm outline-none focus:ring-2 focus:ring-brand-primary/20"
+                          value={inviteRole}
+                          onChange={(e) => setInviteRole(e.target.value as CollaborationRole)}
+                        >
+                          <option value="viewer">Viewer</option>
+                          <option value="commenter">Commenter</option>
+                          <option value="editor">Editor</option>
+                          <option value="admin">Admin</option>
+                        </select>
                       <button 
                         onClick={() => {
                           if (inviteEmail.trim()) {
@@ -2204,6 +2388,16 @@ const AudioToTextView: React.FC<AudioToTextViewProps> = ({
           </div>
         </div>
       )}
+
+      {/* AI Smart Recap Modal */}
+      <SmartRecapModal
+        isOpen={isSmartRecapOpen}
+        onClose={() => setIsSmartRecapOpen(false)}
+        recap={smartRecapRecord?.smartRecap || null}
+        recordingTitle={smartRecapRecord?.fileName}
+        isGenerating={isGeneratingRecap}
+        onRegenerate={handleRegenerateRecap}
+      />
     </div>
   );
 };

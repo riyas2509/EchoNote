@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# EchoNote Production Deployment Script Safety Test Suite (Step 1J)
+# EchoNote Production Deployment Script Safety Test Suite (Fix B.1 & B.1A)
 # ==============================================================================
-# Tests all security invariants and guardrails for scripts/deploy-cloud-run.sh
-# WITHOUT executing any real deployment or gcloud remote commands.
+# Tests all security invariants, immutable Docker deployment guardrails, and
+# Secret Manager references for scripts/deploy-cloud-run.sh
+# WITHOUT executing any real deployment or remote cloud commands.
 # ==============================================================================
 
 set -uo pipefail
@@ -11,6 +12,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 DEPLOY_SCRIPT="$WORKSPACE_ROOT/scripts/deploy-cloud-run.sh"
+chmod +x "$DEPLOY_SCRIPT"
 
 PASSED_COUNT=0
 FAILED_COUNT=0
@@ -53,14 +55,84 @@ EOF
   chmod +x "$MOCK_BIN/npm"
 }
 
+# Helper for creating a mock git
+setup_mock_git() {
+  local mock_sha="${1:-a1b2c3d4e5f6}"
+  cat <<EOF > "$MOCK_BIN/git"
+#!/usr/bin/env bash
+if [ "\$1" = "rev-parse" ]; then
+  if [ -n "$mock_sha" ]; then
+    echo "$mock_sha"
+    exit 0
+  else
+    exit 1
+  fi
+fi
+if command -v /usr/bin/git &>/dev/null; then
+  exec /usr/bin/git "\$@"
+fi
+exit 0
+EOF
+  chmod +x "$MOCK_BIN/git"
+}
+
+# Helper for creating a mock docker
+setup_mock_docker() {
+  local build_exit="${1:-0}"
+  local push_exit="${2:-0}"
+  cat <<EOF > "$MOCK_BIN/docker"
+#!/usr/bin/env bash
+if [ "\$1" = "build" ]; then
+  if [ "$build_exit" -ne 0 ]; then
+    echo "Simulated docker build failure" >&2
+    exit $build_exit
+  fi
+  echo "MOCK_DOCKER_BUILD_INVOKED: \$*"
+  exit 0
+fi
+
+if [ "\$1" = "push" ]; then
+  if [ "$push_exit" -ne 0 ]; then
+    echo "Simulated docker push failure" >&2
+    exit $push_exit
+  fi
+  echo "MOCK_DOCKER_PUSH_INVOKED: \$*"
+  exit 0
+fi
+
+if [ "\$1" = "inspect" ]; then
+  echo "us-west1-docker.pkg.dev/echonote-2509/echonote/echonote@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  exit 0
+fi
+
+echo "MOCK_DOCKER_UNKNOWN: \$*"
+exit 0
+EOF
+  chmod +x "$MOCK_BIN/docker"
+}
+
 # Helper for creating a mock gcloud
 setup_mock_gcloud() {
   local mock_project="${1:-echonote-2509}"
+  local mock_digest="${2:-sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef}"
+  local mock_revision="${3:-echonote-00010-abc}"
+  local mock_ready="${4:-True}"
+  local mock_image="${5:-us-west1-docker.pkg.dev/echonote-2509/echonote/echonote@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef}"
+
   cat <<EOF > "$MOCK_BIN/gcloud"
 #!/usr/bin/env bash
 if [ "\$1" = "config" ] && [ "\$2" = "get-value" ] && [ "\$3" = "project" ]; then
   echo "$mock_project"
   exit 0
+fi
+
+if [ "\$1" = "artifacts" ] && [ "\$2" = "docker" ] && [ "\$3" = "images" ] && [ "\$4" = "describe" ]; then
+  if [ -n "$mock_digest" ]; then
+    echo "$mock_digest"
+    exit 0
+  else
+    exit 1
+  fi
 fi
 
 if [ "\$1" = "run" ] && [ "\$2" = "deploy" ]; then
@@ -70,6 +142,25 @@ fi
 
 if [ "\$1" = "run" ] && [ "\$2" = "services" ] && [ "\$3" = "update" ]; then
   echo "MOCK_GCLOUD_SERVICES_UPDATE_INVOKED: \$*"
+  exit 0
+fi
+
+if [ "\$1" = "run" ] && [ "\$2" = "services" ] && [ "\$3" = "describe" ]; then
+  echo "$mock_revision"
+  exit 0
+fi
+
+if [ "\$1" = "run" ] && [ "\$2" = "revisions" ] && [ "\$3" = "describe" ]; then
+  if [[ "\$*" == *"--format=value(spec.containers[0].image)"* ]]; then
+    echo "$mock_image"
+    exit 0
+  fi
+  echo "$mock_ready"
+  exit 0
+fi
+
+if [ "\$1" = "run" ] && [ "\$2" = "services" ] && [ "\$3" = "update-traffic" ]; then
+  echo "MOCK_GCLOUD_UPDATE_TRAFFIC_INVOKED: \$*"
   exit 0
 fi
 
@@ -85,7 +176,7 @@ assert_test() {
   local expected_exit="$2" # 0 or nonzero
   local expected_text="$3"
   local actual_exit="$4"
-  local actual_output="$5"
+  local actual_output="${5:-}"
 
   local success=1
   if [ "$expected_exit" = "0" ] && [ "$actual_exit" -ne 0 ]; then
@@ -129,17 +220,35 @@ assert_absent() {
   fi
 }
 
+assert_pattern_absent() {
+  local test_name="$1"
+  local pattern="$2"
+  local target_file="$3"
+  local pattern_description="$4"
+
+  if grep -E -q "$pattern" "$target_file"; then
+    echo "  ❌ $test_name ... FAILED"
+    echo "     Detected raw credential pattern: $pattern_description"
+    FAILED_COUNT=$((FAILED_COUNT + 1))
+  else
+    echo "  ✅ $test_name ... PASSED"
+    PASSED_COUNT=$((PASSED_COUNT + 1))
+  fi
+}
+
 echo "======================================================================"
-echo "🚀 RUNNING STEP 1J & 1L-A DEPLOYMENT SAFETY & SECRET MANAGER TESTS"
+echo "🚀 RUNNING ECHONOTE FIX B.1A DEPLOYMENT SAFETY & IMMUTABLE DOCKER TESTS"
 echo "======================================================================"
 
-# Default mock npm to successful pre-flight
+# Default mock binaries to successful states
 setup_mock_npm 0 0
+setup_mock_git "a1b2c3d4e5f6"
+setup_mock_docker 0 0
+setup_mock_gcloud "echonote-2509"
 
 # ----------------------------------------------------------------------------
 # Test A: Correct Target & Validation Success with DRY_RUN=1
 # ----------------------------------------------------------------------------
-setup_mock_gcloud "echonote-2509"
 OUT=$(PATH="$MOCK_BIN:$PATH" DRY_RUN=1 "$DEPLOY_SCRIPT" deploy 2>&1)
 EXIT_CODE=$?
 assert_test "Test A: Correct target with DRY_RUN=1 passes pre-flight and validations" \
@@ -245,14 +354,14 @@ EXIT_CODE=$?
 assert_test "Test I1: Command specifies explicit service account" \
   "0" "--service-account=200551109142-compute@developer.gserviceaccount.com" "$EXIT_CODE" "$OUT"
 
-assert_test "Test I2: Command uses --update-env-vars (preserving existing env)" \
-  "0" "--update-env-vars=RAZORPAY_MODE=live" "$EXIT_CODE" "$OUT"
+assert_test "Test I2: Command uses clean --set-env-vars (replacing ordinary env with non-secret set)" \
+  "0" "--set-env-vars=RAZORPAY_MODE=live" "$EXIT_CODE" "$OUT"
 
 assert_test "Test I3: Summary logs only VALID status without secret exposure" \
-  "0" "Razorpay Pro Monthly Plan: VALID" "$EXIT_CODE" "$OUT"
+  "0" "Razorpay Pro Monthly Plan:   VALID" "$EXIT_CODE" "$OUT"
 
 # ----------------------------------------------------------------------------
-# Test J: Step 1L-A Deploy Action Secret Manager Integration
+# Test J: Step 6M-C Deploy Action Secret Manager & Ordinary Env Clean Separation
 # ----------------------------------------------------------------------------
 assert_test "Test J1: Deploy specifies --set-secrets flag" \
   "0" "--set-secrets=" "$EXIT_CODE" "$OUT"
@@ -275,32 +384,74 @@ assert_test "Test J6: Deploy maps PLAYBACK_SECRET to echonote-playback-secret:la
 assert_test "Test J7: Deploy maps CRON_SECRET to echonote-cron-secret:latest" \
   "0" "CRON_SECRET=echonote-cron-secret:latest" "$EXIT_CODE" "$OUT"
 
-assert_test "Test J8: Deploy preserves NODE_ENV=production in env vars" \
-  "0" "NODE_ENV=production" "$EXIT_CODE" "$OUT"
+assert_test "Test J8: Deploy specifies clean --set-env-vars flag" \
+  "0" "--set-env-vars=" "$EXIT_CODE" "$OUT"
 
-assert_test "Test J9: Deploy preserves RAZORPAY_MODE=live in env vars" \
-  "0" "RAZORPAY_MODE=live" "$EXIT_CODE" "$OUT"
+assert_absent "Test J9: Deploy does NOT use --update-env-vars (which would retain old plain secrets)" \
+  "--update-env-vars" "$OUT"
 
-assert_absent "Test J10: Deploy does NOT use --set-env-vars (which would wipe unmentioned vars)" \
-  "--set-env-vars" "$OUT"
+assert_absent "Test J10: Deploy does NOT use --remove-env-vars (no contradictory migration flags)" \
+  "--remove-env-vars" "$OUT"
 
-# Extract the value of --update-env-vars to verify none of the 6 secret names are in it
-UPDATE_ENV_PART="$(echo "$OUT" | grep -o -- '--update-env-vars=[^ ]*' || true)"
-assert_absent "Test J11: GEMINI_API_KEY is absent from --update-env-vars" \
-  "GEMINI_API_KEY" "$UPDATE_ENV_PART"
-assert_absent "Test J12: RAZORPAY_KEY_SECRET is absent from --update-env-vars" \
-  "RAZORPAY_KEY_SECRET" "$UPDATE_ENV_PART"
-assert_absent "Test J13: RAZORPAY_WEBHOOK_SECRET is absent from --update-env-vars" \
-  "RAZORPAY_WEBHOOK_SECRET" "$UPDATE_ENV_PART"
-assert_absent "Test J14: RESEND_API_KEY is absent from --update-env-vars" \
-  "RESEND_API_KEY" "$UPDATE_ENV_PART"
-assert_absent "Test J15: PLAYBACK_SECRET is absent from --update-env-vars" \
-  "PLAYBACK_SECRET" "$UPDATE_ENV_PART"
-assert_absent "Test J16: CRON_SECRET is absent from --update-env-vars" \
-  "CRON_SECRET" "$UPDATE_ENV_PART"
+# Extract the value of --set-env-vars to verify complete ordinary set and total secret absence
+DEPLOY_CMD="$(echo "$OUT" | grep "MOCK_GCLOUD_DEPLOY_INVOKED" || true)"
+SET_ENV_VAL="$(echo "$DEPLOY_CMD" | sed -n 's/.*--set-env-vars=\(.*\) --set-secrets=.*/\1/p')"
+SET_ENV_PART="--set-env-vars=$SET_ENV_VAL"
+
+assert_absent "Test J11: GEMINI_API_KEY is strictly absent from --set-env-vars" \
+  "GEMINI_API_KEY" "$SET_ENV_PART"
+assert_absent "Test J12: RAZORPAY_KEY_SECRET is strictly absent from --set-env-vars" \
+  "RAZORPAY_KEY_SECRET" "$SET_ENV_PART"
+assert_absent "Test J13: RAZORPAY_WEBHOOK_SECRET is strictly absent from --set-env-vars" \
+  "RAZORPAY_WEBHOOK_SECRET" "$SET_ENV_PART"
+assert_absent "Test J14: RESEND_API_KEY is strictly absent from --set-env-vars" \
+  "RESEND_API_KEY" "$SET_ENV_PART"
+assert_absent "Test J15: PLAYBACK_SECRET is strictly absent from --set-env-vars" \
+  "PLAYBACK_SECRET" "$SET_ENV_PART"
+assert_absent "Test J16: CRON_SECRET is strictly absent from --set-env-vars" \
+  "CRON_SECRET" "$SET_ENV_PART"
+
+assert_test "Test J17: Deploy preserves NODE_ENV=production in --set-env-vars" \
+  "0" "NODE_ENV=production" "$EXIT_CODE" "$SET_ENV_PART"
+assert_test "Test J18: Deploy preserves RAZORPAY_MODE=live in --set-env-vars" \
+  "0" "RAZORPAY_MODE=live" "$EXIT_CODE" "$SET_ENV_PART"
+assert_test "Test J19: Deploy preserves canonical APP_URL in --set-env-vars" \
+  "0" "APP_URL=https://echonote-25.ai.studio" "$EXIT_CODE" "$SET_ENV_PART"
+assert_test "Test J20: Deploy preserves canonical RESEND_FROM_EMAIL in --set-env-vars" \
+  "0" "RESEND_FROM_EMAIL=EchoNote <invitations@echotechai.in>" "$EXIT_CODE" "$SET_ENV_PART"
+assert_test "Test J21: Deploy preserves RAZORPAY_PRO_MONTHLY_PLAN_ID in --set-env-vars" \
+  "0" "RAZORPAY_PRO_MONTHLY_PLAN_ID=plan_TambUyuTkGL4zY" "$EXIT_CODE" "$SET_ENV_PART"
+assert_test "Test J22: Deploy preserves RAZORPAY_PRO_YEARLY_PLAN_ID in --set-env-vars" \
+  "0" "RAZORPAY_PRO_YEARLY_PLAN_ID=plan_Tamd1Ef89GKQNk" "$EXIT_CODE" "$SET_ENV_PART"
+assert_test "Test J23: Deploy preserves RAZORPAY_TEAM_MONTHLY_PLAN_ID in --set-env-vars" \
+  "0" "RAZORPAY_TEAM_MONTHLY_PLAN_ID=plan_TamdizBJ9W7kJo" "$EXIT_CODE" "$SET_ENV_PART"
+assert_test "Test J24: Deploy preserves RAZORPAY_TEAM_YEARLY_PLAN_ID in --set-env-vars" \
+  "0" "RAZORPAY_TEAM_YEARLY_PLAN_ID=plan_TameI4cjPUzRpn" "$EXIT_CODE" "$SET_ENV_PART"
+
+# Test M: Deployment command cannot produce duplicate environment-variable names
+SET_SECRETS_PART="$(echo "$DEPLOY_CMD" | grep -o -- '--set-secrets=[^ ]*' || true)"
+SET_SECRETS_VAL="${SET_SECRETS_PART#--set-secrets=}"
+
+DUP_ENV_CHECK=$(echo "$SET_ENV_VAL" | tr ',' '\n' | cut -d'=' -f1 | sort | uniq -d)
+if [ -z "$DUP_ENV_CHECK" ]; then
+  echo "  ✅ Test J25: No duplicate variable names within --set-env-vars ... PASSED"
+  PASSED_COUNT=$((PASSED_COUNT + 1))
+else
+  echo "  ❌ Test J25: Duplicate variables found in --set-env-vars: $DUP_ENV_CHECK ... FAILED"
+  FAILED_COUNT=$((FAILED_COUNT + 1))
+fi
+
+OVERLAP_CHECK=$(comm -12 <(echo "$SET_ENV_VAL" | tr ',' '\n' | cut -d'=' -f1 | sort) <(echo "$SET_SECRETS_VAL" | tr ',' '\n' | cut -d'=' -f1 | sort))
+if [ -z "$OVERLAP_CHECK" ]; then
+  echo "  ✅ Test J26: Zero overlap between ordinary env vars and Secret Manager secrets ... PASSED"
+  PASSED_COUNT=$((PASSED_COUNT + 1))
+else
+  echo "  ❌ Test J26: Variable collision between env vars and secrets: $OVERLAP_CHECK ... FAILED"
+  FAILED_COUNT=$((FAILED_COUNT + 1))
+fi
 
 # ----------------------------------------------------------------------------
-# Test K: Step 1L-A Update-Env Action Secret Manager Integration
+# Test K: Step 6M-C Update-Env Action Secret Manager & Ordinary Env Clean Separation
 # ----------------------------------------------------------------------------
 OUT_UPDATE=$(PATH="$MOCK_BIN:$PATH" DRY_RUN=0 "$DEPLOY_SCRIPT" update-env 2>&1)
 EXIT_CODE_UPDATE=$?
@@ -315,25 +466,39 @@ assert_test "Test K3: Update-env contains all 6 Secret Manager mappings" \
   "0" "GEMINI_API_KEY=echonote-gemini-api-key:latest,RAZORPAY_KEY_SECRET=echonote-razorpay-key-secret:latest,RAZORPAY_WEBHOOK_SECRET=echonote-razorpay-webhook-secret:latest,RESEND_API_KEY=echonote-resend-api-key:latest,PLAYBACK_SECRET=echonote-playback-secret:latest,CRON_SECRET=echonote-cron-secret:latest" \
   "$EXIT_CODE_UPDATE" "$OUT_UPDATE"
 
-assert_test "Test K4: Update-env uses --update-env-vars to preserve other non-secret env vars" \
-  "0" "--update-env-vars=RAZORPAY_MODE=live" "$EXIT_CODE_UPDATE" "$OUT_UPDATE"
+assert_test "Test K4: Update-env uses --set-env-vars for clean ordinary environment replacement" \
+  "0" "--set-env-vars=RAZORPAY_MODE=live" "$EXIT_CODE_UPDATE" "$OUT_UPDATE"
 
-assert_absent "Test K5: Update-env does NOT use --set-env-vars" \
-  "--set-env-vars" "$OUT_UPDATE"
+assert_absent "Test K5: Update-env does NOT use --update-env-vars" \
+  "--update-env-vars" "$OUT_UPDATE"
 
-UPDATE_ENV_PART_K="$(echo "$OUT_UPDATE" | grep -o -- '--update-env-vars=[^ ]*' || true)"
-assert_absent "Test K6: Update-env does NOT place GEMINI_API_KEY in --update-env-vars" \
-  "GEMINI_API_KEY" "$UPDATE_ENV_PART_K"
-assert_absent "Test K7: Update-env does NOT place RAZORPAY_KEY_SECRET in --update-env-vars" \
-  "RAZORPAY_KEY_SECRET" "$UPDATE_ENV_PART_K"
-assert_absent "Test K8: Update-env does NOT place RAZORPAY_WEBHOOK_SECRET in --update-env-vars" \
-  "RAZORPAY_WEBHOOK_SECRET" "$UPDATE_ENV_PART_K"
-assert_absent "Test K9: Update-env does NOT place RESEND_API_KEY in --update-env-vars" \
-  "RESEND_API_KEY" "$UPDATE_ENV_PART_K"
-assert_absent "Test K10: Update-env does NOT place PLAYBACK_SECRET in --update-env-vars" \
-  "PLAYBACK_SECRET" "$UPDATE_ENV_PART_K"
-assert_absent "Test K11: Update-env does NOT place CRON_SECRET in --update-env-vars" \
-  "CRON_SECRET" "$UPDATE_ENV_PART_K"
+assert_absent "Test K5b: Update-env does NOT use --remove-env-vars" \
+  "--remove-env-vars" "$OUT_UPDATE"
+
+UPDATE_CMD="$(echo "$OUT_UPDATE" | grep "MOCK_GCLOUD_SERVICES_UPDATE_INVOKED" || true)"
+SET_ENV_VAL_K="$(echo "$UPDATE_CMD" | sed -n 's/.*--set-env-vars=\(.*\) --set-secrets=.*/\1/p')"
+SET_ENV_PART_K="--set-env-vars=$SET_ENV_VAL_K"
+assert_absent "Test K6: Update-env does NOT place GEMINI_API_KEY in --set-env-vars" \
+  "GEMINI_API_KEY" "$SET_ENV_PART_K"
+assert_absent "Test K7: Update-env does NOT place RAZORPAY_KEY_SECRET in --set-env-vars" \
+  "RAZORPAY_KEY_SECRET" "$SET_ENV_PART_K"
+assert_absent "Test K8: Update-env does NOT place RAZORPAY_WEBHOOK_SECRET in --set-env-vars" \
+  "RAZORPAY_WEBHOOK_SECRET" "$SET_ENV_PART_K"
+assert_absent "Test K9: Update-env does NOT place RESEND_API_KEY in --set-env-vars" \
+  "RESEND_API_KEY" "$SET_ENV_PART_K"
+assert_absent "Test K10: Update-env does NOT place PLAYBACK_SECRET in --set-env-vars" \
+  "PLAYBACK_SECRET" "$SET_ENV_PART_K"
+assert_absent "Test K11: Update-env does NOT place CRON_SECRET in --set-env-vars" \
+  "CRON_SECRET" "$SET_ENV_PART_K"
+
+assert_test "Test K13: Update-env preserves canonical APP_URL" \
+  "0" "APP_URL=https://echonote-25.ai.studio" "$EXIT_CODE_UPDATE" "$SET_ENV_PART_K"
+assert_test "Test K14: Update-env preserves canonical RESEND_FROM_EMAIL" \
+  "0" "RESEND_FROM_EMAIL=EchoNote <invitations@echotechai.in>" "$EXIT_CODE_UPDATE" "$SET_ENV_PART_K"
+assert_test "Test K15: Update-env preserves NODE_ENV=production" \
+  "0" "NODE_ENV=production" "$EXIT_CODE_UPDATE" "$SET_ENV_PART_K"
+assert_test "Test K16: Update-env preserves RAZORPAY_MODE=live" \
+  "0" "RAZORPAY_MODE=live" "$EXIT_CODE_UPDATE" "$SET_ENV_PART_K"
 
 # Test K12: Update-env with DRY_RUN=1 does not invoke gcloud
 OUT_UPDATE_DRY=$(PATH="$MOCK_BIN:$PATH" DRY_RUN=1 "$DEPLOY_SCRIPT" update-env 2>&1)
@@ -348,7 +513,6 @@ fi
 # ----------------------------------------------------------------------------
 # Test L: Static Security & Hardening Invariants
 # ----------------------------------------------------------------------------
-# Check that scripts/deploy-cloud-run.sh does not contain raw secret values
 assert_test "Test L1: Summary displays Secret Manager References header" \
   "0" "Secret Manager References (6 production secrets):" "$EXIT_CODE" "$OUT"
 
@@ -358,24 +522,6 @@ assert_test "Test L2: Summary lists GEMINI_API_KEY mapping" \
 assert_test "Test L3: Summary lists RAZORPAY_KEY_SECRET mapping" \
   "0" "RAZORPAY_KEY_SECRET -> echonote-razorpay-key-secret:latest" "$EXIT_CODE" "$OUT"
 
-# Helper to assert that a regex pattern matching raw credentials is absent
-assert_pattern_absent() {
-  local test_name="$1"
-  local pattern="$2"
-  local target_file="$3"
-  local pattern_description="$4"
-
-  if grep -E -q "$pattern" "$target_file"; then
-    echo "  ❌ $test_name ... FAILED"
-    echo "     Detected raw credential pattern: $pattern_description"
-    FAILED_COUNT=$((FAILED_COUNT + 1))
-  else
-    echo "  ✅ $test_name ... PASSED"
-    PASSED_COUNT=$((PASSED_COUNT + 1))
-  fi
-}
-
-# Verify no plaintext secret values or recognizable credential patterns in deploy script file
 assert_pattern_absent "Test L4: No Razorpay live/test secret-like values in deploy script" \
   "(rzp_(live|test)_[A-Za-z0-9]{10,}|RAZORPAY_KEY_SECRET=[A-Za-z0-9]{16,})" "$DEPLOY_SCRIPT" "Razorpay key/secret format"
 
@@ -387,6 +533,152 @@ assert_pattern_absent "Test L6: No Resend API-key-like values in deploy script" 
 
 assert_pattern_absent "Test L7: No raw 64-character hex secret tokens in deploy script" \
   "[0-9a-fA-F]{64}" "$DEPLOY_SCRIPT" "Raw 64-character hex secret format"
+
+assert_test "Test L8: Summary lists Ordinary Env Vars Mode (--set-env-vars)" \
+  "0" "Ordinary Env Vars Mode:      Complete replacement (--set-env-vars)" \
+  "$EXIT_CODE" "$OUT"
+
+# ----------------------------------------------------------------------------
+# Test M: Fix B.1 & B.1A Specific Immutable Docker Deployment Guardrail Tests (All Invariants)
+# ----------------------------------------------------------------------------
+echo "----------------------------------------------------------------------"
+echo "Verifying Fix B.1 & B.1A Required Invariants..."
+echo "----------------------------------------------------------------------"
+
+# Invariant 1: production project is hard-locked
+OUT_P1=$(PATH="$MOCK_BIN:$PATH" GOOGLE_CLOUD_PROJECT="unauthorized-project" "$DEPLOY_SCRIPT" deploy 2>&1)
+EXIT_P1=$?
+assert_test "Fix B.1A Inv 1: Production project is hard-locked to echonote-2509" \
+  "nonzero" "ERROR: Production deployment target mismatch" "$EXIT_P1" "$OUT_P1"
+
+# Invariant 2: production region is hard-locked
+OUT_P2=$(PATH="$MOCK_BIN:$PATH" CLOUD_RUN_REGION="us-central1" "$DEPLOY_SCRIPT" deploy 2>&1)
+EXIT_P2=$?
+assert_test "Fix B.1A Inv 2: Production region is hard-locked to us-west1" \
+  "nonzero" "ERROR: Production deployment target mismatch" "$EXIT_P2" "$OUT_P2"
+
+# Invariant 3: service name is hard-locked
+OUT_P3=$(PATH="$MOCK_BIN:$PATH" CLOUD_RUN_SERVICE="unauthorized-service" "$DEPLOY_SCRIPT" deploy 2>&1)
+EXIT_P3=$?
+assert_test "Fix B.1A Inv 3: Service name is hard-locked to echonote" \
+  "nonzero" "ERROR: Production deployment target mismatch" "$EXIT_P3" "$OUT_P3"
+
+# Invariant 4: service account is hard-locked
+assert_test "Fix B.1A Inv 4: Service account is hard-locked in deploy invocation" \
+  "0" "--service-account=200551109142-compute@developer.gserviceaccount.com" "$EXIT_CODE" "$OUT"
+
+# Invariant 5: deploy path does NOT contain source deployment flags
+FORBIDDEN_SRC_FLAG="--""source"
+assert_absent "Fix B.1A Inv 5: Deploy path does NOT contain '$FORBIDDEN_SRC_FLAG'" \
+  "$FORBIDDEN_SRC_FLAG" "$OUT"
+assert_pattern_absent "Fix B.1A Inv 5b: Deploy script file does NOT contain 'gcloud run deploy.*$FORBIDDEN_SRC_FLAG'" \
+  "gcloud[[:space:]]+run[[:space:]]+deploy.*--""source" "$DEPLOY_SCRIPT" "gcloud run deploy --source"
+
+# Invariant 6: image repository is hard-locked
+assert_test "Fix B.1A Inv 6: Artifact Registry image repository is hard-locked" \
+  "0" "us-west1-docker.pkg.dev/echonote-2509/echonote/echonote" "$EXIT_CODE" "$OUT"
+
+# Invariant 7: image tag uses git SHA
+assert_test "Fix B.1A Inv 7: Image tag resolves to git SHA in docker build & push" \
+  "0" "us-west1-docker.pkg.dev/echonote-2509/echonote/echonote:a1b2c3d4e5f6" "$EXIT_CODE" "$OUT"
+
+# Invariant 8: mutable latest tag is rejected
+OUT_LATEST=$(PATH="$MOCK_BIN:$PATH" IMAGE_TAG="latest" "$DEPLOY_SCRIPT" deploy 2>&1)
+EXIT_LATEST=$?
+assert_test "Fix B.1A Inv 8: Mutable 'latest' tag is strictly rejected" \
+  "nonzero" "ERROR: Mutable 'latest' tag is strictly forbidden" "$EXIT_LATEST" "$OUT_LATEST"
+
+# Invariant 9: Secret Manager references remain configured
+assert_test "Fix B.1A Inv 9: All 6 Secret Manager references remain configured in deploy" \
+  "0" "--set-secrets=GEMINI_API_KEY=echonote-gemini-api-key:latest,RAZORPAY_KEY_SECRET=echonote-razorpay-key-secret:latest,RAZORPAY_WEBHOOK_SECRET=echonote-razorpay-webhook-secret:latest,RESEND_API_KEY=echonote-resend-api-key:latest,PLAYBACK_SECRET=echonote-playback-secret:latest,CRON_SECRET=echonote-cron-secret:latest" \
+  "$EXIT_CODE" "$OUT"
+
+# Invariant 9b: All 6 secret names are strictly absent from ordinary env vars in deploy
+assert_absent "Fix B.1A Inv 9b1: GEMINI_API_KEY is absent from ordinary env vars" "GEMINI_API_KEY" "$SET_ENV_PART"
+assert_absent "Fix B.1A Inv 9b2: RAZORPAY_KEY_SECRET is absent from ordinary env vars" "RAZORPAY_KEY_SECRET" "$SET_ENV_PART"
+assert_absent "Fix B.1A Inv 9b3: RAZORPAY_WEBHOOK_SECRET is absent from ordinary env vars" "RAZORPAY_WEBHOOK_SECRET" "$SET_ENV_PART"
+assert_absent "Fix B.1A Inv 9b4: RESEND_API_KEY is absent from ordinary env vars" "RESEND_API_KEY" "$SET_ENV_PART"
+assert_absent "Fix B.1A Inv 9b5: PLAYBACK_SECRET is absent from ordinary env vars" "PLAYBACK_SECRET" "$SET_ENV_PART"
+assert_absent "Fix B.1A Inv 9b6: CRON_SECRET is absent from ordinary env vars" "CRON_SECRET" "$SET_ENV_PART"
+
+# Invariant 9c: No contradictory migration flags in deploy invocation
+assert_absent "Fix B.1A Inv 9c: Deploy command does NOT contain --remove-env-vars" "--remove-env-vars" "$OUT"
+assert_absent "Fix B.1A Inv 9d: Deploy command does NOT contain --update-env-vars" "--update-env-vars" "$OUT"
+
+# Invariant 10: Docker build is required
+setup_mock_docker 1 0
+OUT_DBUILD=$(PATH="$MOCK_BIN:$PATH" "$DEPLOY_SCRIPT" deploy 2>&1)
+EXIT_DBUILD=$?
+assert_test "Fix B.1A Inv 10a: Aborts immediately if Docker build fails" \
+  "nonzero" "ERROR: Docker build failed" "$EXIT_DBUILD" "$OUT_DBUILD"
+assert_absent "Fix B.1A Inv 10b: No traffic shift on Docker build failure" \
+  "MOCK_GCLOUD_UPDATE_TRAFFIC_INVOKED" "$OUT_DBUILD"
+
+# Invariant 11: Docker push is required
+setup_mock_docker 0 1
+OUT_DPUSH=$(PATH="$MOCK_BIN:$PATH" "$DEPLOY_SCRIPT" deploy 2>&1)
+EXIT_DPUSH=$?
+assert_test "Fix B.1A Inv 11a: Aborts immediately if Docker push fails" \
+  "nonzero" "ERROR: Docker push failed" "$EXIT_DPUSH" "$OUT_DPUSH"
+assert_absent "Fix B.1A Inv 11b: No traffic shift on Docker push failure" \
+  "MOCK_GCLOUD_UPDATE_TRAFFIC_INVOKED" "$OUT_DPUSH"
+
+# Reset mock docker to success
+setup_mock_docker 0 0
+
+# Invariant 12: immutable digest is required for deployment
+assert_test "Fix B.1A Inv 12a: Immutable digest is used in --image argument" \
+  "0" "--image=us-west1-docker.pkg.dev/echonote-2509/echonote/echonote@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" \
+  "$EXIT_CODE" "$OUT"
+
+# Invariant 13: initial deployment uses --no-traffic
+assert_test "Fix B.1A Inv 13: Initial deployment uses --no-traffic" \
+  "0" "--no-traffic" "$EXIT_CODE" "$OUT"
+
+# Invariant 14: digest resolution failure aborts and does not shift traffic
+setup_mock_gcloud "echonote-2509" "invalid_digest"
+cat <<EOF > "$MOCK_BIN/docker"
+#!/usr/bin/env bash
+if [ "\$1" = "build" ] || [ "\$1" = "push" ]; then
+  exit 0
+fi
+exit 1
+EOF
+chmod +x "$MOCK_BIN/docker"
+OUT_INVDIGEST=$(PATH="$MOCK_BIN:$PATH" "$DEPLOY_SCRIPT" deploy 2>&1)
+EXIT_INVDIGEST=$?
+assert_test "Fix B.1A Inv 14a: Aborts if image digest format is invalid or unresolved" \
+  "nonzero" "ERROR: Invalid image digest format" "$EXIT_INVDIGEST" "$OUT_INVDIGEST"
+assert_absent "Fix B.1A Inv 14b: No traffic shift on invalid digest" \
+  "MOCK_GCLOUD_UPDATE_TRAFFIC_INVOKED" "$OUT_INVDIGEST"
+
+# Invariant 15: readiness is checked before traffic routing
+setup_mock_docker 0 0
+setup_mock_gcloud "echonote-2509" "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" "echonote-00010-abc" "False"
+OUT_UNREADY=$(PATH="$MOCK_BIN:$PATH" "$DEPLOY_SCRIPT" deploy 2>&1)
+EXIT_UNREADY=$?
+assert_test "Fix B.1A Inv 15a: Aborts if deployed revision fails health check (Ready != True)" \
+  "nonzero" "failed health check" "$EXIT_UNREADY" "$OUT_UNREADY"
+assert_absent "Fix B.1A Inv 15b: No traffic shift if revision is not Ready" \
+  "MOCK_GCLOUD_UPDATE_TRAFFIC_INVOKED" "$OUT_UNREADY"
+
+# Invariant 16: image digest of deployed revision is verified before traffic shift
+setup_mock_gcloud "echonote-2509" "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" "echonote-00010-abc" "True" "us-west1-docker.pkg.dev/echonote-2509/echonote/echonote@sha256:mismatched00000000000000000000000000000000000000000000000000000000"
+OUT_MISMATCH=$(PATH="$MOCK_BIN:$PATH" "$DEPLOY_SCRIPT" deploy 2>&1)
+EXIT_MISMATCH=$?
+assert_test "Fix B.1A Inv 16a: Aborts if deployed revision image does not match resolved digest" \
+  "nonzero" "image verification failed" "$EXIT_MISMATCH" "$OUT_MISMATCH"
+assert_absent "Fix B.1A Inv 16b: No traffic shift if revision image digest does not match" \
+  "MOCK_GCLOUD_UPDATE_TRAFFIC_INVOKED" "$OUT_MISMATCH"
+
+# Invariant 17: traffic shift ONLY occurs when Ready=True and image matches
+setup_mock_gcloud "echonote-2509" "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" "echonote-00010-abc" "True" "us-west1-docker.pkg.dev/echonote-2509/echonote/echonote@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+OUT_SUCCESS=$(PATH="$MOCK_BIN:$PATH" "$DEPLOY_SCRIPT" deploy 2>&1)
+EXIT_SUCCESS=$?
+assert_test "Fix B.1A Inv 17a: Succeeded when Ready=True and image digest matches" \
+  "0" "Explicit immutable Docker deployment completed and 100% traffic active" "$EXIT_SUCCESS" "$OUT_SUCCESS"
+assert_test "Fix B.1A Inv 17b: update-traffic is called targeting the verified revision" \
+  "0" "MOCK_GCLOUD_UPDATE_TRAFFIC_INVOKED: run services update-traffic echonote --to-revisions=echonote-00010-abc=100" "$EXIT_SUCCESS" "$OUT_SUCCESS"
 
 # ----------------------------------------------------------------------------
 # Summary

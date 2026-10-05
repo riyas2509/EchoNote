@@ -367,9 +367,9 @@ const Navigation: React.FC<NavigationProps> = ({
                     return a.localeCompare(b);
                   }).map(group => {
                         const project = projects.find(p => p.name === group);
-                        const isOwner = userOrgRole === 'super_admin' || userOrgRole === 'org_admin' || project?.ownerEmail === userProfile?.email;
+                        const isOwner = userOrgRole === 'owner' || userOrgRole === 'org_admin' || project?.ownerEmail === userProfile?.email;
                         const member = project?.members?.find(m => m.email === userProfile?.email);
-                        const isEditor = userOrgRole === 'super_admin' || userOrgRole === 'org_admin' || userOrgRole === 'team_manager' || member?.role === 'editor';
+                        const isEditor = userOrgRole === 'owner' || userOrgRole === 'org_admin' || userOrgRole === 'team_manager' || member?.role === 'editor';
                         const isDefault = project?.isDefault || group === 'General';
                         
                         // Allow collaboration for all logged-in users (Free/Pro/Enterprise)
@@ -697,8 +697,9 @@ const Navigation: React.FC<NavigationProps> = ({
                             onChange={(e) => setInviteRole(e.target.value as CollaborationRole)}
                           >
                             <option value="viewer">Viewer</option>
+                            <option value="commenter">Commenter</option>
                             <option value="editor">Editor</option>
-                            <option value="owner">Owner</option>
+                            <option value="admin">Admin</option>
                           </select>
                           <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none text-brand-primary opacity-50">
                             <i className="fa-solid fa-chevron-down text-[10px]"></i>

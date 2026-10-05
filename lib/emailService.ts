@@ -128,37 +128,245 @@ function renderButton(text: string, url: string): string {
 }
 
 /**
- * Helper to execute sending via Resend or handle missing API key gracefully.
+ * Canonical production sender address using the verified echotechai.in domain.
+ */
+export const CANONICAL_SENDER_EMAIL = 'EchoNote <invitations@echotechai.in>';
+
+/**
+ * Checks whether an email or display sender contains a forbidden resend.dev address.
+ */
+export function isResendDevSender(sender?: string | null): boolean {
+  if (!sender) return false;
+  const lower = sender.toLowerCase();
+  return lower.includes('resend.dev');
+}
+
+/**
+ * Safe, authoritative sender resolution for EchoNote transactional emails.
+ *
+ * Production Invariants:
+ * 1. If NODE_ENV === "production", the sender MUST strictly be "EchoNote <invitations@echotechai.in>".
+ *    Neither RESEND_FROM_EMAIL nor any external override is permitted to alter or downgrade this.
+ * 2. In production, any attempt to supply a testing domain address is rejected.
+ *
+ * Non-Production Invariants:
+ * 1. If RESEND_FROM_EMAIL is configured and does NOT contain any testing domain (*.resend.dev), use it.
+ * 2. If RESEND_FROM_EMAIL is absent, empty, whitespace, or contains any testing domain (*.resend.dev),
+ *    it safely resolves to the canonical verified sender "EchoNote <invitations@echotechai.in>".
+ * 3. Testing domains are NEVER silently used as a default or fallback under any circumstance.
+ */
+export function resolveSenderEmail(): string {
+  // In production, deterministically enforce the canonical verified domain sender
+  if (process.env.NODE_ENV === 'production') {
+    const rawEnv = process.env.RESEND_FROM_EMAIL?.trim();
+    if (rawEnv && isResendDevSender(rawEnv)) {
+      console.warn(`⚠️ [EMAIL SERVICE] Forbidden testing domain detected in RESEND_FROM_EMAIL (${rawEnv}). Strictly enforcing canonical sender: ${CANONICAL_SENDER_EMAIL}`);
+    }
+    return CANONICAL_SENDER_EMAIL;
+  }
+
+  const envVal = process.env.RESEND_FROM_EMAIL?.trim();
+  if (envVal) {
+    if (isResendDevSender(envVal)) {
+      console.warn(`⚠️ [EMAIL SERVICE] RESEND_FROM_EMAIL contains forbidden testing domain (${envVal}). Strictly falling back to canonical verified sender: ${CANONICAL_SENDER_EMAIL}`);
+      return CANONICAL_SENDER_EMAIL;
+    }
+    return envVal;
+  }
+
+  // Non-production fallback is also the canonical verified sender
+  return CANONICAL_SENDER_EMAIL;
+}
+
+export type EmailErrorCode =
+  | 'MISSING_API_KEY'
+  | 'RESEND_API_ERROR'
+  | 'SANDBOX_RESTRICTION'
+  | 'MISSING_MESSAGE_ID'
+  | 'VALIDATION_ERROR'
+  | 'UNEXPECTED_EXCEPTION';
+
+export interface EmailErrorDetail {
+  code: EmailErrorCode;
+  message: string;
+  statusCode?: number;
+  providerErrorName?: string;
+  recipientMasked?: string;
+}
+
+export interface EmailSendResult {
+  success: boolean;
+  id?: string;
+  error?: string;
+  errorCode?: EmailErrorCode;
+  statusCode?: number;
+  isSandboxOrValidation?: boolean;
+  errorDetail?: EmailErrorDetail;
+}
+
+/**
+ * Mask sensitive email address for sanitized server-side diagnostics.
+ */
+export function maskEmailForLogs(email: string): string {
+  if (!email || typeof email !== 'string' || !email.includes('@')) return '***';
+  const parts = email.trim().split('@');
+  const user = parts[0];
+  const domain = parts.slice(1).join('@');
+  const maskedUser = user.length <= 2 ? user[0] + '*' : user[0] + '***' + user[user.length - 1];
+  return `${maskedUser}@${domain}`;
+}
+
+/**
+ * Authoritative helper to execute sending via Resend with explicit error verification.
+ * Standardizes API status inspection: checks response.error vs response.data.id.
  */
 async function sendEmail(options: {
   to: string;
   subject: string;
   html: string;
-}): Promise<{ success: boolean; id?: string; error?: any }> {
+  text?: string;
+}): Promise<EmailSendResult> {
+  const maskedTo = maskEmailForLogs(options.to);
   const apiKey = process.env.RESEND_API_KEY;
   if (!apiKey) {
-    console.warn(`[EMAIL SERVICE] Cannot send email to ${options.to}: RESEND_API_KEY environment variable is not set.`);
-    return { success: false, error: 'RESEND_API_KEY environment variable is required to send emails.' };
+    console.warn(`⚠️ [EMAIL SERVICE] Cannot dispatch email to ${maskedTo}: RESEND_API_KEY environment variable is not configured.`);
+    return {
+      success: false,
+      error: 'Email service credentials not configured on server.',
+      errorCode: 'MISSING_API_KEY',
+      statusCode: 500,
+      errorDetail: {
+        code: 'MISSING_API_KEY',
+        message: 'Email service credentials (RESEND_API_KEY) not configured on server.',
+        statusCode: 500,
+        recipientMasked: maskedTo
+      }
+    };
   }
 
   try {
     const resend = getResendClient();
-    const response = await resend.emails.send({
-      from: 'EchoNote <no-reply@resend.dev>', // Resend verified domain or default sandbox
+    const fromAddress = resolveSenderEmail();
+
+    // Defense-in-depth: Proactively reject any resend.dev address before sending
+    if (isResendDevSender(fromAddress)) {
+      console.error(`🚨 [EMAIL SERVICE] Blocked attempt to send email using forbidden testing domain sender: ${fromAddress}`);
+      return {
+        success: false,
+        error: `Forbidden sender: '${fromAddress}' is a testing domain and cannot be used to dispatch production emails.`,
+        errorCode: 'VALIDATION_ERROR',
+        statusCode: 403,
+        errorDetail: {
+          code: 'VALIDATION_ERROR',
+          message: `Forbidden sender: '${fromAddress}' contains a testing domain (resend.dev) that is rejected in production. Use '${CANONICAL_SENDER_EMAIL}'.`,
+          statusCode: 403,
+          recipientMasked: maskedTo
+        }
+      };
+    }
+
+    const payload: { from: string; to: string; subject: string; html: string; text?: string } = {
+      from: fromAddress,
       to: options.to,
       subject: options.subject,
       html: options.html
-    });
-
-    if (response.error) {
-      console.error("❌ Resend API returned error:", response.error);
-      return { success: false, error: response.error };
+    };
+    if (options.text) {
+      payload.text = options.text;
     }
 
-    return { success: true, id: response.data?.id };
+    const response = await resend.emails.send(payload);
+
+    // Explicitly check Resend's returned error object (data.id vs error)
+    if (response.error) {
+      const errorObj = response.error;
+      const isValidationError = errorObj.name === 'validation_error' || errorObj.statusCode === 422;
+      const isSandboxLimitation = (isValidationError || errorObj.statusCode === 403) &&
+        String(errorObj.message || '').toLowerCase().includes('testing email');
+
+      let errorCode: EmailErrorCode = 'RESEND_API_ERROR';
+      if (isSandboxLimitation) {
+        errorCode = 'SANDBOX_RESTRICTION';
+      } else if (isValidationError) {
+        errorCode = 'VALIDATION_ERROR';
+      }
+
+      console.error("🚨 [EMAIL SERVICE] Resend rejected email delivery:", {
+        recipient: maskedTo,
+        sender: fromAddress,
+        errorName: errorObj.name,
+        errorMessage: errorObj.message,
+        statusCode: errorObj.statusCode,
+        errorCode
+      });
+
+      const formattedError = isSandboxLimitation
+        ? 'Email delivery restricted: provider sandbox allows delivery only to verified account owner.'
+        : (errorObj.message ? `Provider rejected dispatch: ${errorObj.message}` : 'Email provider rejected dispatch.');
+
+      return {
+        success: false,
+        error: formattedError,
+        errorCode,
+        statusCode: errorObj.statusCode || (isValidationError ? 422 : 400),
+        isSandboxOrValidation: isValidationError || isSandboxLimitation,
+        errorDetail: {
+          code: errorCode,
+          message: errorObj.message || formattedError,
+          statusCode: errorObj.statusCode,
+          providerErrorName: errorObj.name,
+          recipientMasked: maskedTo
+        }
+      };
+    }
+
+    // Explicitly verify response.data and response.data.id
+    if (!response.data?.id) {
+      console.error("🚨 [EMAIL SERVICE] Resend returned response without message ID (missing data.id):", {
+        recipient: maskedTo,
+        responseData: response.data
+      });
+      return {
+        success: false,
+        error: 'Email provider accepted dispatch without returning a message identifier.',
+        errorCode: 'MISSING_MESSAGE_ID',
+        statusCode: 502,
+        errorDetail: {
+          code: 'MISSING_MESSAGE_ID',
+          message: 'Email provider accepted dispatch without returning a message identifier.',
+          statusCode: 502,
+          recipientMasked: maskedTo
+        }
+      };
+    }
+
+    console.info("✅ [EMAIL SERVICE] Email dispatched successfully:", {
+      id: response.data.id,
+      recipient: maskedTo
+    });
+
+    return {
+      success: true,
+      id: response.data.id,
+      statusCode: 200
+    };
   } catch (error: any) {
-    console.error("🔥 Email Service Error:", error);
-    return { success: false, error: error.message || error };
+    console.error("🚨 [EMAIL SERVICE] Unexpected send email exception:", {
+      recipient: maskedTo,
+      errorMessage: error?.message || String(error)
+    });
+    return {
+      success: false,
+      error: 'Email delivery encountered an unexpected network or provider exception.',
+      errorCode: 'UNEXPECTED_EXCEPTION',
+      statusCode: 500,
+      errorDetail: {
+        code: 'UNEXPECTED_EXCEPTION',
+        message: error?.message || String(error),
+        statusCode: 500,
+        recipientMasked: maskedTo
+      }
+    };
   }
 }
 
@@ -209,7 +417,9 @@ export const emailService = {
     projectName: string; 
     role: string; 
     inviteLink: string; 
-  }) {
+    html?: string;
+    text?: string;
+  }): Promise<EmailSendResult> {
     const title = "Collaborate on EchoNote Project";
     const preheaderText = `${options.inviterName} has invited you to collaborate on the project "${options.projectName}" on EchoNote.`;
     
@@ -246,8 +456,15 @@ export const emailService = {
       </p>
     `;
 
-    const html = wrapInBaseTemplate({ title, preheaderText, bodyContentHtml });
-    return sendEmail({ to, subject: `EchoNote: ${options.inviterName} invited you to collaborate`, html });
+    const html = options.html || wrapInBaseTemplate({ title, preheaderText, bodyContentHtml });
+    const text = options.text || `Team Collaboration Invite - EchoNote\n\n${options.inviterName} has invited you to collaborate on "${options.projectName}" on EchoNote.\nRole: ${options.role}\n\nAccept invitation:\n${options.inviteLink}\n\n© ${new Date().getFullYear()} EchoNote Technologies.`;
+
+    return sendEmail({
+      to,
+      subject: `EchoNote: ${options.inviterName} invited you to collaborate`,
+      html,
+      text
+    });
   },
 
   /**
@@ -258,7 +475,10 @@ export const emailService = {
     orgName: string; 
     role: string; 
     inviteLink: string; 
-  }) {
+    expiresAt?: string;
+    html?: string;
+    text?: string;
+  }): Promise<EmailSendResult> {
     const title = "Join Organization on EchoNote";
     const preheaderText = `${options.inviterName} has invited you to join their Organization "${options.orgName}" on EchoNote.`;
     
@@ -280,6 +500,11 @@ export const emailService = {
             <td style="font-size: 14px; color: #64748b; font-weight: 600;">Authorized Role:</td>
             <td style="font-size: 14px; color: ${PRIMARY_COLOR}; font-weight: 700; text-transform: capitalize;">${options.role}</td>
           </tr>
+          ${options.expiresAt ? `
+          <tr>
+            <td style="font-size: 14px; color: #64748b; font-weight: 600; padding-top: 5px;">Expires on:</td>
+            <td style="font-size: 14px; color: #dc2626; font-weight: 600; padding-top: 5px;">${options.expiresAt}</td>
+          </tr>` : ''}
         </table>
       </div>
       <p style="margin: 0 0 20px 0; font-size: 15px; line-height: 1.6; color: ${TEXT_COLOR};">
@@ -295,8 +520,15 @@ export const emailService = {
       </p>
     `;
 
-    const html = wrapInBaseTemplate({ title, preheaderText, bodyContentHtml });
-    return sendEmail({ to, subject: `EchoNote: Invitation to join ${options.orgName}`, html });
+    const html = options.html || wrapInBaseTemplate({ title, preheaderText, bodyContentHtml });
+    const text = options.text || `Organization Invitation - EchoNote\n\nYou have been invited to join ${options.orgName} on EchoNote.\n\nInvited by: ${options.inviterName}\nRecipient: ${to}\nAssigned Role: ${options.role}${options.expiresAt ? `\nExpires on: ${options.expiresAt}` : ''}\n\nTo accept this invitation, please visit the following link:\n${options.inviteLink}\n\nIf you did not expect this invitation, you can safely ignore this email.\n© ${new Date().getFullYear()} EchoNote Technologies. All rights reserved.`;
+
+    return sendEmail({
+      to,
+      subject: `EchoNote: Invitation to join ${options.orgName}`,
+      html,
+      text
+    });
   },
 
   /**
