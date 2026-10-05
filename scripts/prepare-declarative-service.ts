@@ -101,8 +101,16 @@ export function transformServiceManifest(options: TransformOptions): TransformRe
   }
 
   const namespace = doc.metadata?.namespace;
-  if (namespace && namespace !== EXPECTED_PROJECT_ID) {
-    throw new Error(`Namespace mismatch: expected "${EXPECTED_PROJECT_ID}", got "${namespace}"`);
+  const expectedProjectNumber = '200551109142';
+
+  if (
+    namespace &&
+    namespace !== EXPECTED_PROJECT_ID &&
+    namespace !== expectedProjectNumber
+  ) {
+    throw new Error(
+      `Namespace mismatch: expected "${EXPECTED_PROJECT_ID}" or project number "${expectedProjectNumber}", got "${namespace}"`
+    );
   }
 
   // 2. Validate Template Spec
