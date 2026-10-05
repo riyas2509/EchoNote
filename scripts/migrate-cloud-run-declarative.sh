@@ -272,6 +272,10 @@ case "$ACTION" in
     fi
 
     echo "--> Generating atomic desired-state service specification..."
+    RAZORPAY_PRO_MONTHLY_PLAN_ID="$PLAN_PRO_MONTHLY" \
+    RAZORPAY_PRO_YEARLY_PLAN_ID="$PLAN_PRO_YEARLY" \
+    RAZORPAY_TEAM_MONTHLY_PLAN_ID="$PLAN_TEAM_MONTHLY" \
+    RAZORPAY_TEAM_YEARLY_PLAN_ID="$PLAN_TEAM_YEARLY" \
     npx tsx scripts/prepare-declarative-service.ts \
       --input="$EXPORTED_YAML" \
       --output="$DESIRED_YAML" \
