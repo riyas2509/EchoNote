@@ -579,8 +579,9 @@ assert_test "Fix B.1A Inv 6: Artifact Registry image repository is hard-locked" 
   "0" "us-west1-docker.pkg.dev/echonote-2509/echonote/echonote" "$EXIT_CODE" "$OUT"
 
 # Invariant 7: image tag uses git SHA
+EXPECTED_GIT_SHA="$(git rev-parse --short=12 HEAD)"
 assert_test "Fix B.1A Inv 7: Image tag resolves to git SHA in docker build & push" \
-  "0" "us-west1-docker.pkg.dev/echonote-2509/echonote/echonote:a1b2c3d4e5f6" "$EXIT_CODE" "$OUT"
+  "0" "us-west1-docker.pkg.dev/echonote-2509/echonote/echonote:${EXPECTED_GIT_SHA}" "$EXIT_CODE" "$OUT"
 
 # Invariant 8: mutable latest tag is rejected
 OUT_LATEST=$(PATH="$MOCK_BIN:$PATH" IMAGE_TAG="latest" "$DEPLOY_SCRIPT" deploy 2>&1)
