@@ -26,6 +26,7 @@ export const SECRET_MAPPINGS: readonly SecretMapping[] = [
 ] as const;
 
 export interface OrdinaryEnvVarConfig {
+  RAZORPAY_KEY_ID?: string;
   RAZORPAY_MODE?: string;
   NODE_ENV?: string;
   APP_URL?: string;
@@ -37,6 +38,7 @@ export interface OrdinaryEnvVarConfig {
 }
 
 export const DEFAULT_ORDINARY_ENV_VARS: Required<OrdinaryEnvVarConfig> = {
+  RAZORPAY_KEY_ID: process.env.RAZORPAY_KEY_ID || '',
   RAZORPAY_MODE: 'live',
   NODE_ENV: 'production',
   APP_URL: 'https://echonote-25.ai.studio',
@@ -174,8 +176,9 @@ export function transformServiceManifest(options: TransformOptions): TransformRe
     };
   }> = [];
 
-  // Add 8 ordinary variables
+  // Add 9 ordinary variables
   const ordinaryKeys: (keyof typeof ordinaryValues)[] = [
+    'RAZORPAY_KEY_ID',
     'RAZORPAY_MODE',
     'NODE_ENV',
     'APP_URL',
@@ -215,8 +218,8 @@ export function transformServiceManifest(options: TransformOptions): TransformRe
     seenNames.add(item.name);
   }
 
-  if (desiredEnv.length !== 14) {
-    throw new Error(`Expected exactly 14 environment entries, got ${desiredEnv.length}`);
+  if (desiredEnv.length !== 15) {
+    throw new Error(`Expected exactly 15 environment entries, got ${desiredEnv.length}`);
   }
 
   container.env = desiredEnv;

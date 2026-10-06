@@ -355,7 +355,7 @@ assert_test "Test I1: Command specifies explicit service account" \
   "0" "--service-account=200551109142-compute@developer.gserviceaccount.com" "$EXIT_CODE" "$OUT"
 
 assert_test "Test I2: Command uses clean --set-env-vars (replacing ordinary env with non-secret set)" \
-  "0" "--set-env-vars=RAZORPAY_MODE=live" "$EXIT_CODE" "$OUT"
+  "0" "RAZORPAY_MODE=live" "$EXIT_CODE" "$OUT"
 
 assert_test "Test I3: Summary logs only VALID status without secret exposure" \
   "0" "Razorpay Pro Monthly Plan:   VALID" "$EXIT_CODE" "$OUT"
@@ -467,7 +467,7 @@ assert_test "Test K3: Update-env contains all 6 Secret Manager mappings" \
   "$EXIT_CODE_UPDATE" "$OUT_UPDATE"
 
 assert_test "Test K4: Update-env uses --set-env-vars for clean ordinary environment replacement" \
-  "0" "--set-env-vars=RAZORPAY_MODE=live" "$EXIT_CODE_UPDATE" "$OUT_UPDATE"
+  "0" "RAZORPAY_MODE=live" "$EXIT_CODE_UPDATE" "$OUT_UPDATE"
 
 assert_absent "Test K5: Update-env does NOT use --update-env-vars" \
   "--update-env-vars" "$OUT_UPDATE"

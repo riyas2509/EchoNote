@@ -65,7 +65,13 @@ readonly CLOUD_RUN_SECRETS="${SECRET_GEMINI_API_KEY},${SECRET_RAZORPAY_KEY_SECRE
 # Uses --set-env-vars to replace all ordinary environment variables, ensuring complete
 # elimination of legacy plain secrets (GEMINI_API_KEY, RAZORPAY_KEY_SECRET, etc.) from
 # the ordinary env-var pool and avoiding Cloud Run type conflicts with --set-secrets.
-readonly PRODUCTION_ORDINARY_ENV_VARS="RAZORPAY_MODE=live,\
+if [ -z "${RAZORPAY_KEY_ID:-}" ]; then
+  echo "ERROR: RAZORPAY_KEY_ID is not set. Aborting production deployment." >&2
+  exit 1
+fi
+
+readonly PRODUCTION_ORDINARY_ENV_VARS="RAZORPAY_KEY_ID=$RAZORPAY_KEY_ID,\
+RAZORPAY_MODE=live,\
 NODE_ENV=production,\
 APP_URL=https://echonote-25.ai.studio,\
 RESEND_FROM_EMAIL=EchoNote <invitations@echotechai.in>,\
@@ -314,7 +320,7 @@ print_deployment_summary() {
   echo "  Razorpay Team Monthly Plan:  VALID"
   echo "  Razorpay Team Yearly Plan:   VALID"
   echo "  Ordinary Env Vars Mode:      Complete replacement (--set-env-vars)"
-  echo "  Ordinary Env Vars Config:    8 verified non-secret variables (zero plain secrets)"
+  echo "  Ordinary Env Vars Config:    9 verified non-secret variables (zero plain secrets)"
   echo "  Authoritative Sender:        RESEND_FROM_EMAIL=EchoNote <invitations@echotechai.in>"
   echo "  Canonical App URL:           APP_URL=https://echonote-25.ai.studio"
   echo "  Secret Manager References (6 production secrets):"

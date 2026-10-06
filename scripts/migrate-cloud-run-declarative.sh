@@ -220,8 +220,8 @@ print_migration_summary() {
   echo "  Immutable Image Digest:      $digest"
   echo "  Migration Mechanism:         Atomic Declarative Specification (services replace)"
   echo "  Razorpay Mode:               live"
-  echo "  Ordinary Variables (8):      RAZORPAY_MODE, NODE_ENV, APP_URL, RESEND_FROM_EMAIL,"
-  echo "                               RAZORPAY_PRO_MONTHLY_PLAN_ID, RAZORPAY_PRO_YEARLY_PLAN_ID,"
+  echo "  Ordinary Variables (9):      RAZORPAY_KEY_ID, RAZORPAY_MODE, NODE_ENV, APP_URL,"
+  echo "                               RESEND_FROM_EMAIL, RAZORPAY_PRO_MONTHLY_PLAN_ID, RAZORPAY_PRO_YEARLY_PLAN_ID,"
   echo "                               RAZORPAY_TEAM_MONTHLY_PLAN_ID, RAZORPAY_TEAM_YEARLY_PLAN_ID"
   echo "  Secret Manager Mappings (6): GEMINI_API_KEY -> echonote-gemini-api-key:latest"
   echo "                               RAZORPAY_KEY_SECRET -> echonote-razorpay-key-secret:latest"
@@ -272,6 +272,7 @@ case "$ACTION" in
     fi
 
     echo "--> Generating atomic desired-state service specification..."
+    RAZORPAY_KEY_ID="${RAZORPAY_KEY_ID:-}" \
     RAZORPAY_PRO_MONTHLY_PLAN_ID="$PLAN_PRO_MONTHLY" \
     RAZORPAY_PRO_YEARLY_PLAN_ID="$PLAN_PRO_YEARLY" \
     RAZORPAY_TEAM_MONTHLY_PLAN_ID="$PLAN_TEAM_MONTHLY" \
