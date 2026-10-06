@@ -50,6 +50,9 @@ PLAN_PRO_YEARLY="${RAZORPAY_PRO_YEARLY_PLAN_ID-plan_Tamd1Ef89GKQNk}"
 PLAN_TEAM_MONTHLY="${RAZORPAY_TEAM_MONTHLY_PLAN_ID-plan_TamdizBJ9W7kJo}"
 PLAN_TEAM_YEARLY="${RAZORPAY_TEAM_YEARLY_PLAN_ID-plan_TameI4cjPUzRpn}"
 
+# Razorpay Key ID for Cloud Run ordinary environment variable
+RAZORPAY_KEY_ID="${RAZORPAY_KEY_ID:-}"
+
 # Production Secret Manager Mappings (Cloud Run Secret Integration)
 # References use Secret Manager secret names and versions only; no plaintext secret values.
 readonly SECRET_GEMINI_API_KEY="GEMINI_API_KEY=echonote-gemini-api-key:latest"
@@ -61,11 +64,12 @@ readonly SECRET_CRON_SECRET="CRON_SECRET=echonote-cron-secret:latest"
 
 readonly CLOUD_RUN_SECRETS="${SECRET_GEMINI_API_KEY},${SECRET_RAZORPAY_KEY_SECRET},${SECRET_RAZORPAY_WEBHOOK_SECRET},${SECRET_RESEND_API_KEY},${SECRET_PLAYBACK_SECRET},${SECRET_CRON_SECRET}"
 
-# Complete set of ordinary (non-secret) production environment variables.
+# Complete set of ordinary (non-secret) production environment variables (9 total).
 # Uses --set-env-vars to replace all ordinary environment variables, ensuring complete
 # elimination of legacy plain secrets (GEMINI_API_KEY, RAZORPAY_KEY_SECRET, etc.) from
 # the ordinary env-var pool and avoiding Cloud Run type conflicts with --set-secrets.
-readonly PRODUCTION_ORDINARY_ENV_VARS="RAZORPAY_MODE=live,\
+PRODUCTION_ORDINARY_ENV_VARS="RAZORPAY_MODE=live,\
+RAZORPAY_KEY_ID=$RAZORPAY_KEY_ID,\
 NODE_ENV=production,\
 APP_URL=https://echonote-25.ai.studio,\
 RESEND_FROM_EMAIL=EchoNote <invitations@echotechai.in>,\
@@ -171,6 +175,27 @@ validate_razorpay_mode() {
     exit 1
   fi
   TARGET_RAZORPAY_MODE="live"
+}
+
+# ------------------------------------------------------------------------------
+# 4b. Razorpay Key ID Validation
+# ------------------------------------------------------------------------------
+validate_razorpay_key_id() {
+  if [ -z "$RAZORPAY_KEY_ID" ]; then
+    echo "ERROR: Missing required RAZORPAY_KEY_ID environment variable." >&2
+    exit 1
+  fi
+
+  local mode="${RAZORPAY_MODE:-live}"
+  if [ "$mode" = "live" ] && ! [[ "$RAZORPAY_KEY_ID" == rzp_live_* ]]; then
+    echo "ERROR: Invalid RAZORPAY_KEY_ID for mode 'live': must start with 'rzp_live_'." >&2
+    exit 1
+  fi
+
+  if [ "$mode" = "test" ] && ! [[ "$RAZORPAY_KEY_ID" == rzp_test_* ]]; then
+    echo "ERROR: Invalid RAZORPAY_KEY_ID for mode 'test': must start with 'rzp_test_'." >&2
+    exit 1
+  fi
 }
 
 # ------------------------------------------------------------------------------
@@ -309,12 +334,13 @@ print_deployment_summary() {
   echo "  Full Image Target:           $image_uri"
   echo "  Deployment Mechanism:        Explicit Immutable Docker Image"
   echo "  Razorpay Mode:               $TARGET_RAZORPAY_MODE"
+  echo "  Razorpay Key ID:             VALID"
   echo "  Razorpay Pro Monthly Plan:   VALID"
   echo "  Razorpay Pro Yearly Plan:    VALID"
   echo "  Razorpay Team Monthly Plan:  VALID"
   echo "  Razorpay Team Yearly Plan:   VALID"
   echo "  Ordinary Env Vars Mode:      Complete replacement (--set-env-vars)"
-  echo "  Ordinary Env Vars Config:    8 verified non-secret variables (zero plain secrets)"
+  echo "  Ordinary Env Vars Config:    9 verified non-secret variables (zero plain secrets)"
   echo "  Authoritative Sender:        RESEND_FROM_EMAIL=EchoNote <invitations@echotechai.in>"
   echo "  Canonical App URL:           APP_URL=https://echonote-25.ai.studio"
   echo "  Secret Manager References (6 production secrets):"
@@ -334,6 +360,7 @@ case "$ACTION" in
     validate_target
     validate_active_gcloud_project
     validate_plan_ids
+    validate_razorpay_key_id
     validate_razorpay_mode
     print_deployment_summary "N/A (update-env)" "N/A (update-env)"
 
@@ -359,6 +386,7 @@ case "$ACTION" in
     validate_target
     validate_active_gcloud_project
     validate_plan_ids
+    validate_razorpay_key_id
     validate_razorpay_mode
     run_preflight
 

@@ -27,6 +27,7 @@ export const SECRET_MAPPINGS: readonly SecretMapping[] = [
 
 export interface OrdinaryEnvVarConfig {
   RAZORPAY_MODE?: string;
+  RAZORPAY_KEY_ID?: string;
   NODE_ENV?: string;
   APP_URL?: string;
   RESEND_FROM_EMAIL?: string;
@@ -36,7 +37,7 @@ export interface OrdinaryEnvVarConfig {
   RAZORPAY_TEAM_YEARLY_PLAN_ID?: string;
 }
 
-export const DEFAULT_ORDINARY_ENV_VARS: Required<OrdinaryEnvVarConfig> = {
+export const DEFAULT_ORDINARY_ENV_VARS: Readonly<Record<Exclude<keyof OrdinaryEnvVarConfig, 'RAZORPAY_KEY_ID'>, string>> = {
   RAZORPAY_MODE: 'live',
   NODE_ENV: 'production',
   APP_URL: 'https://echonote-25.ai.studio',
@@ -67,7 +68,7 @@ export interface TransformResult {
  * Validates and transforms a Cloud Run Knative Service manifest
  * into an atomic, declarative desired-state manifest:
  * - Converts the 6 sensitive variables from literal to Secret Manager references.
- * - Enforces exactly 8 ordinary variables with zero overlap.
+ * - Enforces exactly 9 ordinary variables with zero overlap.
  * - Pins 100% traffic strictly to the existing serving revision.
  * - Preserves all container resources, ports, annotations, and service account.
  * - Strips template revision name so Cloud Run generates a fresh revision.
@@ -141,11 +142,37 @@ export function transformServiceManifest(options: TransformOptions): TransformRe
   container.image = expectedImageUri;
 
   // 5. Construct atomic desired env entries
-  const ordinaryValues = { ...DEFAULT_ORDINARY_ENV_VARS, ...ordinaryEnvOverrides };
+  const ordinaryValues: Record<string, string | undefined> = {
+    ...DEFAULT_ORDINARY_ENV_VARS,
+    RAZORPAY_KEY_ID: 'RAZORPAY_KEY_ID' in ordinaryEnvOverrides
+      ? ordinaryEnvOverrides.RAZORPAY_KEY_ID
+      : process.env.RAZORPAY_KEY_ID,
+    ...ordinaryEnvOverrides,
+  };
 
-  // Validate Razorpay mode is strictly 'live'
-  if (ordinaryValues.RAZORPAY_MODE !== 'live') {
-    throw new Error(`Invalid RAZORPAY_MODE: "${ordinaryValues.RAZORPAY_MODE}". Production requires "live".`);
+  // Validate RAZORPAY_KEY_ID and RAZORPAY_MODE
+  const mode = ordinaryValues.RAZORPAY_MODE || 'live';
+  const keyId = ordinaryValues.RAZORPAY_KEY_ID;
+
+  if (!keyId || typeof keyId !== 'string' || keyId.trim() === '') {
+    throw new Error('Missing required RAZORPAY_KEY_ID environment variable.');
+  }
+
+  if (mode === 'live' && !keyId.startsWith('rzp_live_')) {
+    throw new Error('Invalid RAZORPAY_KEY_ID for mode "live": must start with "rzp_live_".');
+  }
+
+  if (mode === 'test' && !keyId.startsWith('rzp_test_')) {
+    throw new Error('Invalid RAZORPAY_KEY_ID for mode "test": must start with "rzp_test_".');
+  }
+
+  if (mode !== 'live' && mode !== 'test') {
+    throw new Error(`Invalid RAZORPAY_MODE: "${mode}". Mode must be "live" or "test".`);
+  }
+
+  // Production requires strictly 'live'
+  if (mode !== 'live') {
+    throw new Error(`Invalid RAZORPAY_MODE: "${mode}". Production requires "live".`);
   }
 
   // Validate plan IDs regex
@@ -174,9 +201,10 @@ export function transformServiceManifest(options: TransformOptions): TransformRe
     };
   }> = [];
 
-  // Add 8 ordinary variables
-  const ordinaryKeys: (keyof typeof ordinaryValues)[] = [
+  // Add 9 ordinary variables
+  const ordinaryKeys: (keyof OrdinaryEnvVarConfig)[] = [
     'RAZORPAY_MODE',
+    'RAZORPAY_KEY_ID',
     'NODE_ENV',
     'APP_URL',
     'RESEND_FROM_EMAIL',
@@ -215,8 +243,8 @@ export function transformServiceManifest(options: TransformOptions): TransformRe
     seenNames.add(item.name);
   }
 
-  if (desiredEnv.length !== 14) {
-    throw new Error(`Expected exactly 14 environment entries, got ${desiredEnv.length}`);
+  if (desiredEnv.length !== 15) {
+    throw new Error(`Expected exactly 15 environment entries, got ${desiredEnv.length}`);
   }
 
   container.env = desiredEnv;
@@ -278,6 +306,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.met
       imageDigest,
       servingRevision,
       ordinaryEnvOverrides: {
+        RAZORPAY_KEY_ID: process.env.RAZORPAY_KEY_ID,
         RAZORPAY_PRO_MONTHLY_PLAN_ID: process.env.RAZORPAY_PRO_MONTHLY_PLAN_ID,
         RAZORPAY_PRO_YEARLY_PLAN_ID: process.env.RAZORPAY_PRO_YEARLY_PLAN_ID,
         RAZORPAY_TEAM_MONTHLY_PLAN_ID: process.env.RAZORPAY_TEAM_MONTHLY_PLAN_ID,

@@ -1,4 +1,6 @@
 import assert from 'node:assert';
+import fs from 'node:fs';
+import path from 'node:path';
 import YAML from 'yaml';
 import {
   transformServiceManifest,
@@ -187,17 +189,21 @@ runTest('Converts all 6 sensitive variables to Secret Manager references (valueF
   }
 });
 
-// Test 6: Exactly 8 ordinary variables with correct values
-runTest('All 8 ordinary variables are present with correct literal values', () => {
+// Test 6: Exactly 9 ordinary variables with correct values
+runTest('All 9 ordinary variables are present with correct literal values', () => {
   const result = transformServiceManifest({
     inputYamlContent: SAMPLE_EXPORTED_YAML,
     imageDigest: TARGET_DIGEST,
+    ordinaryEnvOverrides: {
+      RAZORPAY_KEY_ID: 'rzp_live_testdummykey123',
+    },
   });
 
   const parsed = YAML.parse(result.yaml);
   const envList: any[] = parsed.spec.template.spec.containers[0].env;
 
   assert.strictEqual(envList.find(e => e.name === 'RAZORPAY_MODE')?.value, 'live');
+  assert.strictEqual(envList.find(e => e.name === 'RAZORPAY_KEY_ID')?.value, 'rzp_live_testdummykey123');
   assert.strictEqual(envList.find(e => e.name === 'NODE_ENV')?.value, 'production');
   assert.strictEqual(envList.find(e => e.name === 'APP_URL')?.value, 'https://echonote-25.ai.studio');
   assert.strictEqual(envList.find(e => e.name === 'RESEND_FROM_EMAIL')?.value, 'EchoNote <invitations@echotechai.in>');
@@ -207,20 +213,23 @@ runTest('All 8 ordinary variables are present with correct literal values', () =
   assert.strictEqual(envList.find(e => e.name === 'RAZORPAY_TEAM_YEARLY_PLAN_ID')?.value, 'plan_TameI4cjPUzRpn');
 });
 
-// Test 7: Total variable count is exactly 14, no duplicates, zero overlap
-runTest('Total environment variable count is 14 with zero duplicates and zero overlap', () => {
+// Test 7: Total variable count is exactly 15, no duplicates, zero overlap
+runTest('Total environment variable count is 15 with zero duplicates and zero overlap', () => {
   const result = transformServiceManifest({
     inputYamlContent: SAMPLE_EXPORTED_YAML,
     imageDigest: TARGET_DIGEST,
+    ordinaryEnvOverrides: {
+      RAZORPAY_KEY_ID: 'rzp_live_testdummykey123',
+    },
   });
 
   const parsed = YAML.parse(result.yaml);
   const envList: any[] = parsed.spec.template.spec.containers[0].env;
 
-  assert.strictEqual(envList.length, 14);
+  assert.strictEqual(envList.length, 15);
   const names = envList.map(e => e.name);
   const uniqueNames = new Set(names);
-  assert.strictEqual(uniqueNames.size, 14, 'Duplicate environment variable names detected');
+  assert.strictEqual(uniqueNames.size, 15, 'Duplicate environment variable names detected');
 });
 
 // Test 8: Traffic is 100% pinned strictly to serving revision (0% to new revision)
@@ -346,7 +355,7 @@ runTest('Rejects non-live Razorpay mode override', () => {
       transformServiceManifest({
         inputYamlContent: SAMPLE_EXPORTED_YAML,
         imageDigest: TARGET_DIGEST,
-        ordinaryEnvOverrides: { RAZORPAY_MODE: 'test' },
+        ordinaryEnvOverrides: { RAZORPAY_MODE: 'test', RAZORPAY_KEY_ID: 'rzp_test_dummykey123' },
       });
     },
     /Production requires "live"/,
@@ -365,6 +374,136 @@ runTest('Rejects invalid plan ID format', () => {
     },
     /Invalid plan ID/,
   );
+});
+
+// Test 16: RAZORPAY_KEY_ID is present in the generated desired Cloud Run configuration
+runTest('RAZORPAY_KEY_ID is present in generated desired Cloud Run configuration', () => {
+  const result = transformServiceManifest({
+    inputYamlContent: SAMPLE_EXPORTED_YAML,
+    imageDigest: TARGET_DIGEST,
+    ordinaryEnvOverrides: { RAZORPAY_KEY_ID: 'rzp_live_testdummykey123' },
+  });
+  const parsed = YAML.parse(result.yaml);
+  const envList: any[] = parsed.spec.template.spec.containers[0].env;
+  const keyItem = envList.find(e => e.name === 'RAZORPAY_KEY_ID');
+  assert.ok(keyItem, 'RAZORPAY_KEY_ID must be present in env');
+  assert.strictEqual(keyItem.value, 'rzp_live_testdummykey123');
+});
+
+// Test 17: RAZORPAY_KEY_ID is treated as an ordinary environment variable
+runTest('RAZORPAY_KEY_ID is treated as an ordinary environment variable', () => {
+  const result = transformServiceManifest({
+    inputYamlContent: SAMPLE_EXPORTED_YAML,
+    imageDigest: TARGET_DIGEST,
+    ordinaryEnvOverrides: { RAZORPAY_KEY_ID: 'rzp_live_testdummykey123' },
+  });
+  const parsed = YAML.parse(result.yaml);
+  const envList: any[] = parsed.spec.template.spec.containers[0].env;
+  const keyItem = envList.find(e => e.name === 'RAZORPAY_KEY_ID');
+  assert.strictEqual(typeof keyItem.value, 'string');
+  assert.strictEqual(keyItem.valueFrom, undefined, 'RAZORPAY_KEY_ID must NOT have valueFrom');
+});
+
+// Test 18: RAZORPAY_KEY_SECRET remains a Secret Manager reference
+runTest('RAZORPAY_KEY_SECRET remains a Secret Manager reference', () => {
+  const result = transformServiceManifest({
+    inputYamlContent: SAMPLE_EXPORTED_YAML,
+    imageDigest: TARGET_DIGEST,
+    ordinaryEnvOverrides: { RAZORPAY_KEY_ID: 'rzp_live_testdummykey123' },
+  });
+  const parsed = YAML.parse(result.yaml);
+  const envList: any[] = parsed.spec.template.spec.containers[0].env;
+  const secretItem = envList.find(e => e.name === 'RAZORPAY_KEY_SECRET');
+  assert.ok(secretItem, 'RAZORPAY_KEY_SECRET must be present');
+  assert.strictEqual(secretItem.value, undefined, 'Secret must NOT have plain value');
+  assert.strictEqual(secretItem.valueFrom?.secretKeyRef?.name, 'echonote-razorpay-key-secret');
+  assert.strictEqual(secretItem.valueFrom?.secretKeyRef?.key, 'latest');
+});
+
+// Test 19: RAZORPAY_WEBHOOK_SECRET remains a Secret Manager reference
+runTest('RAZORPAY_WEBHOOK_SECRET remains a Secret Manager reference', () => {
+  const result = transformServiceManifest({
+    inputYamlContent: SAMPLE_EXPORTED_YAML,
+    imageDigest: TARGET_DIGEST,
+    ordinaryEnvOverrides: { RAZORPAY_KEY_ID: 'rzp_live_testdummykey123' },
+  });
+  const parsed = YAML.parse(result.yaml);
+  const envList: any[] = parsed.spec.template.spec.containers[0].env;
+  const secretItem = envList.find(e => e.name === 'RAZORPAY_WEBHOOK_SECRET');
+  assert.ok(secretItem, 'RAZORPAY_WEBHOOK_SECRET must be present');
+  assert.strictEqual(secretItem.value, undefined, 'Secret must NOT have plain value');
+  assert.strictEqual(secretItem.valueFrom?.secretKeyRef?.name, 'echonote-razorpay-webhook-secret');
+  assert.strictEqual(secretItem.valueFrom?.secretKeyRef?.key, 'latest');
+});
+
+// Test 20: Missing RAZORPAY_KEY_ID fails safely
+runTest('Missing RAZORPAY_KEY_ID fails safely with clear error', () => {
+  assert.throws(
+    () => {
+      transformServiceManifest({
+        inputYamlContent: SAMPLE_EXPORTED_YAML,
+        imageDigest: TARGET_DIGEST,
+        ordinaryEnvOverrides: { RAZORPAY_KEY_ID: '' },
+      });
+    },
+    /Missing required RAZORPAY_KEY_ID environment variable/,
+  );
+});
+
+// Test 21: live mode rejects a non-rzp_live_ key ID
+runTest('Live mode rejects a non-rzp_live_ key ID', () => {
+  assert.throws(
+    () => {
+      transformServiceManifest({
+        inputYamlContent: SAMPLE_EXPORTED_YAML,
+        imageDigest: TARGET_DIGEST,
+        ordinaryEnvOverrides: { RAZORPAY_MODE: 'live', RAZORPAY_KEY_ID: 'invalid_prefix_key_123' },
+      });
+    },
+    /Invalid RAZORPAY_KEY_ID for mode "live": must start with "rzp_live_"./,
+  );
+});
+
+// Test 22: test mode rejects a non-rzp_test_ key ID
+runTest('Test mode rejects a non-rzp_test_ key ID', () => {
+  assert.throws(
+    () => {
+      transformServiceManifest({
+        inputYamlContent: SAMPLE_EXPORTED_YAML,
+        imageDigest: TARGET_DIGEST,
+        ordinaryEnvOverrides: { RAZORPAY_MODE: 'test', RAZORPAY_KEY_ID: 'rzp_live_not_test_123' },
+      });
+    },
+    /Invalid RAZORPAY_KEY_ID for mode "test": must start with "rzp_test_"./,
+  );
+});
+
+// Test 23: actual credential values are never printed by validation errors
+runTest('Actual credential values are never printed by validation errors', () => {
+  const secretCandidate = 'unrecognized_key_secret_candidate_998877';
+  try {
+    transformServiceManifest({
+      inputYamlContent: SAMPLE_EXPORTED_YAML,
+      imageDigest: TARGET_DIGEST,
+      ordinaryEnvOverrides: { RAZORPAY_MODE: 'live', RAZORPAY_KEY_ID: secretCandidate },
+    });
+    assert.fail('Expected transformServiceManifest to throw');
+  } catch (err: any) {
+    assert.strictEqual(
+      err.message.includes(secretCandidate),
+      false,
+      'Error message must NOT contain raw key value',
+    );
+  }
+});
+
+// Test 24: .env.example contains no real credential values
+runTest('.env.example contains no real credential values', () => {
+  const envContent = fs.readFileSync(path.resolve(process.cwd(), '.env.example'), 'utf8');
+  assert.ok(!envContent.match(/rzp_live_[A-Za-z0-9]{14,}/), 'No live Razorpay key IDs in .env.example');
+  assert.ok(!envContent.match(/rzp_test_[A-Za-z0-9]{14,}/), 'No test Razorpay key IDs in .env.example');
+  assert.ok(!envContent.match(/AIza[0-9A-Za-z_-]{30,}/), 'No Google API keys in .env.example');
+  assert.ok(!envContent.match(/re_[0-9A-Za-z_-]{20,}/), 'No Resend API keys in .env.example');
 });
 
 console.log('======================================================================');

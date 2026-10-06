@@ -245,6 +245,7 @@ setup_mock_npm 0 0
 setup_mock_git "a1b2c3d4e5f6"
 setup_mock_docker 0 0
 setup_mock_gcloud "echonote-2509"
+export RAZORPAY_KEY_ID="${RAZORPAY_KEY_ID:-rzp_live_mock_dummy_key_for_testing}"
 
 # ----------------------------------------------------------------------------
 # Test A: Correct Target & Validation Success with DRY_RUN=1
@@ -318,10 +319,41 @@ assert_test "Test E2: Rejects invalid Plan ID regex format" \
 # ----------------------------------------------------------------------------
 # Test F: Invalid Razorpay Mode
 # ----------------------------------------------------------------------------
-OUT=$(PATH="$MOCK_BIN:$PATH" RAZORPAY_MODE="test" "$DEPLOY_SCRIPT" deploy 2>&1)
+OUT=$(PATH="$MOCK_BIN:$PATH" RAZORPAY_MODE="test" RAZORPAY_KEY_ID="rzp_test_sample" "$DEPLOY_SCRIPT" deploy 2>&1)
 EXIT_CODE=$?
 assert_test "Test F: Rejects non-live RAZORPAY_MODE override" \
   "nonzero" "ERROR: Invalid ambient RAZORPAY_MODE" "$EXIT_CODE" "$OUT"
+
+# ----------------------------------------------------------------------------
+# Test F2: Missing RAZORPAY_KEY_ID
+# ----------------------------------------------------------------------------
+OUT_NO_KEY=$(PATH="$MOCK_BIN:$PATH" RAZORPAY_KEY_ID="" "$DEPLOY_SCRIPT" deploy 2>&1)
+EXIT_NO_KEY=$?
+assert_test "Test F2: Rejects missing RAZORPAY_KEY_ID" \
+  "nonzero" "ERROR: Missing required RAZORPAY_KEY_ID environment variable" "$EXIT_NO_KEY" "$OUT_NO_KEY"
+
+# ----------------------------------------------------------------------------
+# Test F3: Non-rzp_live_ key in live mode
+# ----------------------------------------------------------------------------
+OUT_BAD_LIVE_KEY=$(PATH="$MOCK_BIN:$PATH" RAZORPAY_MODE="live" RAZORPAY_KEY_ID="rzp_test_invalid" "$DEPLOY_SCRIPT" deploy 2>&1)
+EXIT_BAD_LIVE_KEY=$?
+assert_test "Test F3: Rejects non-rzp_live_ key in live mode" \
+  "nonzero" "ERROR: Invalid RAZORPAY_KEY_ID for mode 'live': must start with 'rzp_live_'." "$EXIT_BAD_LIVE_KEY" "$OUT_BAD_LIVE_KEY"
+
+# ----------------------------------------------------------------------------
+# Test F4: Non-rzp_test_ key in test mode
+# ----------------------------------------------------------------------------
+OUT_BAD_TEST_KEY=$(PATH="$MOCK_BIN:$PATH" RAZORPAY_MODE="test" RAZORPAY_KEY_ID="rzp_live_invalid" "$DEPLOY_SCRIPT" deploy 2>&1)
+EXIT_BAD_TEST_KEY=$?
+assert_test "Test F4: Rejects non-rzp_test_ key in test mode" \
+  "nonzero" "ERROR: Invalid RAZORPAY_KEY_ID for mode 'test': must start with 'rzp_test_'." "$EXIT_BAD_TEST_KEY" "$OUT_BAD_TEST_KEY"
+
+# ----------------------------------------------------------------------------
+# Test F5: Error message does not leak raw key value
+# ----------------------------------------------------------------------------
+SECRET_CANDIDATE="secret_token_val_12345"
+OUT_LEAK=$(PATH="$MOCK_BIN:$PATH" RAZORPAY_KEY_ID="$SECRET_CANDIDATE" "$DEPLOY_SCRIPT" deploy 2>&1)
+assert_absent "Test F5: Error does not leak key value" "$SECRET_CANDIDATE" "$OUT_LEAK"
 
 # ----------------------------------------------------------------------------
 # Test G: Preflight failure on 'npm run lint'
@@ -427,6 +459,17 @@ assert_test "Test J23: Deploy preserves RAZORPAY_TEAM_MONTHLY_PLAN_ID in --set-e
   "0" "RAZORPAY_TEAM_MONTHLY_PLAN_ID=plan_TamdizBJ9W7kJo" "$EXIT_CODE" "$SET_ENV_PART"
 assert_test "Test J24: Deploy preserves RAZORPAY_TEAM_YEARLY_PLAN_ID in --set-env-vars" \
   "0" "RAZORPAY_TEAM_YEARLY_PLAN_ID=plan_TameI4cjPUzRpn" "$EXIT_CODE" "$SET_ENV_PART"
+assert_test "Test J24b: Deploy preserves RAZORPAY_KEY_ID in --set-env-vars" \
+  "0" "RAZORPAY_KEY_ID=" "$EXIT_CODE" "$SET_ENV_PART"
+
+ORDINARY_COUNT=$(echo "$SET_ENV_VAL" | tr ',' '\n' | grep -v '^$' | wc -l)
+if [ "$ORDINARY_COUNT" -eq 9 ]; then
+  echo "  ✅ Test J24c: Exactly 9 ordinary variables in --set-env-vars ... PASSED"
+  PASSED_COUNT=$((PASSED_COUNT + 1))
+else
+  echo "  ❌ Test J24c: Expected 9 ordinary variables, found $ORDINARY_COUNT ... FAILED"
+  FAILED_COUNT=$((FAILED_COUNT + 1))
+fi
 
 # Test M: Deployment command cannot produce duplicate environment-variable names
 SET_SECRETS_PART="$(echo "$DEPLOY_CMD" | grep -o -- '--set-secrets=[^ ]*' || true)"
@@ -499,6 +542,17 @@ assert_test "Test K15: Update-env preserves NODE_ENV=production" \
   "0" "NODE_ENV=production" "$EXIT_CODE_UPDATE" "$SET_ENV_PART_K"
 assert_test "Test K16: Update-env preserves RAZORPAY_MODE=live" \
   "0" "RAZORPAY_MODE=live" "$EXIT_CODE_UPDATE" "$SET_ENV_PART_K"
+assert_test "Test K17: Update-env preserves RAZORPAY_KEY_ID in --set-env-vars" \
+  "0" "RAZORPAY_KEY_ID=" "$EXIT_CODE_UPDATE" "$SET_ENV_PART_K"
+
+ORDINARY_COUNT_K=$(echo "$SET_ENV_VAL_K" | tr ',' '\n' | grep -v '^$' | wc -l)
+if [ "$ORDINARY_COUNT_K" -eq 9 ]; then
+  echo "  ✅ Test K18: Exactly 9 ordinary variables in update-env --set-env-vars ... PASSED"
+  PASSED_COUNT=$((PASSED_COUNT + 1))
+else
+  echo "  ❌ Test K18: Expected 9 ordinary variables in update-env, found $ORDINARY_COUNT_K ... FAILED"
+  FAILED_COUNT=$((FAILED_COUNT + 1))
+fi
 
 # Test K12: Update-env with DRY_RUN=1 does not invoke gcloud
 OUT_UPDATE_DRY=$(PATH="$MOCK_BIN:$PATH" DRY_RUN=1 "$DEPLOY_SCRIPT" update-env 2>&1)
@@ -536,6 +590,14 @@ assert_pattern_absent "Test L7: No raw 64-character hex secret tokens in deploy 
 
 assert_test "Test L8: Summary lists Ordinary Env Vars Mode (--set-env-vars)" \
   "0" "Ordinary Env Vars Mode:      Complete replacement (--set-env-vars)" \
+  "$EXIT_CODE" "$OUT"
+
+assert_test "Test L9: Summary lists 9 verified non-secret ordinary variables" \
+  "0" "Ordinary Env Vars Config:    9 verified non-secret variables (zero plain secrets)" \
+  "$EXIT_CODE" "$OUT"
+
+assert_test "Test L10: Summary lists Razorpay Key ID validity" \
+  "0" "Razorpay Key ID:             VALID" \
   "$EXIT_CODE" "$OUT"
 
 # ----------------------------------------------------------------------------

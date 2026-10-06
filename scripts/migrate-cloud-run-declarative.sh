@@ -47,6 +47,9 @@ PLAN_PRO_YEARLY="${RAZORPAY_PRO_YEARLY_PLAN_ID-plan_Tamd1Ef89GKQNk}"
 PLAN_TEAM_MONTHLY="${RAZORPAY_TEAM_MONTHLY_PLAN_ID-plan_TamdizBJ9W7kJo}"
 PLAN_TEAM_YEARLY="${RAZORPAY_TEAM_YEARLY_PLAN_ID-plan_TameI4cjPUzRpn}"
 
+# Razorpay Key ID for Cloud Run ordinary environment variable
+RAZORPAY_KEY_ID="${RAZORPAY_KEY_ID:-}"
+
 ACTION="${1:-prepare}"
 
 # ------------------------------------------------------------------------------
@@ -138,6 +141,27 @@ validate_razorpay_mode() {
 }
 
 # ------------------------------------------------------------------------------
+# 4b. Razorpay Key ID Validation
+# ------------------------------------------------------------------------------
+validate_razorpay_key_id() {
+  if [ -z "$RAZORPAY_KEY_ID" ]; then
+    echo "ERROR: Missing required RAZORPAY_KEY_ID environment variable." >&2
+    exit 1
+  fi
+
+  local mode="${RAZORPAY_MODE:-live}"
+  if [ "$mode" = "live" ] && ! [[ "$RAZORPAY_KEY_ID" == rzp_live_* ]]; then
+    echo "ERROR: Invalid RAZORPAY_KEY_ID for mode 'live': must start with 'rzp_live_'." >&2
+    exit 1
+  fi
+
+  if [ "$mode" = "test" ] && ! [[ "$RAZORPAY_KEY_ID" == rzp_test_* ]]; then
+    echo "ERROR: Invalid RAZORPAY_KEY_ID for mode 'test': must start with 'rzp_test_'." >&2
+    exit 1
+  fi
+}
+
+# ------------------------------------------------------------------------------
 # 5. Resolve & Validate Immutable Image Digest
 # ------------------------------------------------------------------------------
 resolve_digest() {
@@ -220,9 +244,10 @@ print_migration_summary() {
   echo "  Immutable Image Digest:      $digest"
   echo "  Migration Mechanism:         Atomic Declarative Specification (services replace)"
   echo "  Razorpay Mode:               live"
-  echo "  Ordinary Variables (8):      RAZORPAY_MODE, NODE_ENV, APP_URL, RESEND_FROM_EMAIL,"
-  echo "                               RAZORPAY_PRO_MONTHLY_PLAN_ID, RAZORPAY_PRO_YEARLY_PLAN_ID,"
-  echo "                               RAZORPAY_TEAM_MONTHLY_PLAN_ID, RAZORPAY_TEAM_YEARLY_PLAN_ID"
+  echo "  Ordinary Variables (9):      RAZORPAY_MODE, RAZORPAY_KEY_ID, NODE_ENV, APP_URL,"
+  echo "                               RESEND_FROM_EMAIL, RAZORPAY_PRO_MONTHLY_PLAN_ID,"
+  echo "                               RAZORPAY_PRO_YEARLY_PLAN_ID, RAZORPAY_TEAM_MONTHLY_PLAN_ID,"
+  echo "                               RAZORPAY_TEAM_YEARLY_PLAN_ID"
   echo "  Secret Manager Mappings (6): GEMINI_API_KEY -> echonote-gemini-api-key:latest"
   echo "                               RAZORPAY_KEY_SECRET -> echonote-razorpay-key-secret:latest"
   echo "                               RAZORPAY_WEBHOOK_SECRET -> echonote-razorpay-webhook-secret:latest"
@@ -242,6 +267,7 @@ case "$ACTION" in
     validate_target
     validate_active_gcloud_project
     validate_plan_ids
+    validate_razorpay_key_id
     validate_razorpay_mode
     run_preflight
 
@@ -272,6 +298,7 @@ case "$ACTION" in
     fi
 
     echo "--> Generating atomic desired-state service specification..."
+    RAZORPAY_KEY_ID="$RAZORPAY_KEY_ID" \
     RAZORPAY_PRO_MONTHLY_PLAN_ID="$PLAN_PRO_MONTHLY" \
     RAZORPAY_PRO_YEARLY_PLAN_ID="$PLAN_PRO_YEARLY" \
     RAZORPAY_TEAM_MONTHLY_PLAN_ID="$PLAN_TEAM_MONTHLY" \

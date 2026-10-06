@@ -205,6 +205,8 @@ echo "======================================================================"
 setup_mock_npm 0 0
 setup_mock_gcloud "echonote-2509"
 
+export RAZORPAY_KEY_ID="${RAZORPAY_KEY_ID:-rzp_live_mock_dummy_key_for_testing}"
+
 # ----------------------------------------------------------------------------
 # 1. Target and Environment Validations
 # ----------------------------------------------------------------------------
@@ -223,10 +225,29 @@ EXIT_P3=$?
 assert_test "Migrate Inv 3: Rejects mismatched service name" \
   "nonzero" "ERROR: Production deployment target mismatch" "$EXIT_P3" "$OUT_P3"
 
-OUT_P4=$(PATH="$MOCK_BIN:$PATH" RAZORPAY_MODE="test" "$MIGRATE_SCRIPT" prepare 2>&1)
+OUT_P4=$(PATH="$MOCK_BIN:$PATH" RAZORPAY_MODE="test" RAZORPAY_KEY_ID="rzp_test_sample" "$MIGRATE_SCRIPT" prepare 2>&1)
 EXIT_P4=$?
 assert_test "Migrate Inv 4: Rejects non-live RAZORPAY_MODE" \
   "nonzero" "ERROR: Invalid ambient RAZORPAY_MODE" "$EXIT_P4" "$OUT_P4"
+
+OUT_P4D=$(PATH="$MOCK_BIN:$PATH" RAZORPAY_KEY_ID="" "$MIGRATE_SCRIPT" prepare 2>&1)
+EXIT_P4D=$?
+assert_test "Migrate Inv 4d: Rejects missing RAZORPAY_KEY_ID" \
+  "nonzero" "ERROR: Missing required RAZORPAY_KEY_ID environment variable" "$EXIT_P4D" "$OUT_P4D"
+
+OUT_P4E=$(PATH="$MOCK_BIN:$PATH" RAZORPAY_MODE="live" RAZORPAY_KEY_ID="rzp_test_invalid" "$MIGRATE_SCRIPT" prepare 2>&1)
+EXIT_P4E=$?
+assert_test "Migrate Inv 4e: Rejects non-rzp_live_ key in live mode" \
+  "nonzero" "ERROR: Invalid RAZORPAY_KEY_ID for mode 'live': must start with 'rzp_live_'." "$EXIT_P4E" "$OUT_P4E"
+
+OUT_P4F=$(PATH="$MOCK_BIN:$PATH" RAZORPAY_MODE="test" RAZORPAY_KEY_ID="rzp_live_invalid" "$MIGRATE_SCRIPT" prepare 2>&1)
+EXIT_P4F=$?
+assert_test "Migrate Inv 4f: Rejects non-rzp_test_ key in test mode" \
+  "nonzero" "ERROR: Invalid RAZORPAY_KEY_ID for mode 'test': must start with 'rzp_test_'." "$EXIT_P4F" "$OUT_P4F"
+
+SECRET_CANDIDATE="secret_token_val_12345"
+OUT_P4G=$(PATH="$MOCK_BIN:$PATH" RAZORPAY_KEY_ID="$SECRET_CANDIDATE" "$MIGRATE_SCRIPT" prepare 2>&1)
+assert_absent "Migrate Inv 4g: Error message does not leak raw key" "$SECRET_CANDIDATE" "$OUT_P4G"
 
 OUT_P4B=$(PATH="$MOCK_BIN:$PATH" "$MIGRATE_SCRIPT" prepare 2>&1)
 EXIT_P4B=$?
