@@ -91,7 +91,12 @@ if [ "\$1" = "run" ] && [ "\$2" = "services" ] && [ "\$3" = "describe" ]; then
 fi
 
 if [ "\$1" = "run" ] && [ "\$2" = "services" ] && [ "\$3" = "replace" ]; then
+  if grep -q 'run.googleapis.com/sources' "\$4"; then
+    echo "MOCK_FORBIDDEN_SOURCE_ANNOTATION_PRESENT" >&2
+    exit 1
+  fi
   echo "MOCK_GCLOUD_SERVICES_REPLACE_INVOKED: \$*"
+  echo "MOCK_SOURCE_ANNOTATION_STRIPPED"
   exit 0
 fi
 
@@ -182,6 +187,7 @@ spec:
       name: echonote-00009-w5m
       annotations:
         autoscaling.knative.dev/maxScale: '10'
+        run.googleapis.com/sources: '{"app-container":"gs://run-sources-echonote-2509-us-west1/services/echonote/test-source.tar.gz"}'
     spec:
       containerConcurrency: 80
       timeoutSeconds: 300
@@ -285,6 +291,8 @@ OUT_SUCCESS=$(PATH="$MOCK_BIN:$PATH" "$MIGRATE_SCRIPT" prepare --digest="$VALID_
 EXIT_SUCCESS=$?
 assert_test "Migrate Inv 10: Successful prepare invokes services replace" \
   "0" "MOCK_GCLOUD_SERVICES_REPLACE_INVOKED: run services replace" "$EXIT_SUCCESS" "$OUT_SUCCESS"
+assert_test "Migrate Inv 10a: Strips stale run.googleapis.com/sources annotation" \
+  "0" "MOCK_SOURCE_ANNOTATION_STRIPPED" "$EXIT_SUCCESS" "$OUT_SUCCESS"
 assert_test "Migrate Inv 11: Confirms verified revision is Ready" \
   "0" "Verified Revision:        echonote-00010-xyz (Ready: True" "$EXIT_SUCCESS" "$OUT_SUCCESS"
 assert_test "Migrate Inv 12: Confirms 100% traffic remains safely on baseline revision" \

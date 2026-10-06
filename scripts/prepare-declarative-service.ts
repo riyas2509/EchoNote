@@ -133,9 +133,17 @@ export function transformServiceManifest(options: TransformOptions): TransformRe
 
   const container = containers[0];
 
-  // 3. Strip previous revision name from template metadata so Cloud Run creates a new revision
+  // 3. Strip previous revision name and incompatible source provenance from template metadata.
+  // The existing service may carry an AI Studio source archive annotation, but this
+  // deployment path uses an explicit immutable Artifact Registry image. Cloud Run
+  // rejects a stale run.googleapis.com/sources annotation when its source is not
+  // referenced by the replacement container.
   if (doc.spec.template.metadata) {
     delete doc.spec.template.metadata.name;
+
+    if (doc.spec.template.metadata.annotations) {
+      delete doc.spec.template.metadata.annotations['run.googleapis.com/sources'];
+    }
   }
 
   // 4. Update container image to pinned immutable digest
