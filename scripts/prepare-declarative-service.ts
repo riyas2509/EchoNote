@@ -48,7 +48,7 @@ export const DEFAULT_ORDINARY_ENV_VARS: Readonly<Record<Exclude<keyof OrdinaryEn
   RAZORPAY_TEAM_YEARLY_PLAN_ID: 'plan_TameI4cjPUzRpn',
 };
 
-export const ALLOWED_SERVICE_NAMES = [EXPECTED_SERVICE_NAME, 'echonote-prod'] as const;
+export const ALLOWED_SERVICE_NAMES = ['echonote', 'echonote-prod'] as const;
 
 export interface TransformOptions {
   inputYamlContent: string;
@@ -83,8 +83,10 @@ export function transformServiceManifest(options: TransformOptions): TransformRe
     imageDigest,
     servingRevision = BASELINE_SERVING_REVISION,
     ordinaryEnvOverrides = {},
-    serviceName: requestedServiceName = EXPECTED_SERVICE_NAME,
+    serviceName,
   } = options;
+
+  const requestedServiceName = serviceName ?? EXPECTED_SERVICE_NAME;
 
   if (!ALLOWED_SERVICE_NAMES.includes(requestedServiceName as any)) {
     throw new Error(`Unsupported service name: "${requestedServiceName}". Supported services are: ${ALLOWED_SERVICE_NAMES.join(', ')}`);
@@ -110,9 +112,9 @@ export function transformServiceManifest(options: TransformOptions): TransformRe
   }
 
   // 1. Validate Service metadata
-  const serviceName = doc.metadata?.name;
-  if (serviceName !== requestedServiceName) {
-    throw new Error(`Service name mismatch: expected "${requestedServiceName}", got "${serviceName}"`);
+  const actualName = doc.metadata?.name;
+  if (actualName !== requestedServiceName) {
+    throw new Error(`Service name mismatch: expected "${requestedServiceName}", got "${actualName}"`);
   }
 
   // Strip stale run.googleapis.com/sources annotations if present
@@ -325,7 +327,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.met
     }
 
     if (!inputYamlPath || !outputYamlPath || !imageDigest) {
-      console.error('Usage: tsx scripts/prepare-declarative-service.ts --input=<service.yaml> --output=<desired.yaml> --digest=<sha256:...> [--serving-revision=<rev>] [--service-name=<name>]');
+      console.error('Usage: tsx scripts/prepare-declarative-service.ts --input=<service.yaml> --output=<desired.yaml> --digest=<sha256:...> [--serving-revision=<rev>] [--service-name=<echonote|echonote-prod>]');
       process.exit(1);
     }
 
