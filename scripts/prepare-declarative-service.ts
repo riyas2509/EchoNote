@@ -158,12 +158,15 @@ export function transformServiceManifest(options: TransformOptions): TransformRe
     throw new Error('Missing required RAZORPAY_KEY_ID environment variable.');
   }
 
-  if (mode === 'live' && !keyId.startsWith('rzp_live_')) {
-    throw new Error('Invalid RAZORPAY_KEY_ID for mode "live": must start with "rzp_live_".');
+  const liveKeyRegex = /^rzp_live_[A-Za-z0-9]+$/;
+  const testKeyRegex = /^rzp_test_[A-Za-z0-9]+$/;
+
+  if (mode === 'live' && !liveKeyRegex.test(keyId)) {
+    throw new Error('Invalid RAZORPAY_KEY_ID for mode "live": must start with "rzp_live_" and match pattern /^rzp_live_[A-Za-z0-9]+$/.');
   }
 
-  if (mode === 'test' && !keyId.startsWith('rzp_test_')) {
-    throw new Error('Invalid RAZORPAY_KEY_ID for mode "test": must start with "rzp_test_".');
+  if (mode === 'test' && !testKeyRegex.test(keyId)) {
+    throw new Error('Invalid RAZORPAY_KEY_ID for mode "test": must start with "rzp_test_" and match pattern /^rzp_test_[A-Za-z0-9]+$/.');
   }
 
   if (mode !== 'live' && mode !== 'test') {

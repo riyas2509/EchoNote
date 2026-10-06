@@ -187,12 +187,12 @@ validate_razorpay_key_id() {
   fi
 
   local mode="${RAZORPAY_MODE:-live}"
-  if [ "$mode" = "live" ] && ! [[ "$RAZORPAY_KEY_ID" == rzp_live_* ]]; then
+  if [ "$mode" = "live" ] && ! [[ "$RAZORPAY_KEY_ID" =~ ^rzp_live_[A-Za-z0-9]+$ ]]; then
     echo "ERROR: Invalid RAZORPAY_KEY_ID for mode 'live': must start with 'rzp_live_'." >&2
     exit 1
   fi
 
-  if [ "$mode" = "test" ] && ! [[ "$RAZORPAY_KEY_ID" == rzp_test_* ]]; then
+  if [ "$mode" = "test" ] && ! [[ "$RAZORPAY_KEY_ID" =~ ^rzp_test_[A-Za-z0-9]+$ ]]; then
     echo "ERROR: Invalid RAZORPAY_KEY_ID for mode 'test': must start with 'rzp_test_'." >&2
     exit 1
   fi
