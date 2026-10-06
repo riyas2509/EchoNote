@@ -506,6 +506,168 @@ runTest('.env.example contains no real credential values', () => {
   assert.ok(!envContent.match(/re_[0-9A-Za-z_-]{20,}/), 'No Resend API keys in .env.example');
 });
 
+// Test 25: Default service name behavior targets echonote
+runTest('Default service name behavior targets echonote', () => {
+  const result = transformServiceManifest({
+    inputYamlContent: SAMPLE_EXPORTED_YAML,
+    imageDigest: TARGET_DIGEST,
+    ordinaryEnvOverrides: { RAZORPAY_KEY_ID: 'rzp_live_testdummykey123' },
+  });
+  assert.strictEqual(result.serviceName, 'echonote');
+  const doc = YAML.parse(result.yaml);
+  assert.strictEqual(doc.metadata.name, 'echonote');
+});
+
+// Test 26: Explicit service name echonote succeeds for echonote manifest
+runTest('Explicit service name echonote succeeds for echonote manifest', () => {
+  const result = transformServiceManifest({
+    inputYamlContent: SAMPLE_EXPORTED_YAML,
+    imageDigest: TARGET_DIGEST,
+    serviceName: 'echonote',
+    ordinaryEnvOverrides: { RAZORPAY_KEY_ID: 'rzp_live_testdummykey123' },
+  });
+  assert.strictEqual(result.serviceName, 'echonote');
+  const doc = YAML.parse(result.yaml);
+  assert.strictEqual(doc.metadata.name, 'echonote');
+});
+
+// Test 27: echonote-prod acceptance when serviceName=echonote-prod
+runTest('echonote-prod acceptance when serviceName=echonote-prod', () => {
+  const prodYaml = SAMPLE_EXPORTED_YAML.replace('name: echonote', 'name: echonote-prod');
+  const result = transformServiceManifest({
+    inputYamlContent: prodYaml,
+    imageDigest: TARGET_DIGEST,
+    serviceName: 'echonote-prod',
+    servingRevision: 'echonote-prod-00001-abc',
+    ordinaryEnvOverrides: { RAZORPAY_KEY_ID: 'rzp_live_testdummykey123' },
+  });
+  assert.strictEqual(result.serviceName, 'echonote-prod');
+  assert.strictEqual(result.pinnedServingRevision, 'echonote-prod-00001-abc');
+  const doc = YAML.parse(result.yaml);
+  assert.strictEqual(doc.metadata.name, 'echonote-prod');
+  assert.strictEqual(doc.spec.traffic[0].revisionName, 'echonote-prod-00001-abc');
+});
+
+// Test 28: Cross-service rejection: rejects echonote manifest when serviceName=echonote-prod
+runTest('Cross-service rejection: rejects echonote manifest when serviceName=echonote-prod', () => {
+  assert.throws(
+    () => {
+      transformServiceManifest({
+        inputYamlContent: SAMPLE_EXPORTED_YAML, // has metadata.name: echonote
+        imageDigest: TARGET_DIGEST,
+        serviceName: 'echonote-prod',
+        ordinaryEnvOverrides: { RAZORPAY_KEY_ID: 'rzp_live_testdummykey123' },
+      });
+    },
+    /Service name mismatch: expected "echonote-prod", got "echonote"/,
+  );
+});
+
+// Test 29: Cross-service rejection: rejects echonote-prod manifest when serviceName=echonote
+runTest('Cross-service rejection: rejects echonote-prod manifest when serviceName=echonote', () => {
+  const prodYaml = SAMPLE_EXPORTED_YAML.replace('name: echonote', 'name: echonote-prod');
+  assert.throws(
+    () => {
+      transformServiceManifest({
+        inputYamlContent: prodYaml,
+        imageDigest: TARGET_DIGEST,
+        serviceName: 'echonote',
+        ordinaryEnvOverrides: { RAZORPAY_KEY_ID: 'rzp_live_testdummykey123' },
+      });
+    },
+    /Service name mismatch: expected "echonote", got "echonote-prod"/,
+  );
+
+  // Also rejects with default service name
+  assert.throws(
+    () => {
+      transformServiceManifest({
+        inputYamlContent: prodYaml,
+        imageDigest: TARGET_DIGEST,
+        ordinaryEnvOverrides: { RAZORPAY_KEY_ID: 'rzp_live_testdummykey123' },
+      });
+    },
+    /Service name mismatch: expected "echonote", got "echonote-prod"/,
+  );
+});
+
+// Test 30: Strips stale run.googleapis.com/sources annotations
+runTest('Strips stale run.googleapis.com/sources annotations from metadata and template', () => {
+  const yamlWithSources = SAMPLE_EXPORTED_YAML
+    .replace(
+      'run.googleapis.com/client-name: gcloud',
+      'run.googleapis.com/client-name: gcloud\n    run.googleapis.com/sources: gs://echonote-bucket/stale-source.tar.gz',
+    )
+    .replace(
+      'run.googleapis.com/execution-environment: gen2',
+      'run.googleapis.com/execution-environment: gen2\n        run.googleapis.com/sources: gs://echonote-bucket/stale-source.tar.gz',
+    );
+
+  const result = transformServiceManifest({
+    inputYamlContent: yamlWithSources,
+    imageDigest: TARGET_DIGEST,
+    ordinaryEnvOverrides: { RAZORPAY_KEY_ID: 'rzp_live_testdummykey123' },
+  });
+
+  const doc = YAML.parse(result.yaml);
+  assert.strictEqual(doc.metadata.annotations['run.googleapis.com/sources'], undefined, 'Top-level source annotation must be deleted');
+  assert.strictEqual(doc.spec.template.metadata.annotations['run.googleapis.com/sources'], undefined, 'Template source annotation must be deleted');
+  assert.strictEqual(doc.metadata.annotations['run.googleapis.com/client-name'], 'gcloud', 'Other annotations preserved');
+  assert.strictEqual(doc.spec.template.metadata.annotations['run.googleapis.com/execution-environment'], 'gen2', 'Other template annotations preserved');
+});
+
+// Test 31: echonote-prod preserves all 15 environment entries and 6 secret mappings
+runTest('echonote-prod preserves all 15 environment entries and 6 secret mappings', () => {
+  const prodYaml = SAMPLE_EXPORTED_YAML.replace('name: echonote', 'name: echonote-prod');
+  const result = transformServiceManifest({
+    inputYamlContent: prodYaml,
+    imageDigest: TARGET_DIGEST,
+    serviceName: 'echonote-prod',
+    servingRevision: 'echonote-prod-00001-xyz',
+    ordinaryEnvOverrides: { RAZORPAY_KEY_ID: 'rzp_live_testdummykey123' },
+  });
+
+  assert.strictEqual(result.ordinaryVarCount, 9);
+  assert.strictEqual(result.secretVarCount, 6);
+  const doc = YAML.parse(result.yaml);
+  const env = doc.spec.template.spec.containers[0].env;
+  assert.strictEqual(env.length, 15);
+  const secretEntries = env.filter((e: any) => e.valueFrom?.secretKeyRef);
+  assert.strictEqual(secretEntries.length, 6);
+  const ordinaryEntries = env.filter((e: any) => e.value !== undefined);
+  assert.strictEqual(ordinaryEntries.length, 9);
+});
+
+// Test 32: echonote-prod validates service account and immutable image digest
+runTest('echonote-prod validates service account and immutable image digest', () => {
+  const prodYaml = SAMPLE_EXPORTED_YAML.replace('name: echonote', 'name: echonote-prod');
+  const result = transformServiceManifest({
+    inputYamlContent: prodYaml,
+    imageDigest: TARGET_DIGEST,
+    serviceName: 'echonote-prod',
+    servingRevision: 'echonote-prod-00001-xyz',
+    ordinaryEnvOverrides: { RAZORPAY_KEY_ID: 'rzp_live_testdummykey123' },
+  });
+
+  assert.strictEqual(result.serviceAccount, '200551109142-compute@developer.gserviceaccount.com');
+  assert.strictEqual(result.imageUri, `us-west1-docker.pkg.dev/echonote-2509/echonote/echonote@${TARGET_DIGEST}`);
+});
+
+// Test 33: Rejects unsupported service names
+runTest('Rejects unsupported service names', () => {
+  assert.throws(
+    () => {
+      transformServiceManifest({
+        inputYamlContent: SAMPLE_EXPORTED_YAML,
+        imageDigest: TARGET_DIGEST,
+        serviceName: 'attacker-service',
+        ordinaryEnvOverrides: { RAZORPAY_KEY_ID: 'rzp_live_testdummykey123' },
+      });
+    },
+    /Unsupported service name: "attacker-service"/,
+  );
+});
+
 console.log('======================================================================');
 console.log(`🎉 ALL ${passedCount} STEP 6M-I DECLARATIVE TRANSFORMATION TESTS PASSED!`);
 console.log('======================================================================');

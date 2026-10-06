@@ -48,11 +48,14 @@ export const DEFAULT_ORDINARY_ENV_VARS: Readonly<Record<Exclude<keyof OrdinaryEn
   RAZORPAY_TEAM_YEARLY_PLAN_ID: 'plan_TameI4cjPUzRpn',
 };
 
+export const ALLOWED_SERVICE_NAMES = [EXPECTED_SERVICE_NAME, 'echonote-prod'] as const;
+
 export interface TransformOptions {
   inputYamlContent: string;
   imageDigest: string;
   servingRevision?: string;
   ordinaryEnvOverrides?: OrdinaryEnvVarConfig;
+  serviceName?: string;
 }
 
 export interface TransformResult {
@@ -62,6 +65,7 @@ export interface TransformResult {
   imageUri: string;
   pinnedServingRevision: string;
   serviceAccount: string;
+  serviceName: string;
 }
 
 /**
@@ -74,7 +78,17 @@ export interface TransformResult {
  * - Strips template revision name so Cloud Run generates a fresh revision.
  */
 export function transformServiceManifest(options: TransformOptions): TransformResult {
-  const { inputYamlContent, imageDigest, servingRevision = BASELINE_SERVING_REVISION, ordinaryEnvOverrides = {} } = options;
+  const {
+    inputYamlContent,
+    imageDigest,
+    servingRevision = BASELINE_SERVING_REVISION,
+    ordinaryEnvOverrides = {},
+    serviceName: requestedServiceName = EXPECTED_SERVICE_NAME,
+  } = options;
+
+  if (!ALLOWED_SERVICE_NAMES.includes(requestedServiceName as any)) {
+    throw new Error(`Unsupported service name: "${requestedServiceName}". Supported services are: ${ALLOWED_SERVICE_NAMES.join(', ')}`);
+  }
 
   if (!imageDigest || !/^sha256:[a-f0-9]{64}$/.test(imageDigest)) {
     throw new Error(`Invalid immutable image digest format: "${imageDigest}". Must be sha256:<64 hex characters>.`);
@@ -97,8 +111,13 @@ export function transformServiceManifest(options: TransformOptions): TransformRe
 
   // 1. Validate Service metadata
   const serviceName = doc.metadata?.name;
-  if (serviceName !== EXPECTED_SERVICE_NAME) {
-    throw new Error(`Service name mismatch: expected "${EXPECTED_SERVICE_NAME}", got "${serviceName}"`);
+  if (serviceName !== requestedServiceName) {
+    throw new Error(`Service name mismatch: expected "${requestedServiceName}", got "${serviceName}"`);
+  }
+
+  // Strip stale run.googleapis.com/sources annotations if present
+  if (doc.metadata?.annotations) {
+    delete doc.metadata.annotations['run.googleapis.com/sources'];
   }
 
   const namespace = doc.metadata?.namespace;
@@ -132,9 +151,12 @@ export function transformServiceManifest(options: TransformOptions): TransformRe
 
   const container = containers[0];
 
-  // 3. Strip previous revision name from template metadata so Cloud Run creates a new revision
+  // 3. Strip previous revision name and stale source annotations from template metadata
   if (doc.spec.template.metadata) {
     delete doc.spec.template.metadata.name;
+    if (doc.spec.template.metadata.annotations) {
+      delete doc.spec.template.metadata.annotations['run.googleapis.com/sources'];
+    }
   }
 
   // 4. Update container image to pinned immutable digest
@@ -274,6 +296,7 @@ export function transformServiceManifest(options: TransformOptions): TransformRe
     imageUri: expectedImageUri,
     pinnedServingRevision: servingRevision,
     serviceAccount,
+    serviceName: requestedServiceName,
   };
 }
 
@@ -285,6 +308,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.met
     let outputYamlPath = '';
     let imageDigest = '';
     let servingRevision = BASELINE_SERVING_REVISION;
+    let serviceName = EXPECTED_SERVICE_NAME;
 
     for (const arg of args) {
       if (arg.startsWith('--input=')) {
@@ -295,11 +319,13 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.met
         imageDigest = arg.substring('--digest='.length);
       } else if (arg.startsWith('--serving-revision=')) {
         servingRevision = arg.substring('--serving-revision='.length);
+      } else if (arg.startsWith('--service-name=')) {
+        serviceName = arg.substring('--service-name='.length);
       }
     }
 
     if (!inputYamlPath || !outputYamlPath || !imageDigest) {
-      console.error('Usage: tsx scripts/prepare-declarative-service.ts --input=<service.yaml> --output=<desired.yaml> --digest=<sha256:...> [--serving-revision=<rev>]');
+      console.error('Usage: tsx scripts/prepare-declarative-service.ts --input=<service.yaml> --output=<desired.yaml> --digest=<sha256:...> [--serving-revision=<rev>] [--service-name=<name>]');
       process.exit(1);
     }
 
@@ -308,6 +334,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.met
       inputYamlContent: inputContent,
       imageDigest,
       servingRevision,
+      serviceName,
       ordinaryEnvOverrides: {
         RAZORPAY_KEY_ID: process.env.RAZORPAY_KEY_ID,
         RAZORPAY_PRO_MONTHLY_PLAN_ID: process.env.RAZORPAY_PRO_MONTHLY_PLAN_ID,
@@ -321,6 +348,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.met
     fs.writeFileSync(outputYamlPath, result.yaml, { mode: 0o600, encoding: 'utf8' });
 
     console.log('✅ Declarative Cloud Run Service Specification generated successfully:');
+    console.log(`   Service Name:             ${result.serviceName}`);
     console.log(`   Service Account:          ${result.serviceAccount}`);
     console.log(`   Immutable Image URI:      ${result.imageUri}`);
     console.log(`   Ordinary Variables:       ${result.ordinaryVarCount} configured`);
