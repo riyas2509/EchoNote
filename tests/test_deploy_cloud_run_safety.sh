@@ -17,6 +17,10 @@ chmod +x "$DEPLOY_SCRIPT"
 PASSED_COUNT=0
 FAILED_COUNT=0
 
+# Test-only non-secret value required by the production deployment guard.
+# This is never used as a real Razorpay credential.
+export RAZORPAY_KEY_ID="rzp_test_dummy"
+
 # Create sandbox test directory for mock binaries
 TEST_SANDBOX="$(mktemp -d)"
 trap 'rm -rf "$TEST_SANDBOX"' EXIT
@@ -242,7 +246,8 @@ echo "======================================================================"
 
 # Default mock binaries to successful states
 setup_mock_npm 0 0
-setup_mock_git "a1b2c3d4e5f6"
+MOCK_GIT_SHA="a1b2c3d4e5f6"
+setup_mock_git "$MOCK_GIT_SHA"
 setup_mock_docker 0 0
 setup_mock_gcloud "echonote-2509"
 
@@ -579,7 +584,7 @@ assert_test "Fix B.1A Inv 6: Artifact Registry image repository is hard-locked" 
   "0" "us-west1-docker.pkg.dev/echonote-2509/echonote/echonote" "$EXIT_CODE" "$OUT"
 
 # Invariant 7: image tag uses git SHA
-EXPECTED_GIT_SHA="$(git rev-parse --short=12 HEAD)"
+EXPECTED_GIT_SHA="$MOCK_GIT_SHA"
 assert_test "Fix B.1A Inv 7: Image tag resolves to git SHA in docker build & push" \
   "0" "us-west1-docker.pkg.dev/echonote-2509/echonote/echonote:${EXPECTED_GIT_SHA}" "$EXIT_CODE" "$OUT"
 

@@ -18,6 +18,10 @@ chmod +x "$MIGRATE_SCRIPT" "$DEPLOY_SCRIPT"
 PASSED_COUNT=0
 FAILED_COUNT=0
 
+# Test-only non-secret value required by the production deployment guard.
+# This is never used as a real Razorpay credential.
+export RAZORPAY_KEY_ID="rzp_test_dummy"
+
 TEST_SANDBOX="$(mktemp -d)"
 trap 'rm -rf "$TEST_SANDBOX"' EXIT
 

@@ -187,8 +187,8 @@ runTest('Converts all 6 sensitive variables to Secret Manager references (valueF
   }
 });
 
-// Test 6: Exactly 8 ordinary variables with correct values
-runTest('All 8 ordinary variables are present with correct literal values', () => {
+// Test 6: Exactly 9 ordinary variables with correct values
+runTest('All 9 ordinary variables are present with correct literal values', () => {
   const result = transformServiceManifest({
     inputYamlContent: SAMPLE_EXPORTED_YAML,
     imageDigest: TARGET_DIGEST,
@@ -197,6 +197,7 @@ runTest('All 8 ordinary variables are present with correct literal values', () =
   const parsed = YAML.parse(result.yaml);
   const envList: any[] = parsed.spec.template.spec.containers[0].env;
 
+  assert.strictEqual(envList.find(e => e.name === 'RAZORPAY_KEY_ID')?.value, '');
   assert.strictEqual(envList.find(e => e.name === 'RAZORPAY_MODE')?.value, 'live');
   assert.strictEqual(envList.find(e => e.name === 'NODE_ENV')?.value, 'production');
   assert.strictEqual(envList.find(e => e.name === 'APP_URL')?.value, 'https://echonote-25.ai.studio');
@@ -207,8 +208,8 @@ runTest('All 8 ordinary variables are present with correct literal values', () =
   assert.strictEqual(envList.find(e => e.name === 'RAZORPAY_TEAM_YEARLY_PLAN_ID')?.value, 'plan_TameI4cjPUzRpn');
 });
 
-// Test 7: Total variable count is exactly 14, no duplicates, zero overlap
-runTest('Total environment variable count is 14 with zero duplicates and zero overlap', () => {
+// Test 7: Total variable count is exactly 15, no duplicates, zero overlap
+runTest('Total environment variable count is 15 with zero duplicates and zero overlap', () => {
   const result = transformServiceManifest({
     inputYamlContent: SAMPLE_EXPORTED_YAML,
     imageDigest: TARGET_DIGEST,
@@ -217,10 +218,10 @@ runTest('Total environment variable count is 14 with zero duplicates and zero ov
   const parsed = YAML.parse(result.yaml);
   const envList: any[] = parsed.spec.template.spec.containers[0].env;
 
-  assert.strictEqual(envList.length, 14);
+  assert.strictEqual(envList.length, 15);
   const names = envList.map(e => e.name);
   const uniqueNames = new Set(names);
-  assert.strictEqual(uniqueNames.size, 14, 'Duplicate environment variable names detected');
+  assert.strictEqual(uniqueNames.size, 15, 'Duplicate environment variable names detected');
 });
 
 // Test 8: Traffic is 100% pinned strictly to serving revision (0% to new revision)

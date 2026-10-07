@@ -6,6 +6,7 @@ import YAML from 'yaml';
 export const EXPECTED_PROJECT_ID = 'echonote-2509';
 export const EXPECTED_REGION = 'us-west1';
 export const EXPECTED_SERVICE_NAME = 'echonote';
+export const ALLOWED_SERVICE_NAMES = ['echonote', 'echonote-prod'] as const;
 export const EXPECTED_SERVICE_ACCOUNT = '200551109142-compute@developer.gserviceaccount.com';
 export const EXPECTED_ARTIFACT_REGISTRY = 'us-west1-docker.pkg.dev/echonote-2509/echonote/echonote';
 export const BASELINE_SERVING_REVISION = 'echonote-00009-w5m';
@@ -54,6 +55,7 @@ export interface TransformOptions {
   imageDigest: string;
   servingRevision?: string;
   ordinaryEnvOverrides?: OrdinaryEnvVarConfig;
+  serviceName?: string;
 }
 
 export interface TransformResult {
@@ -63,19 +65,34 @@ export interface TransformResult {
   imageUri: string;
   pinnedServingRevision: string;
   serviceAccount: string;
+  serviceName: string;
 }
 
 /**
  * Validates and transforms a Cloud Run Knative Service manifest
  * into an atomic, declarative desired-state manifest:
  * - Converts the 6 sensitive variables from literal to Secret Manager references.
- * - Enforces exactly 8 ordinary variables with zero overlap.
+ * - Enforces exactly 9 ordinary variables with zero overlap.
  * - Pins 100% traffic strictly to the existing serving revision.
  * - Preserves all container resources, ports, annotations, and service account.
  * - Strips template revision name so Cloud Run generates a fresh revision.
  */
 export function transformServiceManifest(options: TransformOptions): TransformResult {
-  const { inputYamlContent, imageDigest, servingRevision = BASELINE_SERVING_REVISION, ordinaryEnvOverrides = {} } = options;
+  const {
+    inputYamlContent,
+    imageDigest,
+    servingRevision = BASELINE_SERVING_REVISION,
+    ordinaryEnvOverrides = {},
+    serviceName,
+  } = options;
+
+  const requestedServiceName = serviceName ?? EXPECTED_SERVICE_NAME;
+
+  if (!ALLOWED_SERVICE_NAMES.includes(requestedServiceName as any)) {
+    throw new Error(
+      `Unsupported service name: "${requestedServiceName}". Supported services are: ${ALLOWED_SERVICE_NAMES.join(', ')}`
+    );
+  }
 
   if (!imageDigest || !/^sha256:[a-f0-9]{64}$/.test(imageDigest)) {
     throw new Error(`Invalid immutable image digest format: "${imageDigest}". Must be sha256:<64 hex characters>.`);
@@ -97,9 +114,11 @@ export function transformServiceManifest(options: TransformOptions): TransformRe
   }
 
   // 1. Validate Service metadata
-  const serviceName = doc.metadata?.name;
-  if (serviceName !== EXPECTED_SERVICE_NAME) {
-    throw new Error(`Service name mismatch: expected "${EXPECTED_SERVICE_NAME}", got "${serviceName}"`);
+  const actualName = doc.metadata?.name;
+  if (actualName !== requestedServiceName) {
+    throw new Error(
+      `Service name mismatch: expected "${requestedServiceName}", got "${actualName}"`
+    );
   }
 
   const namespace = doc.metadata?.namespace;
@@ -254,6 +273,7 @@ export function transformServiceManifest(options: TransformOptions): TransformRe
     imageUri: expectedImageUri,
     pinnedServingRevision: servingRevision,
     serviceAccount,
+    serviceName: requestedServiceName,
   };
 }
 
@@ -265,6 +285,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.met
     let outputYamlPath = '';
     let imageDigest = '';
     let servingRevision = BASELINE_SERVING_REVISION;
+    let serviceName = EXPECTED_SERVICE_NAME;
 
     for (const arg of args) {
       if (arg.startsWith('--input=')) {
@@ -275,11 +296,13 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.met
         imageDigest = arg.substring('--digest='.length);
       } else if (arg.startsWith('--serving-revision=')) {
         servingRevision = arg.substring('--serving-revision='.length);
+      } else if (arg.startsWith('--service-name=')) {
+        serviceName = arg.substring('--service-name='.length);
       }
     }
 
     if (!inputYamlPath || !outputYamlPath || !imageDigest) {
-      console.error('Usage: tsx scripts/prepare-declarative-service.ts --input=<service.yaml> --output=<desired.yaml> --digest=<sha256:...> [--serving-revision=<rev>]');
+      console.error('Usage: tsx scripts/prepare-declarative-service.ts --input=<service.yaml> --output=<desired.yaml> --digest=<sha256:...> [--serving-revision=<rev>] [--service-name=<echonote|echonote-prod>]');
       process.exit(1);
     }
 
@@ -288,6 +311,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.met
       inputYamlContent: inputContent,
       imageDigest,
       servingRevision,
+      serviceName,
       ordinaryEnvOverrides: {
         RAZORPAY_PRO_MONTHLY_PLAN_ID: process.env.RAZORPAY_PRO_MONTHLY_PLAN_ID,
         RAZORPAY_PRO_YEARLY_PLAN_ID: process.env.RAZORPAY_PRO_YEARLY_PLAN_ID,
