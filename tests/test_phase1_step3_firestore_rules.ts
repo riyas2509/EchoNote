@@ -288,15 +288,15 @@ export class FirestoreRulesEngine {
         if (incomingData?.orgRole || incomingData?.organizationId || incomingData?.orgId) {
           return { allowed: false, reason: "Cannot self-assign orgRole or organizationId" };
         }
-        if (incomingData?.plan && incomingData.plan !== 'free') {
-          return { allowed: false, reason: "Cannot self-assign paid plan" };
+        if (incomingData?.mfaEnabled !== undefined || incomingData?.mfaEnrolledAt !== undefined) {
+          return { allowed: false, reason: "Cannot self-assign mfaEnabled or mfaEnrolledAt" };
         }
         return { allowed: true, reason: "Profile creation allowed with safe fields" };
       }
       if (operation === 'update') {
         if (context.auth!.uid !== docId && !isAdmin) return { allowed: false, reason: "Cannot update other user profile" };
         if (!isAdmin) {
-          const sensitiveKeys = ['role', 'platform_admin', 'claims', 'monthlyMinuteLimit', 'monthlyThinkingLimit', 'plan', 'organizationId', 'orgId', 'orgRole', 'subscriptionId', 'customerId', 'billingStatus'];
+          const sensitiveKeys = ['role', 'platform_admin', 'claims', 'monthlyMinuteLimit', 'monthlyThinkingLimit', 'plan', 'organizationId', 'orgId', 'orgRole', 'subscriptionId', 'customerId', 'billingStatus', 'mfaEnabled', 'mfaEnrolledAt'];
           for (const key of sensitiveKeys) {
             if (incomingData && existingData && incomingData[key] !== existingData[key]) {
               return { allowed: false, reason: `Cannot modify privileged user field ${key}` };

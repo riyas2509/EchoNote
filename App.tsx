@@ -568,7 +568,7 @@ const App: React.FC = () => {
 
   // Real-time Organization, Teams, and Role tracking
   useEffect(() => {
-    if (authStatus !== AuthStatus.LOGGED_IN || !user) {
+    if (authStatus !== AuthStatus.LOGGED_IN || !user || !user.email) {
       setCurrentOrg(null);
       setCurrentOrgMember(null);
       setOrgTeams([]);
@@ -602,7 +602,7 @@ const App: React.FC = () => {
         setUserOrgRole('owner');
       }
     }, (error) => {
-      handleFirestoreError(error, OperationType.LIST, 'organizations', false);
+      console.warn("⚠️ Organizations listener notice:", error);
     });
 
     const unsubscribeMember = onSnapshot(memberQuery, (snapshot) => {
@@ -625,7 +625,7 @@ const App: React.FC = () => {
               }
             }
           }, (error) => {
-            handleFirestoreError(error, OperationType.GET, 'organizations', false);
+            console.warn("⚠️ Organization details notice:", error);
           });
         }
 
@@ -648,7 +648,7 @@ const App: React.FC = () => {
         }
       }
     }, (error) => {
-      handleFirestoreError(error, OperationType.LIST, 'orgMembers', false);
+      console.warn("⚠️ OrgMembers listener notice:", error);
     });
 
     // 3. Listen to teams when organization ID is known
@@ -1808,6 +1808,9 @@ const App: React.FC = () => {
             showSearch={currentTab === AppWorkflow.HISTORY}
             selectedProjectName={selectedGroupFilter}
             onToggleSidebar={() => setIsSidebarOpen(!isSidebarOpen)}
+            notifications={notifications}
+            onMarkNotificationRead={markNotificationRead}
+            onClearNotifications={clearNotifications}
           />
           
           <div className="w-full max-w-screen-xl mx-auto px-4 py-6 md:px-8 md:py-12 lg:px-16 lg:py-20 pb-48">

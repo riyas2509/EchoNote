@@ -244,8 +244,52 @@ export async function acceptProjectInvitation(
       };
     }
 
+    // Verify project still exists
+    try {
+      const projSnap = await db.collection("projects").doc(initialInviteData.projectId).get();
+      if (!projSnap.exists && isProductionEnvironment()) {
+        return {
+          status: 404,
+          body: {
+            error: "NotFound",
+            message: "The project for this invitation no longer exists."
+          }
+        };
+      }
+    } catch (projErr) {
+      // Non-blocking query failure fallback for dev/emulator environments
+    }
+
     const memberId = `${userId}_${initialInviteData.projectId}`;
     const memberDocRef = db.collection("projectMembers").doc(memberId);
+
+    // Early idempotent check: If already a project member
+    try {
+      const existingMemberSnap = await memberDocRef.get();
+      if (existingMemberSnap.exists) {
+        if (targetInviteRef && currentStatus === "pending") {
+          try {
+            await targetInviteRef.update({
+              status: "accepted",
+              acceptedAt: FieldValue.serverTimestamp(),
+              acceptedBy: userId,
+              acceptedUserEmail: userEmail
+            });
+          } catch (e) {}
+        }
+        return {
+          status: 200,
+          body: {
+            success: true,
+            alreadyMember: true,
+            message: "You are already a member of this project.",
+            projectId: initialInviteData.projectId,
+            projectName: initialInviteData.projectName || "EchoNote Workspace",
+            role: initialInviteData.role || "viewer"
+          }
+        };
+      }
+    } catch (existingMemberErr) {}
 
     // 5. Idempotent check for already-accepted invitations
     if (currentStatus === "accepted") {
@@ -395,6 +439,22 @@ export async function acceptProjectInvitation(
       });
     } catch (e: any) {
       console.warn("⚠️ Server-side projectActivities add note:", e?.message || e);
+    }
+
+    const inviteOrgId = initialInviteData.orgId || initialInviteData.organizationId;
+    if (inviteOrgId) {
+      try {
+        await db.collection("auditLogs").add({
+          organizationId: inviteOrgId,
+          actorUserId: userId,
+          actorEmail: userEmail,
+          targetUserEmail: userEmail,
+          newRole: initialInviteData.role || "viewer",
+          action: "PROJECT_INVITATION_ACCEPTED",
+          timestamp: new Date().toISOString(),
+          details: `Accepted project invitation for project ${initialInviteData.projectId}`
+        });
+      } catch (auditErr) {}
     }
 
     if (appUrl) {

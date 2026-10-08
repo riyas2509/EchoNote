@@ -39,10 +39,6 @@ const TextToAudioView: React.FC<TextToAudioViewProps> = ({
     if (project.ownerEmail === userProfile?.email) return true;
 
     const member = project.members?.find(m => m.email === userProfile?.email);
-    
-    if (userOrgRole === 'team_manager') {
-      return true;
-    }
 
     if (!member) return false;
 
@@ -51,7 +47,7 @@ const TextToAudioView: React.FC<TextToAudioViewProps> = ({
     }
 
     if (action === 'edit') {
-      return member.role === 'owner' || member.role === 'editor';
+      return member.role === 'owner' || member.role === 'admin' || member.role === 'editor';
     }
 
     return false;

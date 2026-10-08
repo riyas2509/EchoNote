@@ -72,7 +72,8 @@ import {
   ProjectTask,
   SubTask,
   TaskActivity,
-  SmartRecap
+  SmartRecap,
+  normalizeProjectRole
 } from '../types';
 import { Toaster, toast } from 'sonner';
 import { SummaryStatsWidget } from './SummaryStatsWidget';
@@ -219,12 +220,11 @@ export const CollaborationDashboard: React.FC<CollaborationDashboardProps> = ({
   // Determine User Role inside Active Project
   const isOrgOwner = userOrgRole === 'owner';
   const isOrgAdmin = userOrgRole === 'org_admin';
-  const isTeamManager = userOrgRole === 'team_manager';
   const isViewer = userOrgRole === 'viewer';
 
   const isOwner = isOrgOwner || isOrgAdmin || activeProject.userId === userProfile?.uid || activeProject.ownerEmail === userProfile?.email;
   const currentMemberRecord = members.find(m => m.email === userProfile?.email);
-  const userRole: CollaborationRole = isOwner ? 'owner' : (isViewer ? 'viewer' : (isTeamManager ? 'editor' : (currentMemberRecord?.role || 'editor')));
+  const userRole: CollaborationRole = isOwner ? 'owner' : (currentMemberRecord?.role ? normalizeProjectRole(currentMemberRecord.role) : (isViewer ? 'viewer' : 'viewer'));
 
   // Track user active state periodically
   useEffect(() => {
@@ -1028,9 +1028,6 @@ export const CollaborationDashboard: React.FC<CollaborationDashboardProps> = ({
 
     // Add files uploads as events
     projectAudioRecords.forEach(rec => {
-      // If Member, filter out others' files
-      if (userRole === 'editor' && rec.userId !== userProfile?.uid) return;
-
       timeline.push({
         id: `synth_upload_${rec.id}`,
         projectId: activeProject.id,
@@ -1059,9 +1056,6 @@ export const CollaborationDashboard: React.FC<CollaborationDashboardProps> = ({
 
     // Add invitations accepted / pending as timeline events
     invites.forEach(inv => {
-      // If Member, filter out others' invite events
-      if (userRole === 'editor' && inv.invitedBy !== userProfile?.email && inv.email !== userProfile?.email) return;
-
       timeline.push({
         id: `synth_invite_${inv.id}`,
         projectId: activeProject.id,
@@ -1640,11 +1634,17 @@ export const CollaborationDashboard: React.FC<CollaborationDashboardProps> = ({
             {/* Role Badge */}
             <div className={`flex items-center gap-1.5 px-3 py-2.5 rounded-xl border font-bold text-xs uppercase tracking-wider ${
               userRole === 'owner' ? 'bg-echo-accent/10 border-echo-accent/30 text-[#1B2A4E]' :
-              userRole === 'editor' ? 'bg-blue-50 border-blue-100 text-blue-700' :
+              userRole === 'admin' ? 'bg-blue-50 border-blue-100 text-blue-700' :
+              userRole === 'commenter' ? 'bg-amber-50 border-amber-200 text-amber-700' :
               'bg-slate-100 border-slate-200 text-slate-600'
             }`}>
               <Shield className="w-3.5 h-3.5" />
-              <span>{userRole === 'owner' ? 'Project Owner' : userRole === 'editor' ? 'Member (Editor)' : 'Viewer (Read-only)'}</span>
+              <span>
+                {userRole === 'owner' ? 'Project Owner' :
+                 userRole === 'admin' ? 'Project Admin' :
+                 userRole === 'commenter' ? 'Commenter' :
+                 'Viewer (Read-only)'}
+              </span>
             </div>
           </div>
 
@@ -1838,7 +1838,7 @@ export const CollaborationDashboard: React.FC<CollaborationDashboardProps> = ({
                   onSelect={() => {}}
                   tasksCount={getProjectTaskCounts(activeProject)}
                   recentActivities={getProjectRecentActivities(activeProject)}
-                  userRole={userRole === 'owner' ? 'Owner' : userRole === 'editor' ? 'Editor' : 'Viewer'}
+                  userRole={userRole === 'owner' ? 'Owner' : userRole === 'admin' ? 'Admin' : userRole === 'commenter' ? 'Commenter' : 'Viewer'}
                   recordingsCount={activeRecordingsCount}
                   membersCount={allProjectMembers.length}
                 />
@@ -3002,10 +3002,11 @@ export const CollaborationDashboard: React.FC<CollaborationDashboardProps> = ({
                               </p>
                               <span className={`px-2 py-0.5 text-[9px] font-black uppercase rounded tracking-wider ${
                                 member.role === 'owner' ? 'bg-brand-secondary text-slate-800 border border-brand-primary/20' :
-                                member.role === 'editor' ? 'bg-blue-100 text-blue-800' :
+                                member.role === 'admin' || member.role === 'editor' ? 'bg-blue-100 text-blue-800' :
+                                member.role === 'commenter' ? 'bg-amber-100 text-amber-800' :
                                 'bg-slate-100 text-slate-700'
                               }`}>
-                                {member.role === 'editor' ? 'Member' : member.role}
+                                {member.role === 'editor' ? 'Admin' : member.role === 'admin' ? 'Project Admin' : member.role}
                               </span>
                             </div>
                             <p className="text-xs text-slate-500 font-medium">{member.email}</p>
@@ -3117,9 +3118,8 @@ export const CollaborationDashboard: React.FC<CollaborationDashboardProps> = ({
                           onChange={(e) => setInviteRole(e.target.value as CollaborationRole)}
                           className="w-full appearance-none bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-xs font-black text-slate-700 outline-none hover:border-slate-300 transition-all cursor-pointer uppercase tracking-widest"
                         >
-                          <option value="viewer">Viewer (Read-only)</option>
+                          <option value="viewer">Viewer</option>
                           <option value="commenter">Commenter</option>
-                          <option value="editor">Member (Editor)</option>
                           <option value="admin">Project Admin</option>
                         </select>
                         <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 w-4 h-4 pointer-events-none" />

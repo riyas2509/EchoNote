@@ -53,7 +53,7 @@ service cloud.firestore {
         (request.auth.token.orgId == orgId && request.auth.token.orgRole == 'owner') ||
         (exists(/databases/$(database)/documents/organizations/$(orgId)) && 
          (get(/databases/$(database)/documents/organizations/$(orgId)).data.ownerId == request.auth.uid ||
-          (request.auth.token.email_verified == true && get(/databases/$(database)/documents/organizations/$(orgId)).data.ownerEmail == request.auth.token.email)))
+          get(/databases/$(database)/documents/organizations/$(orgId)).data.ownerEmail == request.auth.token.email))
       );
     }
 
@@ -276,9 +276,12 @@ service cloud.firestore {
       allow create: if isOwner(userId) && isValidUserProfile(request.resource.data) &&
         (!('role' in request.resource.data) || request.resource.data.role in ['user', 'member']) &&
         (!('platform_admin' in request.resource.data) || request.resource.data.platform_admin != true) &&
+        (!('monthlyMinuteLimit' in request.resource.data) || request.resource.data.monthlyMinuteLimit <= 60) &&
+        (!('monthlyThinkingLimit' in request.resource.data) || request.resource.data.monthlyThinkingLimit <= 10) &&
         !request.resource.data.keys().hasAny([
-          'claims', 'monthlyMinuteLimit', 'monthlyThinkingLimit',
-          'organizationId', 'orgId', 'orgRole', 'subscriptionId', 'customerId', 'billingStatus'
+          'claims',
+          'organizationId', 'orgId', 'orgRole', 'subscriptionId', 'customerId', 'billingStatus',
+          'mfaEnabled', 'mfaEnrolledAt'
         ]) &&
         (!('plan' in request.resource.data) || request.resource.data.plan == 'free');
       // Users cannot modify role, platform_admin, orgRole, or authoritative billing/plan fields (handled strictly by server Admin SDK)
@@ -286,7 +289,7 @@ service cloud.firestore {
         (isAdmin() || !request.resource.data.diff(resource.data).affectedKeys().hasAny([
           'role', 'platform_admin', 'claims', 'monthlyMinuteLimit', 'monthlyThinkingLimit',
           'plan', 'organizationId', 'orgId', 'orgRole', 'subscriptionId', 'customerId',
-          'billingStatus', 'isOwner', 'paymentMethods'
+          'billingStatus', 'isOwner', 'paymentMethods', 'mfaEnabled', 'mfaEnrolledAt'
         ]));
       allow delete: if isAdmin();
     }
@@ -766,17 +769,23 @@ service cloud.firestore {
 
     // Organizations - sensitive billing, subscription, and security fields protected from client writes
     match /organizations/{orgId} {
-      allow read: if isAuthenticated() && (
+      allow get: if isAuthenticated() && (
         isAdmin() ||
         isOrgMember(orgId) || 
         isOrgOwner(orgId) || 
         resource.data.ownerId == request.auth.uid || 
-        (request.auth.token.email_verified == true && resource.data.ownerEmail == request.auth.token.email)
+        resource.data.ownerEmail == request.auth.token.email
+      );
+      allow list: if isAuthenticated() && (
+        isAdmin() ||
+        resource.data.ownerId == request.auth.uid || 
+        resource.data.ownerEmail == request.auth.token.email ||
+        (request.auth.token.orgId != null && resource.id == request.auth.token.orgId)
       );
       allow create: if isAuthenticated() && (
         isAdmin() ||
         request.resource.data.ownerId == request.auth.uid || 
-        (request.auth.token.email_verified == true && request.resource.data.ownerEmail == request.auth.token.email)
+        request.resource.data.ownerEmail == request.auth.token.email
       ) && !request.resource.data.keys().hasAny([
         'plan', 'billingStatus', 'subscriptionId', 'seatLimit', 'tier', 'subscription'
       ]);
@@ -814,7 +823,14 @@ service cloud.firestore {
 
     // Teams
     match /teams/{teamId} {
-      allow read: if isAuthenticated() && (isOrgMember(resource.data.orgId) || isOrgOwner(resource.data.orgId) || isAdmin());
+      allow get: if isAuthenticated() && (isOrgMember(resource.data.orgId) || isOrgOwner(resource.data.orgId) || isAdmin());
+      allow list: if isAuthenticated() && (
+        isAdmin() ||
+        (request.auth.token.orgId != null && resource.data.orgId == request.auth.token.orgId) ||
+        resource.data.userId == request.auth.uid ||
+        (exists(/databases/$(database)/documents/organizations/$(resource.data.orgId)) &&
+         get(/databases/$(database)/documents/organizations/$(resource.data.orgId)).data.ownerEmail == request.auth.token.email)
+      );
       allow create, update, delete: if isAuthenticated() && (
         isAdmin() ||
         isOrgManager(request.resource.data.orgId) || 
@@ -824,7 +840,13 @@ service cloud.firestore {
 
     // Departments
     match /departments/{deptId} {
-      allow read: if isAuthenticated() && (isOrgMember(resource.data.orgId) || isOrgOwner(resource.data.orgId) || isAdmin());
+      allow get: if isAuthenticated() && (isOrgMember(resource.data.orgId) || isOrgOwner(resource.data.orgId) || isAdmin());
+      allow list: if isAuthenticated() && (
+        isAdmin() ||
+        (request.auth.token.orgId != null && resource.data.orgId == request.auth.token.orgId) ||
+        (exists(/databases/$(database)/documents/organizations/$(resource.data.orgId)) &&
+         get(/databases/$(database)/documents/organizations/$(resource.data.orgId)).data.ownerEmail == request.auth.token.email)
+      );
       allow create, update, delete: if isAuthenticated() && (
         isAdmin() ||
         isOrgAdmin(request.resource.data.orgId) || 
@@ -834,12 +856,18 @@ service cloud.firestore {
 
     // Org Members (authoritatively managed by server-side Admin SDK)
     match /orgMembers/{memberId} {
-      allow read: if isAuthenticated() && (
+      allow get: if isAuthenticated() && (
         isAdmin() ||
-        isOrgMember(resource.data.orgId) || 
-        isOrgOwner(resource.data.orgId) || 
         resource.data.userId == request.auth.uid || 
-        (request.auth.token.email_verified == true && resource.data.email == request.auth.token.email)
+        resource.data.email == request.auth.token.email ||
+        isOrgMember(resource.data.orgId) || 
+        isOrgOwner(resource.data.orgId)
+      );
+      allow list: if isAuthenticated() && (
+        isAdmin() ||
+        resource.data.userId == request.auth.uid || 
+        resource.data.email == request.auth.token.email ||
+        (request.auth.token.orgId != null && resource.data.orgId == request.auth.token.orgId)
       );
       allow write: if false; // Role modifications and memberships are issued authoritatively via backend
     }
@@ -852,10 +880,15 @@ service cloud.firestore {
 
     // Org Invitations (authoritatively managed by server-side Admin SDK)
     match /orgInvitations/{inviteId} {
-      allow read: if isAuthenticated() && (
+      allow get: if isAuthenticated() && (
         isAdmin() ||
         isOrgAdmin(resource.data.orgId) || 
-        (request.auth.token.email_verified == true && resource.data.email == request.auth.token.email)
+        resource.data.email == request.auth.token.email
+      );
+      allow list: if isAuthenticated() && (
+        isAdmin() ||
+        (request.auth.token.orgId != null && resource.data.orgId == request.auth.token.orgId) ||
+        resource.data.email == request.auth.token.email
       );
       allow write: if false; // Invitations are handled authoritatively by backend
     }

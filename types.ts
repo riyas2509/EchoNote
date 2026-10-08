@@ -296,10 +296,19 @@ export interface OrgAuditEvent {
     | 'IDENTITY_MAPPING_DELETED'
     | 'PROJECT_DELETED'
     | 'PROJECT_OWNERSHIP_TRANSFERRED'
+    | 'PROJECT_INVITATION_CREATED'
+    | 'PROJECT_INVITATION_ACCEPTED'
+    | 'PROJECT_INVITATION_REVOKED'
+    | 'MFA_ENROLLMENT_STARTED'
+    | 'MFA_ENABLED'
+    | 'MFA_DISABLED'
+    | 'MFA_CHALLENGE_SUCCESS'
+    | 'MFA_CHALLENGE_FAILURE'
+    | 'MFA_RECOVERY_USED'
     | 'MEMBER_ACCOUNT_CLOSED'
     | 'ORGANIZATION_DELETION_REQUESTED';
   timestamp: string;
-  source: string;
+  source?: string;
   details?: string;
   metadata?: Record<string, any>;
 }
@@ -389,6 +398,8 @@ export interface UserProfile {
   billingCycle?: 'monthly' | 'yearly';
   nextRefreshDate?: string; // ISO string
   lastUsageResetDate?: string; // ISO string
+  mfaEnabled?: boolean;
+  mfaEnrolledAt?: string; // ISO string
 }
 
 export interface Subscription {
@@ -769,7 +780,7 @@ export interface OrgSecuritySettings {
   };
   allowedDomains?: string[] | string;
   enforceMfa?: boolean;
-  mfaRequirement?: 'MFA_DISABLED' | 'MFA_OPTIONAL' | 'MFA_REQUIRED_ADMINS' | 'MFA_REQUIRED_ALL';
+  mfaRequirement?: 'MFA_DISABLED' | 'MFA_OPTIONAL' | 'MFA_REQUIRED_ADMINS' | 'MFA_REQUIRED_ALL' | 'MFA_ENFORCED_ALL';
   sessionTimeoutMinutes?: number;
   enforceSessionTimeout?: boolean;
   twoFactorRequired?: boolean;

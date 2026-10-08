@@ -1007,7 +1007,9 @@ export function sanitizeSsoClaims(claims: any): Record<string, any> {
   const sanitized: Record<string, any> = {};
   const blockedKeys = new Set([
     'role', 'orgrole', 'platform_admin', 'admin', 'owner', 'isowner', 
-    'org_admin', 'super_admin', 'superadmin', 'is_owner', 'ownership'
+    'org_admin', 'super_admin', 'superadmin', 'is_owner', 'ownership',
+    'project_admin', 'project_role', 'permissions', 'subscription', 'plan',
+    'security_policy', 'mfaenabled', 'mfa_enabled'
   ]);
   for (const [k, v] of Object.entries(claims)) {
     if (!blockedKeys.has(k.toLowerCase().trim())) {

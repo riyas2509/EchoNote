@@ -183,7 +183,11 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             monthlyThinkingUsed: 0,
             thinkingTopupBalance: 0
           };
-          await setDoc(userDocRef, newProfile);
+          try {
+            await setDoc(userDocRef, newProfile);
+          } catch (initErr) {
+            console.warn("⚠️ Initial profile creation setDoc notice:", initErr);
+          }
         } else if (userDoc && userDoc.exists()) {
           // SYNC CHECK: If Firestore profile is missing displayName but Firebase Auth has it
           let currentData = userDoc.data() as UserProfile;
@@ -204,17 +208,21 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
               ...migratedFields,
               billingStartDate: migratedFields.subscriptionStartDate,
               lastResetDate: migratedFields.lastUsageResetDate,
-              monthlyMinuteLimit: currentData.monthlyMinuteLimit ?? limits.minutes,
               monthlyMinutesUsed: currentData.monthlyMinutesUsed ?? currentData.minutesUsed ?? 0,
               minuteTopupBalance: currentData.minuteTopupBalance ?? currentData.extraMinutes ?? 0,
-              monthlyThinkingLimit: currentData.monthlyThinkingLimit ?? limits.thinking,
               monthlyThinkingUsed: currentData.monthlyThinkingUsed ?? currentData.thinkingUsed ?? 0,
               thinkingTopupBalance: currentData.thinkingTopupBalance ?? 0
             };
-            await updateDoc(userDocRef, updateObj);
+            try {
+              await updateDoc(userDocRef, updateObj);
+            } catch (migErr) {
+              console.warn("⚠️ Legacy fields client update skipped (handled server-side):", migErr);
+            }
             currentData = {
               ...currentData,
-              ...updateObj
+              ...updateObj,
+              monthlyMinuteLimit: currentData.monthlyMinuteLimit ?? limits.minutes,
+              monthlyThinkingLimit: currentData.monthlyThinkingLimit ?? limits.thinking
             };
           }
 
@@ -222,15 +230,19 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           if (shouldResetUsage(currentData.nextRefreshDate)) {
             console.log("♻️ Billing cycle reset triggered...");
             const advancedNextRefresh = getAdvancedRefreshDate(currentData.nextRefreshDate, currentData.billingCycle, currentData.plan);
-            await updateDoc(userDocRef, {
-              minutesUsed: 0,
-              thinkingUsed: 0,
-              monthlyMinutesUsed: 0,
-              monthlyThinkingUsed: 0,
-              nextRefreshDate: advancedNextRefresh.toISOString(),
-              lastUsageResetDate: currentData.nextRefreshDate,
-              lastResetDate: currentData.nextRefreshDate
-            });
+            try {
+              await updateDoc(userDocRef, {
+                minutesUsed: 0,
+                thinkingUsed: 0,
+                monthlyMinutesUsed: 0,
+                monthlyThinkingUsed: 0,
+                nextRefreshDate: advancedNextRefresh.toISOString(),
+                lastUsageResetDate: currentData.nextRefreshDate,
+                lastResetDate: currentData.nextRefreshDate
+              });
+            } catch (resetErr) {
+              console.warn("⚠️ Billing cycle reset client update skipped:", resetErr);
+            }
             currentData = {
               ...currentData,
               minutesUsed: 0,
@@ -245,9 +257,13 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
           if (!currentData.billingStartDate) {
             console.log("🔄 Initializing billingStartDate for legacy user...");
-            await updateDoc(userDocRef, {
-              billingStartDate: currentData.createdAt || new Date().toISOString()
-            });
+            try {
+              await updateDoc(userDocRef, {
+                billingStartDate: currentData.createdAt || new Date().toISOString()
+              });
+            } catch (bErr) {
+              console.warn("⚠️ billingStartDate client update skipped:", bErr);
+            }
           }
 
           const syncUpdates: any = {};
@@ -262,7 +278,11 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
           if (Object.keys(syncUpdates).length > 0) {
             console.log("🔄 Syncing auth profile fields to Firestore...", syncUpdates);
-            await updateDoc(userDocRef, syncUpdates);
+            try {
+              await updateDoc(userDocRef, syncUpdates);
+            } catch (sErr) {
+              console.warn("⚠️ sync auth profile fields skipped:", sErr);
+            }
           }
         }
 
@@ -285,17 +305,29 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
               };
               const limits = planLimits[(data.plan || "free") as keyof typeof planLimits] || planLimits.free;
 
-              await updateDoc(userDocRef, {
+              const liveUpdateObj = {
                 ...migratedFields,
                 billingStartDate: migratedFields.subscriptionStartDate,
                 lastResetDate: migratedFields.lastUsageResetDate,
-                monthlyMinuteLimit: data.monthlyMinuteLimit ?? limits.minutes,
                 monthlyMinutesUsed: data.monthlyMinutesUsed ?? data.minutesUsed ?? 0,
                 minuteTopupBalance: data.minuteTopupBalance ?? data.extraMinutes ?? 0,
-                monthlyThinkingLimit: data.monthlyThinkingLimit ?? limits.thinking,
                 monthlyThinkingUsed: data.monthlyThinkingUsed ?? data.thinkingUsed ?? 0,
                 thinkingTopupBalance: data.thinkingTopupBalance ?? 0
+              };
+
+              try {
+                await updateDoc(userDocRef, liveUpdateObj);
+              } catch (migErr) {
+                console.warn("⚠️ Live migration client update skipped (handled server-side):", migErr);
+              }
+
+              setProfile({
+                ...data,
+                ...liveUpdateObj,
+                monthlyMinuteLimit: data.monthlyMinuteLimit ?? limits.minutes,
+                monthlyThinkingLimit: data.monthlyThinkingLimit ?? limits.thinking
               });
+              setIsAuthReady(true);
               return;
             }
 
@@ -303,15 +335,19 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             if (shouldResetUsage(data.nextRefreshDate)) {
               console.log("♻️ Live billing cycle reset triggered...");
               const advancedNextRefresh = getAdvancedRefreshDate(data.nextRefreshDate, data.billingCycle, data.plan);
-              await updateDoc(userDocRef, {
-                minutesUsed: 0,
-                thinkingUsed: 0,
-                monthlyMinutesUsed: 0,
-                monthlyThinkingUsed: 0,
-                nextRefreshDate: advancedNextRefresh.toISOString(),
-                lastUsageResetDate: data.nextRefreshDate,
-                lastResetDate: data.nextRefreshDate
-              });
+              try {
+                await updateDoc(userDocRef, {
+                  minutesUsed: 0,
+                  thinkingUsed: 0,
+                  monthlyMinutesUsed: 0,
+                  monthlyThinkingUsed: 0,
+                  nextRefreshDate: advancedNextRefresh.toISOString(),
+                  lastUsageResetDate: data.nextRefreshDate,
+                  lastResetDate: data.nextRefreshDate
+                });
+              } catch (resetErr) {
+                console.warn("⚠️ Billing cycle reset update skipped:", resetErr);
+              }
               return;
             }
 
@@ -322,13 +358,16 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
                 console.log("⚠️ Plan expired, downgrading to free...");
                 const nowStr = new Date().toISOString();
                 const nextRefreshFree = calculateNextRefreshDate(nowStr, 'monthly', 'free', data.createdAt || nowStr);
-                await updateDoc(userDocRef, {
-                  plan: 'free',
-                  billingCycle: 'monthly',
-                  subscriptionStartDate: data.createdAt || nowStr,
-                  nextRefreshDate: nextRefreshFree.toISOString(),
-                  planExpiresAt: nextRefreshFree.toISOString()
-                });
+                try {
+                  await updateDoc(userDocRef, {
+                    billingCycle: 'monthly',
+                    subscriptionStartDate: data.createdAt || nowStr,
+                    nextRefreshDate: nextRefreshFree.toISOString(),
+                    planExpiresAt: nextRefreshFree.toISOString()
+                  });
+                } catch (expErr) {
+                  console.warn("⚠️ Plan expiry update skipped:", expErr);
+                }
                 return;
               }
             }
@@ -339,11 +378,11 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         }, (error) => {
           // Ignore permission errors if user is logging out
           if (auth.currentUser) {
-            console.error('Profile listener error:', error);
+            console.warn('⚠️ Profile listener notice:', error);
           }
         });
       } catch (error) {
-        console.error('Error in profile setup:', error);
+        console.warn('⚠️ Profile setup notice:', error);
         setIsAuthReady(true);
       }
     };

@@ -98,7 +98,15 @@ export {
   getRedirectResult, 
   GoogleAuthProvider, 
   OAuthProvider, 
-  SAMLAuthProvider 
+  SAMLAuthProvider,
+  multiFactor,
+  TotpMultiFactorGenerator,
+  TotpSecret,
+  getMultiFactorResolver,
+  PhoneAuthProvider,
+  PhoneMultiFactorGenerator,
+  EmailAuthProvider,
+  reauthenticateWithCredential
 } from 'firebase/auth';
 export { getFunctions, httpsCallable } from 'firebase/functions';
 export { 

@@ -470,18 +470,13 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
 
     const members = project.members || [];
     const member = members.find(m => m.email === userProfile.email);
-    
-    if (userOrgRole === 'team_manager') {
-      return true;
-    }
-
     if (!member) return false;
 
     if (action === 'delete') {
       return member.role === 'owner';
     }
     if (action === 'edit') {
-      return member.role === 'owner' || member.role === 'editor';
+      return member.role === 'owner' || member.role === 'admin' || member.role === 'editor';
     }
     return false;
   };
@@ -1267,7 +1262,7 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
               {(() => {
                 const isOwner = projectToManage.ownerEmail === userProfile?.email;
                 const member = projectToManage.members?.find(m => m.email === userProfile?.email);
-                const isEditor = member?.role === 'editor';
+                const isEditor = member?.role === 'admin' || member?.role === 'editor';
                 const isDefaultAdmin = userProfile?.email === 'riyamshah2509@gmail.com';
                 const canInvite = isOwner || (usageStats.plan === 'enterprise' && isEditor) || isDefaultAdmin;
 
@@ -1293,8 +1288,7 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
                           >
                             <option value="viewer">Viewer</option>
                             <option value="commenter">Commenter</option>
-                            <option value="editor">Editor</option>
-                            <option value="admin">Admin</option>
+                            <option value="admin">Project Admin</option>
                           </select>
                           <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none text-brand-primary opacity-50">
                             <i className="fa-solid fa-chevron-down text-[10px]"></i>

@@ -22,11 +22,11 @@ interface NavigationProps {
   userProfile?: UserProfile;
   onSignInClick: () => void;
   onAddGroup: (name: string) => void;
-  onOpenSettings: () => void;
-  notifications: AppNotification[];
-  onMarkNotificationRead: (id: string) => void;
-  onClearNotifications: () => void;
+  onOpenSettings?: () => void;
   onOpenUpgrade?: () => void;
+  notifications?: AppNotification[];
+  onMarkNotificationRead?: (id: string) => void;
+  onClearNotifications?: () => void;
   usageStats: UsageStats;
   isCollapsed: boolean;
   setIsCollapsed: (collapsed: boolean) => void;
@@ -46,7 +46,6 @@ const Navigation: React.FC<NavigationProps> = ({
 
   const [editingGroup, setEditingGroup] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState('');
-  const [showNotifications, setShowNotifications] = useState(false);
   const [isModuleAccessCollapsed, setIsModuleAccessCollapsed] = useState(false);
   const [isProjectsCollapsed, setIsProjectsCollapsed] = useState(false);
   
@@ -82,20 +81,6 @@ const Navigation: React.FC<NavigationProps> = ({
     return () => unsubscribe();
   }, [projectToManage]);
 
-  // Click outside to close notifications
-  useEffect(() => {
-    if (!showNotifications) return;
-    const handleClickOutside = (e: MouseEvent) => {
-      const target = e.target as HTMLElement;
-      if (!target.closest('.notification-container')) {
-        setShowNotifications(false);
-      }
-    };
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, [showNotifications]);
-
-  const unreadCount = notifications.filter(n => !n.isRead).length;
 
   const tabs = [
     { id: AppWorkflow.HOME, label: 'Workspace Home', icon: 'fa-house' },
@@ -193,102 +178,15 @@ const Navigation: React.FC<NavigationProps> = ({
             )}
           </Link>
           
-          <div className={`flex items-center gap-2 ${isCollapsed ? 'flex-col' : ''}`}>
-            {/* Notification Bell */}
-            <div className={`relative notification-container ${isCollapsed ? 'flex justify-center' : ''}`}>
-            <button 
-              onClick={() => setShowNotifications(!showNotifications)}
-              className="relative p-2 rounded-md hover:bg-white/10 transition text-white/70 hover:text-white"
-            >
-              <i className="fa-solid fa-bell text-base md:text-lg"></i>
-              {unreadCount > 0 && (
-                <span className="absolute -top-1 -right-1 bg-yellow-400 text-[10px] font-bold text-black px-1.5 rounded-full">
-                  {unreadCount}
-                </span>
-              )}
-            </button>
-
-            <AnimatePresence>
-              {showNotifications && (
-                <motion.div 
-                  initial={{ opacity: 0, scale: 0.95 }}
-                  animate={{ opacity: 1, scale: 1 }}
-                  exit={{ opacity: 0, scale: 0.95 }}
-                  transition={{ duration: 0.2, ease: "easeOut" }}
-                  className={`absolute top-12 w-80 bg-white rounded-xl shadow-lg border border-gray-200 z-50 overflow-hidden ${isCollapsed ? 'left-12' : 'right-0 md:left-0 md:right-auto'}`}
-                >
-                  <div className="flex justify-between items-center px-4 py-3 border-b">
-                    <span className="text-sm font-semibold text-gray-800">
-                      Notifications
-                    </span>
-                    <button 
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onClearNotifications();
-                      }}
-                      className="text-xs text-blue-600 hover:underline"
-                    >
-                      Clear all
-                    </button>
-                  </div>
-                  <div className="max-h-96 overflow-y-auto custom-scrollbar">
-                    {notifications.length === 0 ? (
-                      <div className="text-center py-10 text-gray-500 text-sm">
-                        No new notifications
-                      </div>
-                    ) : (
-                      notifications.slice(0, 8).map(n => (
-                        <div 
-                          key={n.id} 
-                          onClick={() => {
-                            onMarkNotificationRead(n.id);
-                            setShowNotifications(false);
-                          }}
-                          className="flex items-start gap-3 px-4 py-3 hover:bg-gray-50 cursor-pointer border-b border-gray-50 last:border-0"
-                        >
-                          <div className={`p-2 rounded-md shrink-0 ${
-                            n.type === 'error' ? 'bg-red-100 text-red-600' : 
-                            n.type === 'success' ? 'bg-green-100 text-green-600' : 
-                            'bg-blue-100 text-blue-600'
-                          }`}>
-                            <i className={`fa-solid ${
-                              n.type === 'audio' ? 'fa-microphone' : 
-                              n.type === 'text' ? 'fa-keyboard' : 
-                              n.type === 'error' ? 'fa-circle-exclamation' : 
-                              n.type === 'success' ? 'fa-circle-check' : 
-                              'fa-info-circle'
-                            } text-xs`}></i>
-                          </div>
-                          <div className="flex-1">
-                            <p className="text-sm font-medium text-gray-800">
-                              {n.title}
-                            </p>
-                            <p className="text-xs text-gray-500 mt-1">
-                              {n.message}
-                            </p>
-                            <p className="text-xs text-gray-400 mt-1">
-                              {new Date(n.timestamp).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
-                            </p>
-                          </div>
-                          {!n.isRead && <div className="w-2 h-2 bg-blue-500 rounded-full mt-2 shrink-0"></div>}
-                        </div>
-                      ))
-                    )}
-                  </div>
-                </motion.div>
-              )}
-            </AnimatePresence>
-          </div>
-
           {/* Toggle Button (Desktop Only) */}
           <button 
             onClick={() => setIsCollapsed(!isCollapsed)}
-            className="hidden lg:flex w-8 h-8 rounded-lg items-center justify-center text-white/70 hover:text-white hover:bg-white/10 transition-all"
+            className="hidden lg:flex w-8 h-8 rounded-lg items-center justify-center text-white/70 hover:text-white hover:bg-white/10 transition-all shrink-0"
+            title={isCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
           >
             <i className={`fa-solid ${isCollapsed ? 'fa-chevron-right' : 'fa-chevron-left'} text-sm`}></i>
           </button>
         </div>
-      </div>
         
         {/* Scrollable Body */}
         <div className={`flex-1 min-h-0 overflow-y-auto custom-scrollbar flex flex-col justify-between py-4 ${isCollapsed ? 'px-2' : 'px-4 md:px-6'}`}>
@@ -369,7 +267,8 @@ const Navigation: React.FC<NavigationProps> = ({
                         const project = projects.find(p => p.name === group);
                         const isOwner = userOrgRole === 'owner' || userOrgRole === 'org_admin' || project?.ownerEmail === userProfile?.email;
                         const member = project?.members?.find(m => m.email === userProfile?.email);
-                        const isEditor = userOrgRole === 'owner' || userOrgRole === 'org_admin' || userOrgRole === 'team_manager' || member?.role === 'editor';
+                        const isProjectAdmin = member?.role === 'admin' || member?.role === 'editor';
+                        const isEditor = isOwner || isProjectAdmin;
                         const isDefault = project?.isDefault || group === 'General';
                         
                         // Allow collaboration for all logged-in users (Free/Pro/Enterprise)
@@ -667,7 +566,7 @@ const Navigation: React.FC<NavigationProps> = ({
               {(() => {
                 const isOwner = projectToManage.ownerEmail === userProfile?.email;
                 const member = projectToManage.members?.find(m => m.email === userProfile?.email);
-                const isEditor = member?.role === 'editor';
+                const isEditor = member?.role === 'admin' || member?.role === 'editor';
                 const canInvite = isOwner || (usageStats.plan === 'enterprise' && isEditor);
 
                 if (!canInvite) {
@@ -698,8 +597,7 @@ const Navigation: React.FC<NavigationProps> = ({
                           >
                             <option value="viewer">Viewer</option>
                             <option value="commenter">Commenter</option>
-                            <option value="editor">Editor</option>
-                            <option value="admin">Admin</option>
+                            <option value="admin">Project Admin</option>
                           </select>
                           <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none text-brand-primary opacity-50">
                             <i className="fa-solid fa-chevron-down text-[10px]"></i>

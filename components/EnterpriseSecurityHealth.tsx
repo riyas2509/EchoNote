@@ -59,6 +59,7 @@ export const EnterpriseSecurityHealth: React.FC<EnterpriseSecurityHealthProps> =
   const [allowedMethods, setAllowedMethods] = useState<OrgAllowedAuthMethod[]>(['EMAIL_PASSWORD', 'GOOGLE', 'MICROSOFT', 'OIDC']);
   const [groupRemovalBehavior, setGroupRemovalBehavior] = useState<RemovedGroupBehavior>('REVERT_TO_DEFAULT_ROLE');
   const [sessionMinutes, setSessionMinutes] = useState<number>(1440);
+  const [mfaPolicy, setMfaPolicy] = useState<'MFA_OPTIONAL' | 'MFA_REQUIRED_ADMINS' | 'MFA_ENFORCED_ALL'>('MFA_OPTIONAL');
 
   const isAdmin = userOrgRole === 'owner' || userOrgRole === 'org_admin';
 
@@ -73,6 +74,10 @@ export const EnterpriseSecurityHealth: React.FC<EnterpriseSecurityHealthProps> =
         setHealthData(data.health);
         if (data.health.summary.allowedAuthMethods) {
           setAllowedMethods(data.health.summary.allowedAuthMethods);
+        }
+        if (data.health.summary.mfaRequirement) {
+          const req = data.health.summary.mfaRequirement;
+          setMfaPolicy(req === 'MFA_REQUIRED_ALL' || req === 'MFA_ENFORCED_ALL' ? 'MFA_ENFORCED_ALL' : (req === 'MFA_REQUIRED_ADMINS' ? 'MFA_REQUIRED_ADMINS' : 'MFA_OPTIONAL'));
         }
       }
     } catch (err: any) {
@@ -145,7 +150,9 @@ export const EnterpriseSecurityHealth: React.FC<EnterpriseSecurityHealthProps> =
         body: JSON.stringify({
           allowedAuthMethods: allowedMethods,
           removedGroupBehavior: groupRemovalBehavior,
-          sessionTimeoutMinutes: sessionMinutes
+          sessionTimeoutMinutes: sessionMinutes,
+          mfaRequirement: mfaPolicy,
+          enforceMfa: mfaPolicy !== 'MFA_OPTIONAL'
         })
       });
       const data = await res.json();
@@ -460,7 +467,23 @@ export const EnterpriseSecurityHealth: React.FC<EnterpriseSecurityHealthProps> =
             </div>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2">
+            <div className="space-y-1">
+              <label className="text-[10px] font-extrabold text-slate-600 uppercase tracking-wider block">
+                Two-Factor (MFA) Policy
+              </label>
+              <select
+                disabled={!isAdmin}
+                value={mfaPolicy}
+                onChange={(e) => setMfaPolicy(e.target.value as any)}
+                className="w-full px-2.5 py-2 rounded-xl border border-slate-200 text-xs bg-slate-50 text-slate-800 font-bold focus:outline-none"
+              >
+                <option value="MFA_OPTIONAL">Optional (Member Choice)</option>
+                <option value="MFA_REQUIRED_ADMINS">Mandatory for Administrators</option>
+                <option value="MFA_ENFORCED_ALL">Mandatory for All Members</option>
+              </select>
+            </div>
+
             <div className="space-y-1">
               <label className="text-[10px] font-extrabold text-slate-600 uppercase tracking-wider block">
                 IdP Group Removal Policy

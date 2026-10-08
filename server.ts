@@ -18,6 +18,7 @@ import { GoogleAuth } from "google-auth-library";
 import { GoogleGenAI, Type, Modality, ThinkingLevel } from "@google/genai";
 import { trackAIUsage, getAiUsageOverview, getRecentAiUsageLogs } from "./lib/aiTracker.js";
 import { emailService, resolveSenderEmail } from "./lib/emailService.js";
+import { maskEmailForLogs } from "./lib/emailService.js";
 import { 
   requireAuth, 
   optionalAuth, 
@@ -705,7 +706,7 @@ async function startServer() {
         orgId: matchedOrg.id
       });
     } catch (error: any) {
-      console.error("❌ Domain discovery error:", error);
+      console.warn("⚠️ Domain discovery falling back to standard auth:", error?.message || error);
       return res.json({
         authMode: "standard",
         domain,
@@ -718,17 +719,7 @@ async function startServer() {
 
   // Helper to prevent privilege escalation via client-supplied claims in SSO flows
   function sanitizeSsoClaims(claims: any): Record<string, any> {
-    if (!claims || typeof claims !== 'object') return {};
-    const sanitized: Record<string, any> = {};
-    const blockedKeys = new Set([
-      'role', 'orgrole', 'platform_admin', 'admin', 'owner', 'isowner', 'org_admin', 'super_admin'
-    ]);
-    for (const [k, v] of Object.entries(claims)) {
-      if (!blockedKeys.has(k.toLowerCase().trim())) {
-        sanitized[k] = v;
-      }
-    }
-    return sanitized;
+    return sanitizeSsoClaimsHelper(claims);
   }
 
   // ==========================================
@@ -821,7 +812,10 @@ async function startServer() {
       const expectedTenantId = (sec.entraTenantId || "").trim();
 
       // 2. Tenant Isolation Check: If organization enforces a specific Azure Entra Tenant ID
-      if (expectedTenantId && reportedTenantId && reportedTenantId !== expectedTenantId) {
+      const verifiedTokenTenantId = (req.user as any)?.tid || (req.user as any)?.tenant_id;
+      const effectiveTenantId = verifiedTokenTenantId || reportedTenantId;
+
+      if (expectedTenantId && effectiveTenantId && effectiveTenantId !== expectedTenantId) {
         await recordOrgAuditEvent(db, {
           organizationId: orgId,
           actorUserId: callerUid,
@@ -829,8 +823,8 @@ async function startServer() {
           action: "SSO_TENANT_MISMATCH",
           timestamp: new Date().toISOString(),
           source: "api",
-          details: `Tenant mismatch: expected ${expectedTenantId}, reported ${reportedTenantId}`,
-          metadata: { reportedTenantId, expectedTenantId }
+          details: `Tenant mismatch: expected ${expectedTenantId}, reported ${effectiveTenantId}`,
+          metadata: { reportedTenantId: effectiveTenantId, expectedTenantId, verifiedTokenTenantId }
         });
 
         return res.status(403).json({
@@ -1318,7 +1312,10 @@ async function startServer() {
 
       // 3. Tenant Isolation Check:
       const expectedTenant = matchedOrgData.identityPlatformTenantId || sec.identityPlatformTenantId || sec.entraTenantId;
-      if (expectedTenant && clientTenantId && clientTenantId !== expectedTenant) {
+      const verifiedTokenTenant = (req.user as any)?.tid || (req.user as any)?.tenant_id;
+      const effectiveTenant = verifiedTokenTenant || clientTenantId;
+
+      if (expectedTenant && effectiveTenant && effectiveTenant !== expectedTenant) {
         await recordOrgAuditEvent(db, {
           organizationId: orgId,
           actorUserId: callerUid,
@@ -1326,8 +1323,8 @@ async function startServer() {
           action: "SSO_TENANT_MISMATCH",
           timestamp: new Date().toISOString(),
           source: "api",
-          details: `Enterprise tenant directory mismatch: expected ${expectedTenant}, reported ${clientTenantId}`,
-          metadata: { clientTenantId, expectedTenant }
+          details: `Enterprise tenant directory mismatch: expected ${expectedTenant}, reported ${effectiveTenant}`,
+          metadata: { clientTenantId: effectiveTenant, expectedTenant, verifiedTokenTenant }
         });
 
         return res.status(403).json({
@@ -1376,8 +1373,8 @@ async function startServer() {
         groups: tokenGroups,
         department: tokenDept,
         jobTitle: tokenJobTitle,
-        claims: clientClaims || {},
-        tenantId: clientTenantId || expectedTenant
+        claims: sanitizeSsoClaimsHelper(clientClaims),
+        tenantId: effectiveTenant || expectedTenant
       });
 
       if (jitResult.status === 'deactivated') {
@@ -2511,8 +2508,13 @@ async function startServer() {
         ...(ssoProtocol !== undefined ? { ssoProtocol } : {}),
         ...(enforceSso !== undefined ? { enforceSso: Boolean(enforceSso) } : {}),
         ...(Array.isArray(allowedAuthMethods) ? { allowedAuthMethods } : {}),
-        ...(mfaRequirement !== undefined ? { mfaRequirement } : {}),
-        ...(enforceMfa !== undefined ? { enforceMfa: Boolean(enforceMfa) } : {}),
+        ...(mfaRequirement !== undefined ? { 
+          mfaRequirement: mfaRequirement === 'MFA_REQUIRED_ALL' ? 'MFA_ENFORCED_ALL' : mfaRequirement,
+          enforceMfa: mfaRequirement === 'MFA_REQUIRED_ADMINS' || mfaRequirement === 'MFA_REQUIRED_ALL' || mfaRequirement === 'MFA_ENFORCED_ALL' || Boolean(enforceMfa)
+        } : (enforceMfa !== undefined ? { 
+          enforceMfa: Boolean(enforceMfa),
+          mfaRequirement: enforceMfa ? (currentSec.mfaRequirement || 'MFA_REQUIRED_ADMINS') : 'MFA_OPTIONAL'
+        } : {})),
         ...(typeof sessionTimeoutMinutes === 'number' ? { sessionTimeoutMinutes } : {}),
         ...(enforceSessionTimeout !== undefined ? { enforceSessionTimeout: Boolean(enforceSessionTimeout) } : {}),
         ...(removedGroupBehavior !== undefined ? { removedGroupBehavior } : {}),
@@ -3352,6 +3354,242 @@ async function startServer() {
     } catch (error: any) {
       console.error("❌ sync-claims failed:", error);
       res.status(500).json({ error: "Failed to synchronize custom claims", message: error.message });
+    }
+  });
+
+  // ==========================================
+  // Multi-Factor Authentication (MFA / 2FA) Endpoints (Phase 1A Step 3)
+  // ==========================================
+
+  /**
+   * Authoritative MFA Status Endpoint
+   * Returns current user's multi-factor enrollment status and second-factor session verification.
+   */
+  app.get("/api/auth/mfa/status", requireAuth, async (req: AuthenticatedRequest, res) => {
+    try {
+      const uid = req.user!.uid;
+      let userRecord: admin.auth.UserRecord | null = null;
+      try {
+        userRecord = await admin.auth().getUser(uid);
+      } catch (authErr: any) {
+        console.warn("⚠️ Failed to fetch Firebase Admin userRecord:", authErr?.message || authErr);
+      }
+
+      const enrolledFactors = (userRecord?.multiFactor?.enrolledFactors || []).map((f) => ({
+        uid: f.uid,
+        displayName: f.displayName || "Authenticator App",
+        factorId: f.factorId,
+        enrollmentTime: f.enrollmentTime || new Date().toISOString()
+      }));
+
+      // Check Firestore user profile for cached mfa status
+      const userDocSnap = await db.collection("users").doc(uid).get();
+      const userData = userDocSnap.data() || {};
+      const enrolledCount = enrolledFactors.length;
+      // Authoritatively, MFA is only enabled if the identity provider actually has enrolled factors
+      const mfaEnabled = enrolledCount > 0;
+
+      // Self-heal stale Firestore user document if status is desynchronized
+      if (userRecord && Boolean(userData.mfaEnabled) !== mfaEnabled) {
+        db.collection("users").doc(uid).set({
+          mfaEnabled,
+          mfaEnrolledAt: mfaEnabled ? (userData.mfaEnrolledAt || new Date().toISOString()) : null
+        }, { merge: true }).catch((healErr) => {
+          console.warn("⚠️ Could not heal desynchronized mfaEnabled in Firestore:", healErr?.message);
+        });
+      }
+
+      const secondFactorUsed = (req.user as any)?.firebase?.sign_in_second_factor || null;
+
+      return res.json({
+        success: true,
+        mfaEnabled,
+        enrolledFactors,
+        currentSessionSecondFactor: secondFactorUsed
+      });
+    } catch (error: any) {
+      console.error("❌ GET /api/auth/mfa/status error:", error?.message || error);
+      return res.status(500).json({ error: "InternalError", message: "Failed to retrieve MFA status." });
+    }
+  });
+
+  /**
+   * Log Multi-Factor Authentication Audit Event
+   * Records authoritative audit log for enrollment, verification, or disabling MFA.
+   * Strips all sensitive credentials, seeds, or verification codes.
+   */
+  app.post("/api/auth/mfa/audit-event", requireAuth, async (req: AuthenticatedRequest, res) => {
+    try {
+      const uid = req.user!.uid;
+      const callerEmail = (req.user!.email || "").toLowerCase().trim();
+      const { action, factorType, details } = req.body;
+
+      const validMfaActions = [
+        "MFA_ENROLLMENT_STARTED",
+        "MFA_ENABLED",
+        "MFA_DISABLED",
+        "MFA_CHALLENGE_SUCCESS",
+        "MFA_CHALLENGE_FAILURE",
+        "MFA_RECOVERY_USED"
+      ];
+
+      if (!action || !validMfaActions.includes(action)) {
+        return res.status(400).json({ error: "InvalidAction", message: "Invalid MFA audit event action." });
+      }
+
+      // Safe sanitized details string - NEVER include sensitive codes
+      const safeFactor = factorType === "phone" ? "phone" : "totp";
+      const sanitizedDetails = typeof details === "string" 
+        ? details.slice(0, 200).replace(/\b\d{6}\b/g, "******")
+        : `MFA action ${action} executed with factor ${safeFactor}`;
+
+      // 1. Sync UserProfile mfaEnabled flag in Firestore if enabling/disabling
+      // Authoritatively verify with Firebase Admin that factors are genuinely enrolled before setting mfaEnabled = true
+      if (action === "MFA_ENABLED") {
+        try {
+          const userRec = await admin.auth().getUser(uid);
+          const hasEnrolled = (userRec.multiFactor?.enrolledFactors || []).length > 0;
+          if (!hasEnrolled) {
+            console.warn(`⚠️ [MFA AUDIT] Blocked attempted mfaEnabled claim for ${uid}: No enrolled factors found in Firebase Auth.`);
+            return res.status(400).json({
+              error: "MfaNotEnrolled",
+              message: "Cannot mark MFA enabled without an enrolled multi-factor authentication method in identity provider."
+            });
+          }
+        } catch (fetchErr: any) {
+          console.warn("⚠️ [MFA AUDIT] Could not verify Firebase Admin multiFactor record:", fetchErr?.message || fetchErr);
+        }
+
+        await db.collection("users").doc(uid).set({
+          mfaEnabled: true,
+          mfaEnrolledAt: new Date().toISOString()
+        }, { merge: true });
+      } else if (action === "MFA_DISABLED") {
+        await db.collection("users").doc(uid).set({
+          mfaEnabled: false,
+          mfaEnrolledAt: null
+        }, { merge: true });
+      }
+
+      // 2. Resolve organization context if caller belongs to an organization
+      let orgId = req.user!.orgId || null;
+      if (!orgId) {
+        const memberQuery = await db.collection("orgMembers")
+          .where("userId", "==", uid)
+          .where("status", "==", "active")
+          .limit(1)
+          .get();
+        if (!memberQuery.empty) {
+          orgId = memberQuery.docs[0].data().organizationId;
+        }
+      }
+
+      if (orgId) {
+        await recordOrgAuditEvent(db, {
+          organizationId: orgId,
+          actorUserId: uid,
+          actorEmail: callerEmail,
+          action: action as any,
+          timestamp: new Date().toISOString(),
+          source: "api",
+          details: sanitizedDetails,
+          metadata: {
+            factorType: safeFactor
+          }
+        });
+      }
+
+      // Record to server auth audit logger
+      recordAuthAuditEvent(db, {
+        id: `audit_mfa_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+        eventType: action === "MFA_CHALLENGE_FAILURE" ? "AUTH_DENIED_UNAUTHENTICATED" : "AUTH_PERMITTED",
+        action,
+        status: action === "MFA_CHALLENGE_FAILURE" ? "denied" : "allowed",
+        severity: action === "MFA_CHALLENGE_FAILURE" ? "high" : "low",
+        actorUserId: uid,
+        actorEmail: callerEmail,
+        organizationId: orgId,
+        details: sanitizedDetails,
+        timestamp: new Date().toISOString()
+      }).catch(() => {});
+
+      return res.json({ success: true, logged: true });
+    } catch (error: any) {
+      console.error("❌ POST /api/auth/mfa/audit-event error:", error?.message || error);
+      return res.status(500).json({ error: "InternalError", message: "Failed to record MFA audit event." });
+    }
+  });
+
+  /**
+   * Disable / Unenroll MFA Endpoint
+   * Authoritatively clears multiFactor enrolled factors on user record in Firebase Admin
+   * and updates user profile in Firestore.
+   */
+  app.post("/api/auth/mfa/disable", requireAuth, async (req: AuthenticatedRequest, res) => {
+    try {
+      const uid = req.user!.uid;
+      const callerEmail = (req.user!.email || "").toLowerCase().trim();
+
+      // Clear enrolled factors in Firebase Admin
+      try {
+        await admin.auth().updateUser(uid, {
+          multiFactor: {
+            enrolledFactors: null
+          }
+        });
+      } catch (adminErr: any) {
+        console.warn("⚠️ admin.auth().updateUser multiFactor reset note:", adminErr?.message || adminErr);
+      }
+
+      // Update Firestore user document
+      await db.collection("users").doc(uid).set({
+        mfaEnabled: false,
+        mfaEnrolledAt: null
+      }, { merge: true });
+
+      // Record audit event
+      let orgId = req.user!.orgId || null;
+      if (!orgId) {
+        const memberQuery = await db.collection("orgMembers")
+          .where("userId", "==", uid)
+          .where("status", "==", "active")
+          .limit(1)
+          .get();
+        if (!memberQuery.empty) {
+          orgId = memberQuery.docs[0].data().organizationId;
+        }
+      }
+
+      if (orgId) {
+        await recordOrgAuditEvent(db, {
+          organizationId: orgId,
+          actorUserId: uid,
+          actorEmail: callerEmail,
+          action: "MFA_DISABLED",
+          timestamp: new Date().toISOString(),
+          source: "api",
+          details: `Disabled multi-factor authentication for user ${callerEmail}`,
+          metadata: { actorUserId: uid }
+        });
+      }
+
+      recordAuthAuditEvent(db, {
+        id: `audit_mfa_disable_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+        eventType: "AUTH_PERMITTED",
+        action: "MFA_DISABLED",
+        status: "allowed",
+        severity: "medium",
+        actorUserId: uid,
+        actorEmail: callerEmail,
+        organizationId: orgId,
+        details: `Two-factor authentication disabled by user ${callerEmail}`,
+        timestamp: new Date().toISOString()
+      }).catch(() => {});
+
+      return res.json({ success: true, message: "Multi-factor authentication disabled successfully." });
+    } catch (error: any) {
+      console.error("❌ POST /api/auth/mfa/disable error:", error?.message || error);
+      return res.status(500).json({ error: "InternalError", message: "Failed to disable MFA." });
     }
   });
 
@@ -4845,23 +5083,56 @@ If you did not expect this invitation, you can safely ignore this email.
 
   // Invitation API - Protected: requires valid auth token & project administrative rights
   app.post("/api/invite-member", requireAuth, async (req: AuthenticatedRequest, res) => {
-    const { email, role, projectId, projectName, ownerId: clientOwnerId, inviteToken: clientInviteToken } = req.body;
+    const { email, role, projectId, projectName } = req.body;
     const callerUid = req.user!.uid;
     const callerEmail = req.user!.email || "A team member";
     
     if (!email || !role || !projectId) {
-      return res.status(400).json({ error: "Missing required fields (email, role, projectId)" });
+      return res.status(400).json({ error: "BadRequest", message: "Missing required fields (email, role, projectId)" });
     }
+
+    // Recipient email syntax validation
+    const normalizedEmail = String(email || '').trim().toLowerCase();
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!normalizedEmail || !emailRegex.test(normalizedEmail)) {
+      return res.status(400).json({
+        error: "BadRequest",
+        message: "A valid recipient email address is required."
+      });
+    }
+
+    // Role validation
+    const rawRole = String(role || '').toLowerCase().trim();
+    if (!rawRole) {
+      return res.status(400).json({
+        error: "BadRequest",
+        message: "A project role must be specified."
+      });
+    }
+    if (rawRole === 'owner') {
+      return res.status(400).json({
+        error: "BadRequest",
+        message: "Cannot invite a member directly as owner. Use project transfer of ownership."
+      });
+    }
+    const allowedRoles = ['viewer', 'commenter', 'admin', 'editor'];
+    if (!allowedRoles.includes(rawRole)) {
+      return res.status(400).json({
+        error: "BadRequest",
+        message: `Invalid project role "${role}". Allowed roles are: viewer, commenter, admin.`
+      });
+    }
+    const normalizedInvitedRole = normalizeProjectRole(rawRole);
 
     try {
       // 1. Authorize caller via hardened project access resolution (requires MANAGE_MEMBERS)
       const access = await resolveProjectAccess(db, req.user, projectId, { 
         requiredPermission: 'MANAGE_MEMBERS',
-        callerClaimedOwnerId: clientOwnerId || callerUid
+        callerClaimedOwnerId: callerUid
       });
       if (!access.hasAccess || !access.permissions.canManageMembers) {
         if (access.notFound) {
-          return res.status(404).json({ error: "Not Found", message: "Project not found." });
+          return res.status(404).json({ error: "NotFound", message: "Project not found." });
         }
         return res.status(403).json({ 
           error: "Forbidden", 
@@ -4869,39 +5140,108 @@ If you did not expect this invitation, you can safely ignore this email.
         });
       }
 
-      const normalizedInvitedRole = normalizeProjectRole(role);
-      if (normalizedInvitedRole === 'owner') {
-        return res.status(400).json({
-          error: "Bad Request",
-          message: "Cannot invite a member directly as owner. Use project transfer of ownership."
-        });
-      }
-
       const projectData = access.project || {};
       const ownerId = projectData.userId || callerUid;
 
-      // Prevent accumulating duplicate pending invites for the same project & email
-      const normalizedEmail = email.trim().toLowerCase();
-      let inviteToken = clientInviteToken;
-      if (!inviteToken) {
-        try {
-          const existingPendingSnap = await db
-            .collection("invites")
-            .where("projectId", "==", projectId)
-            .where("email", "==", normalizedEmail)
-            .where("status", "==", "pending")
-            .limit(1)
-            .get();
-          if (!existingPendingSnap.empty) {
-            inviteToken = existingPendingSnap.docs[0].id;
+      // 2. Prevent inviting a user who is already a project owner or member (Step 10)
+      const projectOwnerEmail = (projectData.ownerEmail || '').toLowerCase().trim();
+      if (projectOwnerEmail && projectOwnerEmail === normalizedEmail) {
+        return res.status(400).json({
+          error: "AlreadyMember",
+          message: "This user is already a member of this project.",
+          alreadyMember: true
+        });
+      }
+
+      let isAlreadyMember = false;
+      try {
+        const existingMemberSnap = await db
+          .collection("projectMembers")
+          .where("projectId", "==", projectId)
+          .where("email", "==", normalizedEmail)
+          .limit(1)
+          .get();
+        if (!existingMemberSnap.empty) {
+          isAlreadyMember = true;
+        }
+      } catch (pmQueryErr) {}
+
+      if (!isAlreadyMember && projectMembersFallbackStore) {
+        for (const m of projectMembersFallbackStore.values()) {
+          if (m.projectId === projectId && m.email?.toLowerCase().trim() === normalizedEmail) {
+            isAlreadyMember = true;
+            break;
           }
-        } catch (queryErr) {
-          // Fall back to new token if query is unsupported in sandbox
         }
       }
+
+      if (!isAlreadyMember && Array.isArray(projectData.members)) {
+        if (projectData.members.some((m: any) => m.email?.toLowerCase().trim() === normalizedEmail)) {
+          isAlreadyMember = true;
+        }
+      }
+
+      if (isAlreadyMember) {
+        return res.status(400).json({
+          error: "AlreadyMember",
+          message: "This user is already a member of this project.",
+          alreadyMember: true
+        });
+      }
+
+      // 3. Prevent duplicate active pending invitations for the same project & email (Step 9)
+      let existingActiveInvite: any = null;
+      let inviteToken: string | null = null;
+
+      try {
+        const pendingSnap = await db
+          .collection("invites")
+          .where("projectId", "==", projectId)
+          .where("email", "==", normalizedEmail)
+          .where("status", "==", "pending")
+          .limit(1)
+          .get();
+        if (!pendingSnap.empty) {
+          const existingDoc = pendingSnap.docs[0];
+          const data = existingDoc.data() || {};
+          let isExpired = false;
+          if (data.expiresAt) {
+            const expMs = data.expiresAt?.toMillis ? data.expiresAt.toMillis() : new Date(data.expiresAt).getTime();
+            if (!isNaN(expMs) && expMs < Date.now()) {
+              isExpired = true;
+            }
+          }
+          if (!isExpired) {
+            existingActiveInvite = data;
+            inviteToken = existingDoc.id;
+          }
+        }
+      } catch (queryErr) {}
+
+      if (!inviteToken && pendingInvitesStore) {
+        for (const [t, inv] of pendingInvitesStore.entries()) {
+          if (inv.projectId === projectId && inv.email?.toLowerCase().trim() === normalizedEmail && inv.status === 'pending') {
+            let isExpired = false;
+            if (inv.expiresAt) {
+              const expMs = new Date(inv.expiresAt).getTime();
+              if (!isNaN(expMs) && expMs < Date.now()) isExpired = true;
+            }
+            if (!isExpired) {
+              inviteToken = t;
+              existingActiveInvite = inv;
+              break;
+            }
+          }
+        }
+      }
+
+      const isReusingExisting = Boolean(inviteToken);
       if (!inviteToken) {
         inviteToken = crypto.randomUUID();
       }
+
+      // 4. Expiration timestamp (7 days) & Document construction (Step 2 & 11)
+      const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
 
       const inviteData = {
         id: inviteToken,
@@ -4912,7 +5252,9 @@ If you did not expect this invitation, you can safely ignore this email.
         invitedBy: callerEmail,
         ownerId: ownerId,
         status: "pending",
-        createdAt: FieldValue.serverTimestamp()
+        expiresAt,
+        createdAt: isReusingExisting && existingActiveInvite?.createdAt ? existingActiveInvite.createdAt : FieldValue.serverTimestamp(),
+        lastResentAt: isReusingExisting ? FieldValue.serverTimestamp() : null
       };
 
       pendingInvitesStore.set(inviteToken, inviteData);
@@ -4920,26 +5262,27 @@ If you did not expect this invitation, you can safely ignore this email.
       // Store in Firestore
       try {
         await db.collection("invites").doc(inviteToken).set(inviteData, { merge: true });
-        console.info(`✅ Stored invite in server Firestore: ${inviteToken}`);
+        console.info(`✅ Stored invite in server Firestore for recipient ${maskEmailForLogs(normalizedEmail)} (token prefix: ${inviteToken.slice(0, 8)}...)`);
       } catch (dbErr: any) {
         if (isProductionEnvironment()) {
           console.error("🚨 [PRODUCTION] Failed to persist invite in Firestore:", {
-            inviteToken,
+            recipient: maskEmailForLogs(normalizedEmail),
             error: dbErr?.message || String(dbErr)
           });
           return res.status(500).json({ error: "Failed to persist invitation in database" });
         }
-        console.info(`ℹ️ [NON-PROD DEV ONLY] Stored invite in development fallback store: ${inviteToken}`);
+        console.info(`ℹ️ [NON-PROD DEV ONLY] Stored invite in development fallback store for recipient ${maskEmailForLogs(normalizedEmail)}`);
       }
 
-      // Send Email via Resend centralized email service
+      // 5. Send Email via Resend centralized email service
       const appUrl = resolveAppUrl();
       const joinUrl = `${appUrl}/join?token=${encodeURIComponent(inviteToken)}`;
 
+      const email = normalizedEmail;
       const emailResult = await emailService.sendTeamInvitation(email, {
         inviterName: callerEmail,
-        projectName: projectName || "EchoNote Workspace",
-        role: role,
+        projectName: projectName || projectData.name || "EchoNote Workspace",
+        role: normalizedInvitedRole,
         inviteLink: joinUrl
       });
 
@@ -4953,18 +5296,49 @@ If you did not expect this invitation, you can safely ignore this email.
           emailDeliveryCode: emailSent ? null : (emailResult?.errorCode || "EMAIL_DELIVERY_FAILED"),
           lastEmailAttemptAt: FieldValue.serverTimestamp()
         });
-      } catch (updateErr) {
-        // Non-blocking metadata update
+      } catch (updateErr) {}
+
+      // Project Activity & Audit Logging (Step 16)
+      try {
+        await db.collection("projectActivities").add({
+          projectId,
+          userId: callerUid,
+          userEmail: callerEmail,
+          userName: callerEmail.split('@')[0],
+          actionType: "invite_member",
+          description: `${callerEmail.split('@')[0]} ${isReusingExisting ? 'resent invitation to' : 'invited'} ${normalizedEmail} to project "${projectName || projectData.name || 'Workspace'}" as ${normalizedInvitedRole}`,
+          createdAt: FieldValue.serverTimestamp()
+        });
+      } catch (actErr) {}
+
+      const projectOrgId = projectData.orgId || projectData.organizationId;
+      if (projectOrgId) {
+        try {
+          await recordOrgAuditEvent(db, {
+            organizationId: projectOrgId,
+            actorUserId: callerUid,
+            actorEmail: callerEmail,
+            targetUserEmail: normalizedEmail,
+            newRole: normalizedInvitedRole,
+            action: "PROJECT_INVITATION_CREATED",
+            timestamp: new Date().toISOString(),
+            details: `Invited ${normalizedEmail} as ${normalizedInvitedRole} to project ${projectId} (email ${emailSent ? 'dispatched' : 'failed'})`
+          });
+        } catch (auditErr) {}
       }
 
+      // Truthful response (Step 7)
       if (!emailSent) {
         console.warn("⚠️ [INVITE MEMBER] Invitation record created, but email dispatch failed:", {
-          inviteToken,
+          recipient: maskEmailForLogs(normalizedEmail),
+          tokenPrefix: inviteToken.slice(0, 8),
           error: emailResult?.error,
           code: emailResult?.errorCode
         });
         return res.status(200).json({
           success: true,
+          invitationCreated: true,
+          isReused: isReusingExisting,
           inviteToken,
           emailSent: false,
           emailError: emailResult?.error || "Email delivery failed",
@@ -4976,12 +5350,14 @@ If you did not expect this invitation, you can safely ignore this email.
         });
       }
 
-      res.json({
+      return res.status(200).json({
         success: true,
+        invitationCreated: true,
+        isReused: isReusingExisting,
         inviteToken,
         emailSent: true,
         inviteLink: joinUrl,
-        message: "Invitation sent successfully."
+        message: isReusingExisting ? "Invitation resent successfully." : "Invitation sent successfully."
       });
     } catch (error: any) {
       console.warn("⚠️ [INVITE MEMBER] Error:", error?.message || String(error));
@@ -5071,10 +5447,20 @@ If you did not expect this invitation, you can safely ignore this email.
       userId,
       userEmail: userEmail || "",
       userDisplayName,
-      appUrl: resolveAppUrl(),
       pendingInvitesStore,
       projectMembersFallbackStore
     });
+
+    if (result.status === 200 && userEmail) {
+      // 4. Send welcome email via Resend
+      const appUrl = resolveAppUrl();
+      try {
+        await emailService.sendWelcome(userEmail, {
+          name: userDisplayName,
+          dashboardLink: `${appUrl}/app`
+        });
+      } catch (_) {}
+    }
 
     return res.status(result.status).json(result.body);
   });
@@ -5184,6 +5570,103 @@ If you did not expect this invitation, you can safely ignore this email.
     } catch (error: any) {
       console.error("🚨 [EXPIRE INVITATION] Error:", error?.message || String(error));
       res.status(500).json({ error: "InternalError", message: "Failed to expire invitation." });
+    }
+  });
+
+  // Cancel/Revoke Invitation - Protected with requireAuth
+  app.post("/api/invite-cancel", requireAuth, async (req: AuthenticatedRequest, res) => {
+    const rawToken = req.body?.token;
+    const callerUid = req.user!.uid;
+    const callerEmail = req.user!.email || "A team member";
+
+    const tokenValidation = sanitizeInvitationToken(rawToken);
+    if (!tokenValidation.valid || !tokenValidation.token) {
+      return res.status(400).json({ error: tokenValidation.error || "BadRequest", message: tokenValidation.message || "Missing or invalid invitation token." });
+    }
+    const token = tokenValidation.token;
+
+    try {
+      let inviteDocRef: FirebaseFirestore.DocumentReference = db.collection("invites").doc(token);
+      let inviteDoc = await inviteDocRef.get();
+
+      if (!inviteDoc.exists) {
+        const idSnap = await db.collection("invites").where("id", "==", token).limit(1).get();
+        if (!idSnap.empty) {
+          inviteDoc = idSnap.docs[0];
+          inviteDocRef = inviteDoc.ref;
+        } else {
+          const tokenSnap = await db.collection("invites").where("token", "==", token).limit(1).get();
+          if (!tokenSnap.empty) {
+            inviteDoc = tokenSnap.docs[0];
+            inviteDocRef = inviteDoc.ref;
+          }
+        }
+      }
+
+      if (!inviteDoc.exists) {
+        if (!isProductionEnvironment() && pendingInvitesStore.has(token)) {
+          const inv = pendingInvitesStore.get(token);
+          inv.status = 'cancelled';
+          inv.cancelledAt = new Date().toISOString();
+          inv.cancelledBy = callerUid;
+          return res.json({ success: true, message: "Invitation cancelled successfully" });
+        }
+        return res.status(404).json({ error: "NotFound", message: "Invitation not found." });
+      }
+
+      const inviteData = inviteDoc.data() || {};
+      const access = await resolveProjectAccess(db, req.user, inviteData.projectId, { 
+        requiredPermission: 'MANAGE_MEMBERS',
+        callerClaimedOwnerId: callerUid
+      });
+      if (!access.hasAccess && inviteData.ownerId !== callerUid && inviteData.invitedBy !== callerEmail) {
+        return res.status(403).json({ error: "Forbidden", message: "Permission denied to cancel this invitation." });
+      }
+
+      await inviteDocRef.update({
+        status: "cancelled",
+        cancelledAt: FieldValue.serverTimestamp(),
+        cancelledBy: callerUid
+      });
+
+      if (pendingInvitesStore.has(token)) {
+        const inv = pendingInvitesStore.get(token);
+        inv.status = 'cancelled';
+      }
+
+      // Project Activity Logging
+      try {
+        await db.collection("projectActivities").add({
+          projectId: inviteData.projectId,
+          userId: callerUid,
+          userEmail: callerEmail,
+          userName: callerEmail.split('@')[0],
+          actionType: "decline_invite",
+          description: `${callerEmail.split('@')[0]} cancelled invitation sent to ${inviteData.email}`,
+          createdAt: FieldValue.serverTimestamp()
+        });
+      } catch (actErr) {}
+
+      // Org Audit Logging
+      const orgId = access.organizationId || access.project?.orgId;
+      if (orgId) {
+        try {
+          await recordOrgAuditEvent(db, {
+            organizationId: orgId,
+            actorUserId: callerUid,
+            actorEmail: callerEmail,
+            targetUserEmail: inviteData.email,
+            action: "PROJECT_INVITATION_REVOKED",
+            timestamp: new Date().toISOString(),
+            details: `Cancelled invitation for ${inviteData.email} on project ${inviteData.projectId}`
+          });
+        } catch (auditErr) {}
+      }
+
+      return res.json({ success: true, message: "Invitation cancelled successfully" });
+    } catch (error: any) {
+      console.error("🚨 [CANCEL INVITATION] Error:", error?.message || String(error));
+      return res.status(500).json({ error: "InternalError", message: "Failed to cancel invitation." });
     }
   });
 

@@ -87,9 +87,6 @@ export function determineEffectiveRole({
     }
   }
 
-  // Org Team Manager fallback
-  if (userOrgRole === 'team_manager') return 'admin';
-
   // Safe default: viewer (least privilege)
   return 'viewer';
 }

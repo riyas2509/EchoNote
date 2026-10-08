@@ -23,7 +23,12 @@ import {
   signInWithPopup, 
   GoogleAuthProvider, 
   OAuthProvider, 
-  SAMLAuthProvider 
+  SAMLAuthProvider,
+  multiFactor,
+  TotpMultiFactorGenerator,
+  getMultiFactorResolver,
+  EmailAuthProvider,
+  reauthenticateWithCredential
 } from '../firebase';
 import { toast } from 'sonner';
 import { 
@@ -53,7 +58,11 @@ import {
   Sparkle, 
   Camera, 
   Trash2,
-  RefreshCw
+  RefreshCw,
+  Smartphone,
+  QrCode,
+  Copy,
+  Check
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -126,6 +135,60 @@ const AuthView: React.FC<AuthViewProps> = ({
 
   // Admin Settings guide toggle (only in Settings Mode)
   const [showAdminSsoGuide, setShowAdminSsoGuide] = useState(false);
+
+  // MFA Login Challenge state (Phase 1A Step 3)
+  const [mfaResolver, setMfaResolver] = useState<any | null>(null);
+  const [mfaChallengeCode, setMfaChallengeCode] = useState('');
+  const [isVerifyingMfa, setIsVerifyingMfa] = useState(false);
+
+  // User Settings 2FA state (Phase 1A Step 3)
+  const [mfaLoading, setMfaLoading] = useState(false);
+  const [mfaEnrolled, setMfaEnrolled] = useState<boolean>(false);
+  const [mfaFactors, setMfaFactors] = useState<any[]>([]);
+  const [showMfaEnrollModal, setShowMfaEnrollModal] = useState(false);
+  const [mfaEnrollStep, setMfaEnrollStep] = useState<'password' | 'scan'>('password');
+  const [mfaPassword, setMfaPassword] = useState('');
+  const [mfaTotpSecret, setMfaTotpSecret] = useState<any | null>(null);
+  const [mfaQrCodeUrl, setMfaQrCodeUrl] = useState('');
+  const [mfaVerifyCode, setMfaVerifyCode] = useState('');
+  const [isEnrollingMfa, setIsEnrollingMfa] = useState(false);
+  const [mfaKeyCopied, setMfaKeyCopied] = useState(false);
+  const [showDisableMfaModal, setShowDisableMfaModal] = useState(false);
+  const [disableMfaPassword, setDisableMfaPassword] = useState('');
+  const [isDisablingMfa, setIsDisablingMfa] = useState(false);
+
+  // Fetch Authoritative MFA Status on Settings Open
+  const refreshMfaStatus = useCallback(async () => {
+    if (!auth?.currentUser) return;
+    setMfaLoading(true);
+    try {
+      const clientFactors = multiFactor(auth.currentUser).enrolledFactors || [];
+      if (clientFactors.length > 0) {
+        setMfaEnrolled(true);
+        setMfaFactors(clientFactors);
+      } else {
+        const res = await apiFetch('/api/auth/mfa/status');
+        if (res.ok) {
+          const data = await res.json();
+          setMfaEnrolled(Boolean(data.mfaEnabled));
+          setMfaFactors(data.enrolledFactors || []);
+        } else {
+          setMfaEnrolled(Boolean(userProfile?.mfaEnabled));
+        }
+      }
+    } catch (err) {
+      console.warn("MFA status inspection note:", err);
+      setMfaEnrolled(Boolean(userProfile?.mfaEnabled));
+    } finally {
+      setMfaLoading(false);
+    }
+  }, [userProfile?.mfaEnabled]);
+
+  useEffect(() => {
+    if (isSettingsMode && auth?.currentUser) {
+      refreshMfaStatus();
+    }
+  }, [isSettingsMode, refreshMfaStatus]);
 
   // Profile Settings editing
   const [editDisplayName, setEditDisplayName] = useState('');
@@ -457,6 +520,14 @@ const AuthView: React.FC<AuthViewProps> = ({
       toast.success('Signed in successfully!');
     } catch (err: any) {
       console.error("Sign In Error:", err);
+      if (err.code === 'auth/multi-factor-auth-required') {
+        const resolver = getMultiFactorResolver(auth, err);
+        setMfaResolver(resolver);
+        setMfaChallengeCode('');
+        setError('');
+        toast.info('Two-Factor Authentication required. Enter the code from your authenticator app.');
+        return;
+      }
       if (err.code === 'auth/unauthorized-domain') {
         setError(formatAuthError(err));
       } else if (err.code === 'auth/user-not-found' || err.code === 'auth/wrong-password' || err.code === 'auth/invalid-credential') {
@@ -474,6 +545,217 @@ const AuthView: React.FC<AuthViewProps> = ({
       }
     } finally {
       setLoading(false);
+    }
+  };
+
+  // Handle Multi-Factor Authentication Challenge during Sign In (Phase 1A Step 3)
+  const handleVerifyMfaChallenge = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!auth || !mfaResolver || !mfaChallengeCode.trim()) return;
+
+    setIsVerifyingMfa(true);
+    setError('');
+
+    try {
+      const selectedHint = mfaResolver.hints?.[0];
+      if (!selectedHint) {
+        throw new Error('No enrolled multi-factor authentication method found.');
+      }
+
+      const assertion = TotpMultiFactorGenerator.assertionForSignIn(
+        selectedHint.uid,
+        mfaChallengeCode.trim()
+      );
+
+      const userCredential = await mfaResolver.resolveSignIn(assertion);
+
+      // Audit Log on Success
+      try {
+        await apiFetch('/api/auth/mfa/audit-event', {
+          method: 'POST',
+          body: JSON.stringify({
+            action: 'MFA_CHALLENGE_SUCCESS',
+            factorType: 'totp',
+            details: `User ${userCredential.user.email} verified 2FA challenge successfully`
+          })
+        });
+      } catch {}
+
+      toast.success('Two-factor authentication verified!');
+      setMfaResolver(null);
+      setMfaChallengeCode('');
+    } catch (verifyErr: any) {
+      console.error("MFA Challenge Verification Error:", verifyErr);
+      // Audit Log on Failure
+      try {
+        await apiFetch('/api/auth/mfa/audit-event', {
+          method: 'POST',
+          body: JSON.stringify({
+            action: 'MFA_CHALLENGE_FAILURE',
+            factorType: 'totp',
+            details: 'Invalid or failed MFA verification code entered'
+          })
+        });
+      } catch {}
+
+      if (verifyErr.code === 'auth/invalid-verification-code') {
+        setError('Invalid verification code. Please check your authenticator app and try again.');
+      } else if (verifyErr.code === 'auth/code-expired') {
+        setError('The verification code has expired. Please check your app for the new code.');
+      } else if (verifyErr.code === 'auth/too-many-requests') {
+        setError('Too many failed verification attempts. Access is temporarily restricted. Please try again later.');
+      } else {
+        setError(verifyErr.message || 'Two-factor verification failed. Please try again.');
+      }
+    } finally {
+      setIsVerifyingMfa(false);
+    }
+  };
+
+  // User 2FA Enrollment Handlers (Phase 1A Step 3)
+  const handleStartMfaSetup = () => {
+    setShowMfaEnrollModal(true);
+    setMfaEnrollStep('password');
+    setMfaPassword('');
+    setMfaTotpSecret(null);
+    setMfaQrCodeUrl('');
+    setMfaVerifyCode('');
+    setMfaKeyCopied(false);
+    setError('');
+  };
+
+  const handleConfirmPasswordAndGenerateSecret = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!auth?.currentUser || !mfaPassword) return;
+    setIsEnrollingMfa(true);
+    setError('');
+    try {
+      const credential = EmailAuthProvider.credential(auth.currentUser.email!, mfaPassword);
+      await reauthenticateWithCredential(auth.currentUser, credential);
+
+      // Log enrollment started audit
+      try {
+        await apiFetch('/api/auth/mfa/audit-event', {
+          method: 'POST',
+          body: JSON.stringify({
+            action: 'MFA_ENROLLMENT_STARTED',
+            factorType: 'totp',
+            details: `User ${auth.currentUser.email} initiated TOTP 2FA enrollment`
+          })
+        });
+      } catch {}
+
+      const mfaUser = multiFactor(auth.currentUser);
+      const session = await mfaUser.getSession();
+      const secret = await TotpMultiFactorGenerator.generateSecret(session);
+
+      const issuer = "EchoNote";
+      const accountName = auth.currentUser.email || "user";
+      const otpauthUrl = secret.generateQrCodeUrl(accountName, issuer);
+
+      setMfaTotpSecret(secret);
+      setMfaQrCodeUrl(otpauthUrl);
+      setMfaEnrollStep('scan');
+      setMfaPassword('');
+    } catch (err: any) {
+      console.error("MFA Reauth & Generate Secret Error:", err);
+      if (err.code === 'auth/wrong-password' || err.code === 'auth/invalid-credential') {
+        setError('Incorrect password. Please verify your current password.');
+      } else if (err.code === 'auth/operation-not-allowed' || err.code === 'auth/admin-restricted-operation') {
+        setError('Multi-Factor Authentication (TOTP) requires Identity Platform MFA to be enabled in your Firebase / Google Cloud Console.');
+      } else {
+        setError(err.message || 'Failed to initiate 2FA setup.');
+      }
+    } finally {
+      setIsEnrollingMfa(false);
+    }
+  };
+
+  const handleCompleteMfaEnrollment = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!auth?.currentUser || !mfaTotpSecret || !mfaVerifyCode.trim()) return;
+    setIsEnrollingMfa(true);
+    setError('');
+    try {
+      const assertion = TotpMultiFactorGenerator.assertionForEnrollment(
+        mfaTotpSecret,
+        mfaVerifyCode.trim()
+      );
+      const mfaUser = multiFactor(auth.currentUser);
+      await mfaUser.enroll(assertion, "Authenticator App");
+
+      // Log authoritative audit event
+      try {
+        await apiFetch('/api/auth/mfa/audit-event', {
+          method: 'POST',
+          body: JSON.stringify({
+            action: 'MFA_ENABLED',
+            factorType: 'totp',
+            details: `User ${auth.currentUser.email} successfully enrolled TOTP 2FA`
+          })
+        });
+      } catch {}
+
+      toast.success('Two-Factor Authentication is now enabled!');
+      setMfaEnrolled(true);
+      setMfaFactors(mfaUser.enrolledFactors);
+      setShowMfaEnrollModal(false);
+      setMfaTotpSecret(null);
+      setMfaVerifyCode('');
+      await refreshMfaStatus();
+    } catch (err: any) {
+      console.error("MFA Enrollment Error:", err);
+      if (err.code === 'auth/invalid-verification-code') {
+        setError('Invalid 6-digit verification code. Please check your authenticator app and try again.');
+      } else {
+        setError(err.message || 'Failed to verify and activate Two-Factor Authentication.');
+      }
+    } finally {
+      setIsEnrollingMfa(false);
+    }
+  };
+
+  const handleDisableMfaConfirm = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!auth?.currentUser || !disableMfaPassword) return;
+    setIsDisablingMfa(true);
+    setError('');
+    try {
+      const credential = EmailAuthProvider.credential(auth.currentUser.email!, disableMfaPassword);
+      await reauthenticateWithCredential(auth.currentUser, credential);
+
+      const mfaUser = multiFactor(auth.currentUser);
+      const enrolled = mfaUser.enrolledFactors;
+      if (enrolled && enrolled.length > 0) {
+        for (const factor of enrolled) {
+          try {
+            await mfaUser.unenroll(factor);
+          } catch (unenrollErr) {
+            console.warn("Client unenroll factor note:", unenrollErr);
+          }
+        }
+      }
+
+      // Authoritative backend disable
+      await apiFetch('/api/auth/mfa/disable', {
+        method: 'POST'
+      });
+
+      toast.success('Two-Factor Authentication has been disabled.');
+      setMfaEnrolled(false);
+      setMfaFactors([]);
+      setShowDisableMfaModal(false);
+      setDisableMfaPassword('');
+      await refreshMfaStatus();
+    } catch (err: any) {
+      console.error("MFA Disable Error:", err);
+      if (err.code === 'auth/wrong-password' || err.code === 'auth/invalid-credential') {
+        setError('Incorrect password. Please verify your current password to disable 2FA.');
+      } else {
+        setError(err.message || 'Failed to disable Two-Factor Authentication.');
+      }
+    } finally {
+      setIsDisablingMfa(false);
     }
   };
 
@@ -568,15 +850,19 @@ const AuthView: React.FC<AuthViewProps> = ({
         thinkingTopupBalance: 0
       };
 
-      await setDoc(userDocRef, newProfile);
+      try {
+        await setDoc(userDocRef, newProfile);
+      } catch (profileErr: any) {
+        console.warn("⚠️ Initial profile document setup notice:", profileErr);
+      }
       setSuccess('Account created successfully! Logging you in...');
       toast.success('Welcome to EchoNote!');
     } catch (err: any) {
-      console.error("Sign Up Error:", err);
-      if (err.code === 'auth/unauthorized-domain') {
-        setError(formatAuthError(err));
-      } else if (err.code === 'auth/email-already-in-use') {
+      if (err.code === 'auth/email-already-in-use') {
         setError('An account with this email address already exists. Please sign in instead.');
+        toast.info('An account with this email address already exists. Please sign in.');
+      } else if (err.code === 'auth/unauthorized-domain') {
+        setError(formatAuthError(err));
       } else if (err.code === 'auth/invalid-email') {
         setError('Invalid email address format.');
       } else if (err.code === 'auth/weak-password') {
@@ -585,7 +871,11 @@ const AuthView: React.FC<AuthViewProps> = ({
         setError('Email/password registration is not enabled.');
       } else if (err.code === 'auth/network-request-failed') {
         setError('Network error. Please check your internet connection.');
+      } else if (err.code === 'permission-denied') {
+        console.warn("⚠️ Firestore profile setup permission notice (relying on server provisioning):", err);
+        setSuccess('Account created! Initializing workspace...');
       } else {
+        console.warn("⚠️ Sign Up error:", err?.message || err);
         setError(formatAuthError(err, 'Failed to create account. Please try again.'));
       }
     } finally {
@@ -812,10 +1102,10 @@ const AuthView: React.FC<AuthViewProps> = ({
       )}
       <div>
         <h1 className="text-2xl font-bold text-brand-primary tracking-tight">
-          {isSettingsMode ? 'Account & Security' : mode === 'signup' ? 'Create Your Account' : mode === 'forgot' ? 'Reset Password' : mode === 'sso' ? 'Enterprise Single Sign-On' : 'Sign in to EchoNote'}
+          {isSettingsMode ? 'Account & Security' : mfaResolver ? 'Two-Factor Verification' : mode === 'signup' ? 'Create Your Account' : mode === 'forgot' ? 'Reset Password' : mode === 'sso' ? 'Enterprise Single Sign-On' : 'Sign in to EchoNote'}
         </h1>
         <p className="text-xs text-slate-500 font-medium tracking-wider uppercase mt-1">
-          {isSettingsMode ? 'Identity & Access Controls' : 'Audio Intelligence Workspace'}
+          {isSettingsMode ? 'Identity & Access Controls' : mfaResolver ? 'Enter 6-Digit Authenticator Code' : 'Audio Intelligence Workspace'}
         </p>
       </div>
     </div>
@@ -971,6 +1261,307 @@ const AuthView: React.FC<AuthViewProps> = ({
                 )}
               </div>
             </div>
+
+            {/* Two-Factor Authentication (2FA / MFA) Section (Phase 1A Step 3) */}
+            <div className="bg-slate-50 p-5 rounded-xl border border-slate-200/50 space-y-4 text-left">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <ShieldCheck className="w-4 h-4 text-brand-primary" />
+                  <span className="text-[10px] font-black uppercase tracking-wider text-slate-500">
+                    Two-Factor Authentication (2FA)
+                  </span>
+                </div>
+                <span className={`px-2.5 py-0.5 rounded-full text-[9px] font-black uppercase tracking-wider ${
+                  mfaEnrolled ? 'bg-emerald-100 text-emerald-800 border border-emerald-200' : 'bg-slate-200 text-slate-700'
+                }`}>
+                  {mfaLoading ? 'Checking...' : mfaEnrolled ? 'Enabled' : 'Not Configured'}
+                </span>
+              </div>
+
+              <p className="text-xs text-slate-600 leading-relaxed">
+                Add an extra layer of protection to your EchoNote account. When enabled, signing in requires a 6-digit verification code from your authenticator app (Google Authenticator, Microsoft Authenticator, or 1Password).
+              </p>
+
+              {mfaEnrolled ? (
+                <div className="space-y-3 pt-2 border-t border-slate-200/50">
+                  <div className="flex items-center justify-between p-3 bg-white rounded-xl border border-slate-100">
+                    <div className="flex items-center gap-3">
+                      <div className="w-8 h-8 rounded-lg bg-emerald-50 text-emerald-700 flex items-center justify-center">
+                        <Smartphone className="w-4 h-4" />
+                      </div>
+                      <div>
+                        <p className="text-xs font-bold text-slate-800">Authenticator App (TOTP)</p>
+                        <p className="text-[10px] text-slate-400 font-medium">Standard 6-digit time-based one-time password</p>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowDisableMfaModal(true);
+                        setDisableMfaPassword('');
+                        setError('');
+                      }}
+                      className="px-3 py-1.5 border border-rose-200 hover:bg-rose-50 text-rose-600 rounded-lg text-[10px] font-bold uppercase tracking-wider transition-all cursor-pointer"
+                    >
+                      Disable
+                    </button>
+                  </div>
+
+                  <div className="p-3 bg-amber-50/70 rounded-xl border border-amber-200/50 text-[11px] text-amber-900 leading-relaxed">
+                    <p className="font-bold flex items-center gap-1.5 text-amber-800 mb-0.5">
+                      <Info className="w-3.5 h-3.5 shrink-0" /> Account Recovery Information
+                    </p>
+                    Firebase Authentication secures accounts via standards-compliant TOTP. Keep your authenticator backed up to your cloud account (Google Account, Apple iCloud Keychain, or Microsoft Cloud). Organization administrators can assist with recovery if your device is lost.
+                  </div>
+                </div>
+              ) : (
+                <div className="pt-2 border-t border-slate-200/50">
+                  <button
+                    type="button"
+                    onClick={handleStartMfaSetup}
+                    disabled={mfaLoading}
+                    className="w-full py-2.5 bg-brand-primary hover:bg-brand-secondary text-white rounded-xl text-xs font-black tracking-widest uppercase transition-all shadow-md active:scale-95 flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                  >
+                    <Smartphone className="w-4 h-4" />
+                    <span>Set Up Authenticator App</span>
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {/* MFA Enrollment Modal Dialog */}
+            <AnimatePresence>
+              {showMfaEnrollModal && (
+                <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-[250] flex items-center justify-center p-4">
+                  <motion.div
+                    initial={{ opacity: 0, scale: 0.95, y: 10 }}
+                    animate={{ opacity: 1, scale: 1, y: 0 }}
+                    exit={{ opacity: 0, scale: 0.95, y: 10 }}
+                    className="bg-white rounded-2xl p-6 max-w-md w-full space-y-5 shadow-2xl border border-slate-100 text-left"
+                  >
+                    <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+                      <div className="flex items-center gap-2">
+                        <Smartphone className="w-5 h-5 text-brand-primary" />
+                        <h3 className="font-bold text-slate-800 text-sm">Two-Factor Authentication Setup</h3>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowMfaEnrollModal(false);
+                          setMfaTotpSecret(null);
+                          setError('');
+                        }}
+                        className="text-slate-400 hover:text-slate-600 text-xs font-semibold"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+
+                    {error && (
+                      <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-700 flex items-start gap-2">
+                        <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                        <span>{error}</span>
+                      </div>
+                    )}
+
+                    {mfaEnrollStep === 'password' && (
+                      <form onSubmit={handleConfirmPasswordAndGenerateSecret} className="space-y-4">
+                        <p className="text-xs text-slate-600 leading-relaxed">
+                          For your security, please confirm your current account password to begin authenticator setup.
+                        </p>
+                        <div className="space-y-1.5">
+                          <label className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Current Password</label>
+                          <div className="relative">
+                            <input
+                              type={passwordVisible ? "text" : "password"}
+                              required
+                              autoFocus
+                              value={mfaPassword}
+                              onChange={(e) => setMfaPassword(e.target.value)}
+                              placeholder="••••••••"
+                              className="w-full pl-3 pr-10 py-2.5 bg-slate-50 border border-slate-200 focus:border-brand-primary rounded-xl text-xs font-medium focus:outline-none focus:ring-1 focus:ring-brand-primary/20"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => setPasswordVisible(!passwordVisible)}
+                              className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                            >
+                              {passwordVisible ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                            </button>
+                          </div>
+                        </div>
+
+                        <div className="flex gap-2 pt-2">
+                          <button
+                            type="button"
+                            onClick={() => setShowMfaEnrollModal(false)}
+                            className="flex-1 py-2.5 border border-slate-200 hover:bg-slate-50 text-slate-600 rounded-xl text-xs font-bold uppercase tracking-wider transition-all"
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            type="submit"
+                            disabled={isEnrollingMfa || !mfaPassword}
+                            className="flex-1 py-2.5 bg-brand-primary hover:bg-brand-secondary text-white rounded-xl text-xs font-bold uppercase tracking-wider transition-all shadow-md active:scale-95 disabled:opacity-50 flex items-center justify-center gap-1.5 cursor-pointer"
+                          >
+                            {isEnrollingMfa ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <span>Continue</span>}
+                          </button>
+                        </div>
+                      </form>
+                    )}
+
+                    {mfaEnrollStep === 'scan' && mfaTotpSecret && (
+                      <form onSubmit={handleCompleteMfaEnrollment} className="space-y-4">
+                        <div className="space-y-3">
+                          <p className="text-xs text-slate-600 leading-relaxed">
+                            1. Open your authenticator app (Google Authenticator, Microsoft Authenticator, or 1Password) and scan the QR code below.
+                          </p>
+
+                          {mfaQrCodeUrl && (
+                            <div className="flex flex-col items-center justify-center p-3 bg-slate-50 rounded-xl border border-slate-200/80">
+                              <img
+                                src={`https://api.qrserver.com/v1/create-qr-code/?size=160x160&data=${encodeURIComponent(mfaQrCodeUrl)}`}
+                                alt="MFA QR Code"
+                                className="w-40 h-40 object-contain rounded-lg shadow-sm bg-white p-2 border border-slate-200"
+                              />
+                            </div>
+                          )}
+
+                          <div className="space-y-1">
+                            <label className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
+                              Manual Setup Key
+                            </label>
+                            <div className="flex items-center gap-2">
+                              <input
+                                type="text"
+                                readOnly
+                                value={mfaTotpSecret.secretKey}
+                                className="flex-1 px-3 py-2 bg-slate-100 rounded-lg text-xs font-mono font-bold text-slate-800 tracking-wider select-all border border-slate-200"
+                              />
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  navigator.clipboard.writeText(mfaTotpSecret.secretKey);
+                                  setMfaKeyCopied(true);
+                                  setTimeout(() => setMfaKeyCopied(false), 2000);
+                                  toast.success("Secret key copied to clipboard");
+                                }}
+                                className="p-2 border border-slate-200 hover:bg-slate-100 rounded-lg text-slate-600 transition-colors cursor-pointer"
+                                title="Copy Key"
+                              >
+                                {mfaKeyCopied ? <Check className="w-4 h-4 text-emerald-600" /> : <Copy className="w-4 h-4" />}
+                              </button>
+                            </div>
+                          </div>
+
+                          <div className="space-y-1.5 pt-2 border-t border-slate-100">
+                            <label className="text-[10px] font-bold uppercase tracking-wider text-slate-700">
+                              2. Enter 6-digit verification code
+                            </label>
+                            <input
+                              type="text"
+                              inputMode="numeric"
+                              autoComplete="one-time-code"
+                              maxLength={6}
+                              autoFocus
+                              value={mfaVerifyCode}
+                              onChange={(e) => setMfaVerifyCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                              placeholder="123456"
+                              className="w-full text-center text-xl font-mono font-bold tracking-[0.3em] py-2.5 bg-slate-50 border border-slate-200 focus:border-brand-primary rounded-xl focus:outline-none focus:ring-1 focus:ring-brand-primary/20 text-slate-900"
+                            />
+                          </div>
+                        </div>
+
+                        <div className="flex gap-2 pt-2">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setShowMfaEnrollModal(false);
+                              setMfaTotpSecret(null);
+                            }}
+                            className="flex-1 py-2.5 border border-slate-200 hover:bg-slate-50 text-slate-600 rounded-xl text-xs font-bold uppercase tracking-wider transition-all"
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            type="submit"
+                            disabled={isEnrollingMfa || mfaVerifyCode.length < 6}
+                            className="flex-1 py-2.5 bg-brand-primary hover:bg-brand-secondary text-white rounded-xl text-xs font-bold uppercase tracking-wider transition-all shadow-md active:scale-95 disabled:opacity-50 flex items-center justify-center gap-1.5 cursor-pointer"
+                          >
+                            {isEnrollingMfa ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <span>Activate 2FA</span>}
+                          </button>
+                        </div>
+                      </form>
+                    )}
+                  </motion.div>
+                </div>
+              )}
+            </AnimatePresence>
+
+            {/* Disable MFA Confirmation Modal */}
+            <AnimatePresence>
+              {showDisableMfaModal && (
+                <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-[250] flex items-center justify-center p-4">
+                  <motion.div
+                    initial={{ opacity: 0, scale: 0.95, y: 10 }}
+                    animate={{ opacity: 1, scale: 1, y: 0 }}
+                    exit={{ opacity: 0, scale: 0.95, y: 10 }}
+                    className="bg-white rounded-2xl p-6 max-w-sm w-full space-y-4 shadow-2xl border border-slate-100 text-left"
+                  >
+                    <div className="flex items-center gap-2.5 text-rose-600">
+                      <AlertCircle className="w-5 h-5 shrink-0" />
+                      <h3 className="font-bold text-sm text-slate-900">Disable Two-Factor Authentication?</h3>
+                    </div>
+
+                    <p className="text-xs text-slate-600 leading-relaxed">
+                      Disabling 2FA removes the extra security layer. Your account will only be protected by your password.
+                    </p>
+
+                    {error && (
+                      <div className="p-2.5 bg-rose-50 border border-rose-200 rounded-lg text-xs text-rose-700">
+                        {error}
+                      </div>
+                    )}
+
+                    <form onSubmit={handleDisableMfaConfirm} className="space-y-4">
+                      <div className="space-y-1">
+                        <label className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Confirm Password</label>
+                        <input
+                          type="password"
+                          required
+                          autoFocus
+                          value={disableMfaPassword}
+                          onChange={(e) => setDisableMfaPassword(e.target.value)}
+                          placeholder="••••••••"
+                          className="w-full px-3 py-2 bg-slate-50 border border-slate-200 focus:border-rose-500 rounded-xl text-xs font-medium focus:outline-none"
+                        />
+                      </div>
+
+                      <div className="flex gap-2 pt-2">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setShowDisableMfaModal(false);
+                            setDisableMfaPassword('');
+                            setError('');
+                          }}
+                          className="flex-1 py-2.5 border border-slate-200 hover:bg-slate-50 text-slate-600 rounded-xl text-xs font-bold uppercase tracking-wider transition-all"
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          type="submit"
+                          disabled={isDisablingMfa || !disableMfaPassword}
+                          className="flex-1 py-2.5 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-bold uppercase tracking-wider transition-all shadow-md active:scale-95 disabled:opacity-50 flex items-center justify-center gap-1.5 cursor-pointer"
+                        >
+                          {isDisablingMfa ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <span>Disable 2FA</span>}
+                        </button>
+                      </div>
+                    </form>
+                  </motion.div>
+                </div>
+              )}
+            </AnimatePresence>
 
             <div className="space-y-3 p-4 bg-slate-50/50 rounded-xl border border-slate-100">
               <h4 className="text-xs font-bold tracking-wider text-slate-400 uppercase">Compliance & Security</h4>
@@ -1287,6 +1878,58 @@ const AuthView: React.FC<AuthViewProps> = ({
                       Use a different email address
                     </button>
                   </div>
+                ) : mfaResolver ? (
+                  /* Two-Factor Authentication Challenge Form (Phase 1A Step 3) */
+                  <form onSubmit={handleVerifyMfaChallenge} className="space-y-4 text-left">
+                    <div className="bg-brand-primary/5 border border-brand-primary/20 rounded-xl p-4 flex items-start gap-3">
+                      <ShieldCheck className="w-5 h-5 text-brand-primary shrink-0 mt-0.5" />
+                      <div>
+                        <h3 className="text-xs font-black uppercase tracking-wider text-brand-primary">Two-Factor Authentication Required</h3>
+                        <p className="text-xs text-slate-600 mt-1 leading-relaxed">
+                          Enter the 6-digit verification code from your authenticator app to complete sign-in.
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <div className="flex justify-between items-center ml-1">
+                        <label className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Security Code</label>
+                        <span className="text-[10px] text-slate-400 font-medium">6 digits</span>
+                      </div>
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        autoComplete="one-time-code"
+                        maxLength={6}
+                        autoFocus
+                        value={mfaChallengeCode}
+                        onChange={(e) => setMfaChallengeCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                        placeholder="123456"
+                        className="w-full text-center text-2xl font-mono font-bold tracking-[0.35em] py-3 bg-slate-50 border border-slate-200 focus:border-brand-primary rounded-xl focus:outline-none focus:ring-2 focus:ring-brand-primary/20 transition-all text-slate-900"
+                      />
+                    </div>
+
+                    <button
+                      type="submit"
+                      disabled={isVerifyingMfa || mfaChallengeCode.length < 6}
+                      className="w-full py-3 bg-brand-primary hover:bg-brand-secondary text-white rounded-xl font-bold tracking-wider text-[12px] uppercase transition-all shadow-md active:scale-95 disabled:opacity-50 flex items-center justify-center gap-2 cursor-pointer"
+                    >
+                      {isVerifyingMfa ? <Loader2 className="w-4 h-4 animate-spin" /> : <ShieldCheck className="w-4 h-4" />}
+                      <span>{isVerifyingMfa ? 'Verifying...' : 'Verify & Sign In'}</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setMfaResolver(null);
+                        setMfaChallengeCode('');
+                        setError('');
+                      }}
+                      className="w-full py-2.5 text-xs font-bold text-slate-500 hover:text-slate-800 transition-colors text-center"
+                    >
+                      Cancel & Return to Password Sign In
+                    </button>
+                  </form>
                 ) : (
                   /* Standard Password Sign In Form */
                   <form onSubmit={handleSignIn} className="space-y-4">

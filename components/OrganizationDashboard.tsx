@@ -354,7 +354,7 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
             }
             setLoading(false);
           }, (err) => {
-            console.error("Error fetching org:", err);
+            console.warn("⚠️ Organization details fetch notice:", err);
             setLoading(false);
           });
           return () => {
@@ -368,7 +368,7 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
         }
       }
     }, (error) => {
-      console.error("Error loading organizations:", error);
+      console.warn("⚠️ Organizations load notice:", error);
       setLoading(false);
     });
 

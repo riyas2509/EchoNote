@@ -13,7 +13,7 @@ import { getApiUrl } from '../lib/apiClient';
 import { PLAN_FEATURES } from '../config/planConfig';
 import { getMinutesUsage, getThinkingUsage, formatRefreshDate } from '../lib/usageUtils';
 import { executeDownload, generateTranscriptBlob } from '../services/downloadService';
-import { AudioToTextRecord, TranscriptSegment, AuthStatus, UserProfile, Bookmark, SpeakerMapping, CollaborationRole, PlaybackMetadata, PlaybackStatus, CallSummary, UsageStats, Project, ExecutionTracker, OrgRole } from '../types';
+import { AudioToTextRecord, TranscriptSegment, AuthStatus, UserProfile, Bookmark, SpeakerMapping, CollaborationRole, PlaybackMetadata, PlaybackStatus, CallSummary, UsageStats, Project, ExecutionTracker, OrgRole, normalizeProjectRole } from '../types';
 
 interface AudioToTextViewProps {
   onSave: (record: AudioToTextRecord) => void; 
@@ -71,10 +71,6 @@ const AudioToTextView: React.FC<AudioToTextViewProps> = ({
     if (project.ownerEmail === userProfile?.email) return true;
 
     const member = project.members?.find(m => m.email === userProfile?.email);
-    
-    if (userOrgRole === 'team_manager') {
-      return true;
-    }
 
     if (!member) return false;
 
@@ -83,7 +79,7 @@ const AudioToTextView: React.FC<AudioToTextViewProps> = ({
     }
 
     if (action === 'edit') {
-      return member.role === 'owner' || member.role === 'editor';
+      return member.role === 'owner' || member.role === 'admin' || member.role === 'editor';
     }
 
     return false;
@@ -2310,13 +2306,12 @@ const AudioToTextView: React.FC<AudioToTextViewProps> = ({
                       <div className="flex items-center space-x-2">
                         <select 
                           className="bg-transparent text-[10px] font-bold text-slate-500 uppercase tracking-widest outline-none cursor-pointer"
-                          value={member.role}
+                          value={normalizeProjectRole(member.role)}
                           onChange={(e) => onInviteToProject(projectToManage.name, member.email, e.target.value as CollaborationRole)}
                         >
                           <option value="viewer">Viewer</option>
                           <option value="commenter">Commenter</option>
-                          <option value="editor">Editor</option>
-                          <option value="admin">Admin</option>
+                          <option value="admin">Project Admin</option>
                         </select>
                       </div>
                     </div>
@@ -2328,7 +2323,7 @@ const AudioToTextView: React.FC<AudioToTextViewProps> = ({
               {(() => {
                 const isOwner = projectToManage.ownerEmail === userProfile?.email;
                 const member = projectToManage.members?.find(m => m.email === userProfile?.email);
-                const isEditor = member?.role === 'editor';
+                const isEditor = member?.role === 'admin' || member?.role === 'editor';
                 const isDefaultAdmin = userProfile?.email === 'riyamshah2509@gmail.com';
                 const canInvite = isOwner || (usageStats.mode !== 'guest' && isEditor) || isDefaultAdmin;
 
@@ -2352,8 +2347,7 @@ const AudioToTextView: React.FC<AudioToTextViewProps> = ({
                         >
                           <option value="viewer">Viewer</option>
                           <option value="commenter">Commenter</option>
-                          <option value="editor">Editor</option>
-                          <option value="admin">Admin</option>
+                          <option value="admin">Project Admin</option>
                         </select>
                       <button 
                         onClick={() => {
