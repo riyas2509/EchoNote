@@ -133,6 +133,11 @@ function renderButton(text: string, url: string): string {
 export const CANONICAL_SENDER_EMAIL = 'EchoNote <invitations@echotechai.in>';
 
 /**
+ * Canonical reply address.
+ */
+export const CANONICAL_REPLY_TO_EMAIL = 'riya@echotechai.in';
+
+/**
  * Checks whether an email or display sender contains a forbidden resend.dev address.
  */
 export function isResendDevSender(sender?: string | null): boolean {
@@ -225,6 +230,7 @@ async function sendEmail(options: {
   subject: string;
   html: string;
   text?: string;
+  replyTo?: string | string[];
 }): Promise<EmailSendResult> {
   const maskedTo = maskEmailForLogs(options.to);
   const apiKey = process.env.RESEND_API_KEY;
@@ -265,7 +271,14 @@ async function sendEmail(options: {
       };
     }
 
-    const payload: { from: string; to: string; subject: string; html: string; text?: string } = {
+    const payload: {
+      from: string;
+      to: string;
+      subject: string;
+      html: string;
+      text?: string;
+      replyTo?: string | string[];
+    } = {
       from: fromAddress,
       to: options.to,
       subject: options.subject,
@@ -273,6 +286,10 @@ async function sendEmail(options: {
     };
     if (options.text) {
       payload.text = options.text;
+    }
+    const effectiveReplyTo = options.replyTo ?? CANONICAL_REPLY_TO_EMAIL;
+    if (effectiveReplyTo) {
+      payload.replyTo = effectiveReplyTo;
     }
 
     const response = await resend.emails.send(payload);
@@ -419,6 +436,7 @@ export const emailService = {
     inviteLink: string; 
     html?: string;
     text?: string;
+    replyTo?: string | string[];
   }): Promise<EmailSendResult> {
     const title = "Collaborate on EchoNote Project";
     const preheaderText = `${options.inviterName} has invited you to collaborate on the project "${options.projectName}" on EchoNote.`;
@@ -463,7 +481,8 @@ export const emailService = {
       to,
       subject: `EchoNote: ${options.inviterName} invited you to collaborate`,
       html,
-      text
+      text,
+      replyTo: options.replyTo
     });
   },
 
@@ -478,6 +497,7 @@ export const emailService = {
     expiresAt?: string;
     html?: string;
     text?: string;
+    replyTo?: string | string[];
   }): Promise<EmailSendResult> {
     const title = "Join Organization on EchoNote";
     const preheaderText = `${options.inviterName} has invited you to join their Organization "${options.orgName}" on EchoNote.`;
@@ -527,7 +547,8 @@ export const emailService = {
       to,
       subject: `EchoNote: Invitation to join ${options.orgName}`,
       html,
-      text
+      text,
+      replyTo: options.replyTo
     });
   },
 
@@ -698,5 +719,272 @@ export const emailService = {
 
     const html = wrapInBaseTemplate({ title, preheaderText, bodyContentHtml });
     return sendEmail({ to, subject: `EchoNote Payment Receipt - ${options.receiptId}`, html });
+  },
+
+  /**
+   * 7. Send Task Assignment Notification
+   */
+  async sendTaskAssignmentNotification(to: string, options: {
+    recipientName?: string;
+    taskTitle: string;
+    projectName?: string;
+    dueDate?: string | null;
+    priority?: string | null;
+    appUrl?: string;
+  }) {
+    const title = `Task Assigned: ${options.taskTitle}`;
+    const preheaderText = `You have been assigned to task "${options.taskTitle}"${options.projectName ? ` in project ${options.projectName}` : ''}.`;
+    const appUrl = options.appUrl || COMPANY_WEBSITE;
+    const greeting = options.recipientName ? `Hi ${options.recipientName},` : `Hello,`;
+
+    const bodyContentHtml = `
+      <h1 style="margin: 0 0 15px 0; font-size: 22px; font-weight: 800; color: ${PRIMARY_COLOR}; letter-spacing: -0.5px;">New Task Assignment</h1>
+      <p style="margin: 0 0 15px 0; font-size: 15px; line-height: 1.6; color: ${TEXT_COLOR};">
+        ${greeting}
+      </p>
+      <p style="margin: 0 0 20px 0; font-size: 15px; line-height: 1.6; color: ${TEXT_COLOR};">
+        You have been assigned to the following task in EchoNote:
+      </p>
+
+      <div style="background-color: #f8fafc; border-radius: 8px; border: 1px solid #e2e8f0; padding: 20px; margin: 20px 0;">
+        <table cellpadding="0" cellspacing="0" border="0" style="width: 100%;">
+          <tr>
+            <td style="font-size: 11px; text-transform: uppercase; font-weight: 700; color: #94a3b8; padding-bottom: 6px;">Task Title</td>
+          </tr>
+          <tr>
+            <td style="font-size: 16px; font-weight: 700; color: ${PRIMARY_COLOR}; padding-bottom: 15px;">${options.taskTitle}</td>
+          </tr>
+          ${options.projectName ? `
+          <tr>
+            <td style="font-size: 11px; text-transform: uppercase; font-weight: 700; color: #94a3b8; padding-bottom: 6px;">Project</td>
+          </tr>
+          <tr>
+            <td style="font-size: 14px; font-weight: 600; color: ${TEXT_COLOR}; padding-bottom: 15px;">${options.projectName}</td>
+          </tr>
+          ` : ''}
+          ${options.dueDate ? `
+          <tr>
+            <td style="font-size: 11px; text-transform: uppercase; font-weight: 700; color: #94a3b8; padding-bottom: 6px;">Due Date</td>
+          </tr>
+          <tr>
+            <td style="font-size: 14px; font-weight: 600; color: ${TEXT_COLOR}; padding-bottom: 15px;">${options.dueDate}</td>
+          </tr>
+          ` : ''}
+          ${options.priority ? `
+          <tr>
+            <td style="font-size: 11px; text-transform: uppercase; font-weight: 700; color: #94a3b8; padding-bottom: 6px;">Priority</td>
+          </tr>
+          <tr>
+            <td style="font-size: 14px; font-weight: 600; text-transform: capitalize; color: ${options.priority === 'urgent' ? '#dc2626' : (options.priority === 'high' ? '#ea580c' : TEXT_COLOR)};">${options.priority}</td>
+          </tr>
+          ` : ''}
+        </table>
+      </div>
+
+      ${renderButton("View Task Details", appUrl)}
+
+      <p style="margin: 20px 0 0 0; font-size: 13px; color: #64748b; line-height: 1.5;">
+        You received this notification because this task was assigned to your account.
+      </p>
+    `;
+
+    const html = wrapInBaseTemplate({ title, preheaderText, bodyContentHtml });
+    return sendEmail({ to, subject: `[EchoNote] Task Assigned: ${options.taskTitle}`, html });
+  },
+
+  /**
+   * 8. Send Upcoming Deadline Notification
+   */
+  async sendUpcomingDeadlineNotification(to: string, options: {
+    recipientName?: string;
+    taskTitle: string;
+    projectName?: string;
+    dueDate: string;
+    priority?: string | null;
+    appUrl?: string;
+  }) {
+    const title = `Upcoming Deadline: ${options.taskTitle}`;
+    const preheaderText = `Task "${options.taskTitle}" is due on ${options.dueDate}. Please review and update progress.`;
+    const appUrl = options.appUrl || COMPANY_WEBSITE;
+    const greeting = options.recipientName ? `Hi ${options.recipientName},` : `Hello,`;
+
+    const bodyContentHtml = `
+      <h1 style="margin: 0 0 15px 0; font-size: 22px; font-weight: 800; color: ${PRIMARY_COLOR}; letter-spacing: -0.5px;">Upcoming Task Deadline</h1>
+      <p style="margin: 0 0 15px 0; font-size: 15px; line-height: 1.6; color: ${TEXT_COLOR};">
+        ${greeting}
+      </p>
+      <p style="margin: 0 0 20px 0; font-size: 15px; line-height: 1.6; color: ${TEXT_COLOR};">
+        This is a courtesy reminder that the following task has an approaching deadline:
+      </p>
+
+      <div style="background-color: #f8fafc; border-radius: 8px; border: 1px solid #e2e8f0; padding: 20px; margin: 20px 0; border-left: 4px solid ${ACCENT_COLOR};">
+        <table cellpadding="0" cellspacing="0" border="0" style="width: 100%;">
+          <tr>
+            <td style="font-size: 11px; text-transform: uppercase; font-weight: 700; color: #94a3b8; padding-bottom: 6px;">Task Title</td>
+          </tr>
+          <tr>
+            <td style="font-size: 16px; font-weight: 700; color: ${PRIMARY_COLOR}; padding-bottom: 15px;">${options.taskTitle}</td>
+          </tr>
+          <tr>
+            <td style="font-size: 11px; text-transform: uppercase; font-weight: 700; color: #94a3b8; padding-bottom: 6px;">Due Date</td>
+          </tr>
+          <tr>
+            <td style="font-size: 15px; font-weight: 700; color: #2563eb; padding-bottom: 15px;">${options.dueDate}</td>
+          </tr>
+          ${options.projectName ? `
+          <tr>
+            <td style="font-size: 11px; text-transform: uppercase; font-weight: 700; color: #94a3b8; padding-bottom: 6px;">Project</td>
+          </tr>
+          <tr>
+            <td style="font-size: 14px; font-weight: 600; color: ${TEXT_COLOR};">${options.projectName}</td>
+          </tr>
+          ` : ''}
+        </table>
+      </div>
+
+      ${renderButton("Review Task", appUrl)}
+
+      <p style="margin: 20px 0 0 0; font-size: 13px; color: #64748b; line-height: 1.5;">
+        Please make sure your task deliverables are up to date in EchoNote.
+      </p>
+    `;
+
+    const html = wrapInBaseTemplate({ title, preheaderText, bodyContentHtml });
+    return sendEmail({ to, subject: `[EchoNote Reminder] Upcoming Deadline: ${options.taskTitle}`, html });
+  },
+
+  /**
+   * 9. Send Overdue Task Notification
+   */
+  async sendOverdueTaskNotification(to: string, options: {
+    recipientName?: string;
+    taskTitle: string;
+    projectName?: string;
+    dueDate: string;
+    priority?: string | null;
+    appUrl?: string;
+  }) {
+    const title = `Overdue Task Alert: ${options.taskTitle}`;
+    const preheaderText = `Task "${options.taskTitle}" was due on ${options.dueDate} and requires immediate attention.`;
+    const appUrl = options.appUrl || COMPANY_WEBSITE;
+    const greeting = options.recipientName ? `Hi ${options.recipientName},` : `Hello,`;
+
+    const bodyContentHtml = `
+      <h1 style="margin: 0 0 15px 0; font-size: 22px; font-weight: 800; color: #b91c1c; letter-spacing: -0.5px;">Task Overdue Alert</h1>
+      <p style="margin: 0 0 15px 0; font-size: 15px; line-height: 1.6; color: ${TEXT_COLOR};">
+        ${greeting}
+      </p>
+      <p style="margin: 0 0 20px 0; font-size: 15px; line-height: 1.6; color: ${TEXT_COLOR};">
+        The deadline for the following active task has passed:
+      </p>
+
+      <div style="background-color: #fef2f2; border-radius: 8px; border: 1px solid #fecaca; padding: 20px; margin: 20px 0; border-left: 4px solid #ef4444;">
+        <table cellpadding="0" cellspacing="0" border="0" style="width: 100%;">
+          <tr>
+            <td style="font-size: 11px; text-transform: uppercase; font-weight: 700; color: #991b1b; padding-bottom: 6px;">Task Title</td>
+          </tr>
+          <tr>
+            <td style="font-size: 16px; font-weight: 700; color: #991b1b; padding-bottom: 15px;">${options.taskTitle}</td>
+          </tr>
+          <tr>
+            <td style="font-size: 11px; text-transform: uppercase; font-weight: 700; color: #991b1b; padding-bottom: 6px;">Original Due Date</td>
+          </tr>
+          <tr>
+            <td style="font-size: 15px; font-weight: 700; color: #b91c1c; padding-bottom: 15px;">${options.dueDate}</td>
+          </tr>
+          ${options.projectName ? `
+          <tr>
+            <td style="font-size: 11px; text-transform: uppercase; font-weight: 700; color: #991b1b; padding-bottom: 6px;">Project</td>
+          </tr>
+          <tr>
+            <td style="font-size: 14px; font-weight: 600; color: #4b5563;">${options.projectName}</td>
+          </tr>
+          ` : ''}
+        </table>
+      </div>
+
+      ${renderButton("Update Task Status", appUrl)}
+
+      <p style="margin: 20px 0 0 0; font-size: 13px; color: #64748b; line-height: 1.5;">
+        If this task has been completed or the deadline extended, please update the status in your project workspace.
+      </p>
+    `;
+
+    const html = wrapInBaseTemplate({ title, preheaderText, bodyContentHtml });
+    return sendEmail({ to, subject: `[EchoNote Urgent] Overdue Task: ${options.taskTitle}`, html });
+  },
+
+  /**
+   * 10. Send Task Exception / Blocker Notification
+   */
+  async sendTaskExceptionNotification(to: string, options: {
+    recipientName?: string;
+    taskTitle: string;
+    projectName?: string;
+    exceptionTitle: string;
+    severity?: string | null;
+    details?: string | null;
+    appUrl?: string;
+  }) {
+    const title = `Task Blocked: ${options.taskTitle}`;
+    const preheaderText = `An issue or blocker was flagged on task "${options.taskTitle}". Action is required.`;
+    const appUrl = options.appUrl || COMPANY_WEBSITE;
+    const greeting = options.recipientName ? `Hi ${options.recipientName},` : `Hello,`;
+
+    const bodyContentHtml = `
+      <h1 style="margin: 0 0 15px 0; font-size: 22px; font-weight: 800; color: #c2410c; letter-spacing: -0.5px;">Task Blocker / Exception Reported</h1>
+      <p style="margin: 0 0 15px 0; font-size: 15px; line-height: 1.6; color: ${TEXT_COLOR};">
+        ${greeting}
+      </p>
+      <p style="margin: 0 0 20px 0; font-size: 15px; line-height: 1.6; color: ${TEXT_COLOR};">
+        A task exception has been recorded that may impact delivery:
+      </p>
+
+      <div style="background-color: #fff7ed; border-radius: 8px; border: 1px solid #ffedd5; padding: 20px; margin: 20px 0; border-left: 4px solid #f97316;">
+        <table cellpadding="0" cellspacing="0" border="0" style="width: 100%;">
+          <tr>
+            <td style="font-size: 11px; text-transform: uppercase; font-weight: 700; color: #9a3412; padding-bottom: 6px;">Task</td>
+          </tr>
+          <tr>
+            <td style="font-size: 16px; font-weight: 700; color: ${PRIMARY_COLOR}; padding-bottom: 15px;">${options.taskTitle}</td>
+          </tr>
+          <tr>
+            <td style="font-size: 11px; text-transform: uppercase; font-weight: 700; color: #9a3412; padding-bottom: 6px;">Exception / Blocker</td>
+          </tr>
+          <tr>
+            <td style="font-size: 15px; font-weight: 700; color: #c2410c; padding-bottom: 15px;">${options.exceptionTitle}</td>
+          </tr>
+          ${options.severity ? `
+          <tr>
+            <td style="font-size: 11px; text-transform: uppercase; font-weight: 700; color: #9a3412; padding-bottom: 6px;">Severity</td>
+          </tr>
+          <tr>
+            <td style="font-size: 14px; font-weight: 700; text-transform: uppercase; color: ${options.severity === 'critical' ? '#dc2626' : '#ea580c'}; padding-bottom: 15px;">${options.severity}</td>
+          </tr>
+          ` : ''}
+          ${options.details ? `
+          <tr>
+            <td style="font-size: 11px; text-transform: uppercase; font-weight: 700; color: #9a3412; padding-bottom: 6px;">Details</td>
+          </tr>
+          <tr>
+            <td style="font-size: 14px; font-weight: 400; color: ${TEXT_COLOR}; line-height: 1.5;">${options.details}</td>
+          </tr>
+          ` : ''}
+        </table>
+      </div>
+
+      ${renderButton("Resolve Blocker", appUrl)}
+
+      <p style="margin: 20px 0 0 0; font-size: 13px; color: #64748b; line-height: 1.5;">
+        Please review the blocker and coordinate resolution with your team.
+      </p>
+    `;
+
+    const html = wrapInBaseTemplate({ title, preheaderText, bodyContentHtml });
+    return sendEmail({ to, subject: `[EchoNote Action Required] Blocker: ${options.taskTitle}`, html });
   }
 };
+
+// Export sendEmail for internal service usage and test mocking
+export { sendEmail };
+
