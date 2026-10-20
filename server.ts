@@ -117,6 +117,18 @@ function timingSafeStringCompare(a?: string | null, b?: string | null): boolean 
   return crypto.timingSafeEqual(bufA, bufB);
 }
 
+// Defensive Gemini API Key Validation (Step 3B.4U-AH.64)
+export function validateGeminiApiKey(rawKey?: string | null): string {
+  const apiKey = (rawKey ? rawKey : "").trim();
+  if (!apiKey) {
+    throw new Error("GEMINI_API_KEY environment variable is required to use the Gemini API.");
+  }
+  if (/[^\x20-\x7E]/.test(apiKey)) {
+    throw new Error("Configured GEMINI_API_KEY contains invalid header characters.");
+  }
+  return apiKey;
+}
+
 // HTML entity escaping utility to prevent XSS in email templates
 export function escapeHtml(str: string | null | undefined): string {
   if (!str) return "";
@@ -245,10 +257,7 @@ async function startServer() {
   const aiGen = {
     get models() {
       if (!_aiGenInstance) {
-        const apiKey = process.env.GEMINI_API_KEY;
-        if (!apiKey) {
-          throw new Error("GEMINI_API_KEY environment variable is required to use the Gemini API.");
-        }
+        const apiKey = validateGeminiApiKey(process.env.GEMINI_API_KEY);
         _aiGenInstance = new GoogleGenAI({ apiKey });
       }
       return _aiGenInstance.models;

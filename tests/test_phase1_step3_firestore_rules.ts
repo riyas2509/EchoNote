@@ -218,7 +218,7 @@ export class FirestoreRulesEngine {
     if (this.evalIsAdmin(context)) return true;
     if (this.evalIsProjectOwner(context, projectId)) return true;
     if (this.evalIsProjectSupervisoryAdmin(context, projectId)) return true;
-    return this.evalHasExplicitProjectRole(context, projectId, ['owner', 'admin', 'editor']);
+    return this.evalHasExplicitProjectRole(context, projectId, ['owner', 'admin']);
   }
 
   public evalIsProjectAdmin(context: SecurityRequestContext, projectId: string): boolean {
@@ -256,13 +256,10 @@ export class FirestoreRulesEngine {
       return { allowed: false, reason: "Default Deny: Unlisted collection" };
     }
 
-    // Unauthenticated global check (except public healthcheck or token validation endpoints)
+    // Unauthenticated global check (except public healthcheck or telemetry endpoints)
     if (!isAuth) {
       if (collection === 'healthcheck' || collection === 'test') {
         if (operation === 'get' || operation === 'list') return { allowed: true, reason: "Public read" };
-      }
-      if (collection === 'invites' && operation === 'get') {
-        return { allowed: true, reason: "Public invite token lookup" };
       }
       if (collection === 'productEvents' && operation === 'create') {
         return { allowed: true, reason: "Anonymous telemetry allowed" };
@@ -360,22 +357,35 @@ export class FirestoreRulesEngine {
       if (operation === 'update') {
         if (!existingData) return { allowed: false, reason: "Member doc not found" };
         const isSelf = existingData.userId === context.auth!.uid;
-        // Check role escalation
-        if (incomingData?.role !== existingData.role) {
-          if (isSelf && !isAdmin) return { allowed: false, reason: "Self role escalation forbidden" };
-          if (!this.evalCanManageProjectMembers(context, existingData.projectId)) {
-            return { allowed: false, reason: "Only project managers can change roles" };
-          }
-          if (incomingData?.role === 'owner') {
-            return { allowed: false, reason: "Cannot promote member to owner" };
-          }
+        const incomingRole = incomingData?.role || existingData.role;
+        const roleChanging = incomingRole !== existingData.role;
+
+        // Check if caller can manage project members
+        const canManage = isAdmin || this.evalCanManageProjectMembers(context, existingData.projectId);
+
+        // Case 1: Role/metadata updates by project manager (owner/admin/orgSupervisor/platformAdmin)
+        // Must not be self-update (unless platform admin), and cannot grant 'owner'
+        if (canManage && (!isSelf || isAdmin) && incomingRole !== 'owner') {
+          return { allowed: true, reason: "Member update allowed by authorized manager" };
         }
-        return { allowed: true, reason: "Member update allowed" };
+
+        // Case 2: Self-update of non-role fields only (displayName, email, lastActive)
+        if (isSelf && !roleChanging) {
+          return { allowed: true, reason: "Self-update of profile metadata allowed" };
+        }
+
+        return { allowed: false, reason: "Unauthorized member update or role escalation forbidden" };
       }
       if (operation === 'delete') {
         if (!existingData) return { allowed: false, reason: "Member not found" };
+        if (existingData.role === 'owner') {
+          return { allowed: false, reason: "Project owner membership deletion is strictly protected" };
+        }
+        if (!['admin', 'editor', 'commenter', 'viewer'].includes(existingData.role)) {
+          return { allowed: false, reason: "Invalid or missing role" };
+        }
         const isSelf = existingData.userId === context.auth!.uid;
-        if (isSelf && existingData.role !== 'owner') {
+        if (isSelf) {
           return { allowed: true, reason: "Member can leave project" };
         }
         const allowed = isAdmin || this.evalCanManageProjectMembers(context, existingData.projectId);
@@ -518,9 +528,18 @@ export class FirestoreRulesEngine {
     // ==========================================
     if (collection === 'invites') {
       const projectId = incomingData?.projectId || existingData?.projectId;
-      if (operation === 'get') return { allowed: true, reason: "Public invite lookup" };
+      if (operation === 'get') {
+        const isVerifiedRecipient = Boolean(
+          context.auth?.token?.email_verified === true &&
+          context.auth?.token?.email &&
+          existingData?.email &&
+          context.auth.token.email.toLowerCase().trim() === existingData.email.toLowerCase().trim()
+        );
+        const allowed = isAdmin || (projectId && this.evalIsProjectAdmin(context, projectId)) || isVerifiedRecipient;
+        return { allowed: Boolean(allowed), reason: allowed ? "Invite read allowed" : "Denied" };
+      }
       if (operation === 'list') {
-        const allowed = isAdmin || (projectId && this.evalCanViewProject(context, projectId));
+        const allowed = isAdmin || (projectId && this.evalIsProjectAdmin(context, projectId));
         return { allowed: Boolean(allowed), reason: allowed ? "Invite list allowed" : "Denied" };
       }
       if (operation === 'create') {
@@ -610,6 +629,68 @@ export class FirestoreRulesEngine {
       }
     }
 
+    // ==========================================
+    // 11. teams & departments collections
+    // ==========================================
+    if (collection === 'teams' || collection === 'departments') {
+      const isTeam = collection === 'teams';
+      const checkOrgAuthority = (orgId: string): boolean => {
+        if (!orgId || typeof orgId !== 'string' || !/^[a-zA-Z0-9_\-]+$/.test(orgId)) return false;
+        if (isAdmin) return true;
+        return isTeam ? this.evalIsOrgManager(context, orgId) : this.evalIsOrgAdmin(context, orgId);
+      };
+
+      if (operation === 'get' || operation === 'list') {
+        const orgId = existingData?.orgId;
+        const allowed = isAdmin || (typeof orgId === 'string' && (this.evalIsOrgMember(context, orgId) || this.evalIsOrgOwner(context, orgId)));
+        return { allowed: Boolean(allowed), reason: allowed ? collection + " read allowed" : "Denied" };
+      }
+
+      if (operation === 'create') {
+        const targetOrgId = incomingData?.orgId;
+        if (!docId || !/^[a-zA-Z0-9_\-]+$/.test(docId)) {
+          return { allowed: false, reason: "Invalid record ID" };
+        }
+        if (!targetOrgId || typeof targetOrgId !== 'string' || !/^[a-zA-Z0-9_\-]+$/.test(targetOrgId)) {
+          return { allowed: false, reason: "Missing or invalid orgId" };
+        }
+        const orgDoc = this.getDoc("organizations/" + targetOrgId);
+        if (!orgDoc) {
+          return { allowed: false, reason: "Referenced organization does not exist" };
+        }
+        const allowed = checkOrgAuthority(targetOrgId);
+        return { allowed, reason: allowed ? collection + " create allowed" : "Unauthorized manager/admin for organization" };
+      }
+
+      if (operation === 'update') {
+        if (!docId || !/^[a-zA-Z0-9_\-]+$/.test(docId)) {
+          return { allowed: false, reason: "Invalid record ID" };
+        }
+        const currentOrgId = existingData?.orgId;
+        const targetOrgId = incomingData?.orgId;
+        if (!currentOrgId || typeof currentOrgId !== 'string') {
+          return { allowed: false, reason: "Existing record lacks valid orgId" };
+        }
+        if (!targetOrgId || typeof targetOrgId !== 'string') {
+          return { allowed: false, reason: "Update missing valid orgId" };
+        }
+        if (targetOrgId !== currentOrgId) {
+          return { allowed: false, reason: "Cross-organization reassignment forbidden" };
+        }
+        const allowed = checkOrgAuthority(currentOrgId);
+        return { allowed, reason: allowed ? collection + " update allowed" : "Unauthorized manager/admin for organization" };
+      }
+
+      if (operation === 'delete') {
+        const currentOrgId = existingData?.orgId;
+        if (!currentOrgId || typeof currentOrgId !== 'string') {
+          return { allowed: false, reason: "Existing record lacks valid orgId" };
+        }
+        const allowed = checkOrgAuthority(currentOrgId);
+        return { allowed, reason: allowed ? collection + " delete allowed" : "Unauthorized manager/admin for organization" };
+      }
+    }
+
     // Other collections (notifications, projectActivities, etc.)
     return { allowed: true, reason: "Permitted operation" };
   }
@@ -682,8 +763,18 @@ export function runPhase1Step3RulesTestSuite(): { total: number; passed: number;
   // Org Members
   engine.setDoc("orgMembers/user_alpha_owner_org_alpha", { orgId: "org_alpha", userId: "user_alpha_owner", role: "owner", status: "active" });
   engine.setDoc("orgMembers/user_alpha_admin_org_alpha", { orgId: "org_alpha", userId: "user_alpha_admin", role: "org_admin", status: "active" });
+  engine.setDoc("orgMembers/user_alpha_manager_org_alpha", { orgId: "org_alpha", userId: "user_alpha_manager", role: "team_manager", status: "active" });
   engine.setDoc("orgMembers/user_alpha_member_org_alpha", { orgId: "org_alpha", userId: "user_alpha_member", role: "member", status: "active" });
+  engine.setDoc("orgMembers/user_beta_owner_org_beta", { orgId: "org_beta", userId: "user_beta_owner", role: "owner", status: "active" });
+  engine.setDoc("orgMembers/user_beta_admin_org_beta", { orgId: "org_beta", userId: "user_beta_admin", role: "org_admin", status: "active" });
+  engine.setDoc("orgMembers/user_beta_manager_org_beta", { orgId: "org_beta", userId: "user_beta_manager", role: "team_manager", status: "active" });
   engine.setDoc("orgMembers/user_beta_member_org_beta", { orgId: "org_beta", userId: "user_beta_member", role: "member", status: "active" });
+
+  // Teams & Departments fixtures
+  engine.setDoc("teams/team_alpha_1", { id: "team_alpha_1", orgId: "org_alpha", name: "Alpha Core Team" });
+  engine.setDoc("departments/dept_alpha_1", { id: "dept_alpha_1", orgId: "org_alpha", name: "Alpha Engineering" });
+  engine.setDoc("teams/team_beta_1", { id: "team_beta_1", orgId: "org_beta", name: "Beta Core Team" });
+  engine.setDoc("departments/dept_beta_1", { id: "dept_beta_1", orgId: "org_beta", name: "Beta Engineering" });
 
   // Projects
   // Project in Alpha Org
@@ -696,9 +787,11 @@ export function runPhase1Step3RulesTestSuite(): { total: number; passed: number;
 
   // Project Members for proj_alpha_1
   engine.setDoc("projectMembers/user_alpha_admin_proj_alpha_1", { projectId: "proj_alpha_1", userId: "user_alpha_admin", role: "admin" });
+  engine.setDoc("projectMembers/user_alpha_editor_proj_alpha_1", { projectId: "proj_alpha_1", userId: "user_alpha_editor", role: "editor" });
   engine.setDoc("projectMembers/user_alpha_commenter_proj_alpha_1", { projectId: "proj_alpha_1", userId: "user_alpha_commenter", role: "commenter" });
   engine.setDoc("projectMembers/user_alpha_viewer_proj_alpha_1", { projectId: "proj_alpha_1", userId: "user_alpha_viewer", role: "viewer" });
-  // Add user_alpha_commenter and user_alpha_viewer to org_alpha
+  // Add user_alpha_editor, user_alpha_commenter and user_alpha_viewer to org_alpha
+  engine.setDoc("orgMembers/user_alpha_editor_org_alpha", { orgId: "org_alpha", userId: "user_alpha_editor", role: "member", status: "active" });
   engine.setDoc("orgMembers/user_alpha_commenter_org_alpha", { orgId: "org_alpha", userId: "user_alpha_commenter", role: "member", status: "active" });
   engine.setDoc("orgMembers/user_alpha_viewer_org_alpha", { orgId: "org_alpha", userId: "user_alpha_viewer", role: "member", status: "active" });
 
@@ -728,6 +821,10 @@ export function runPhase1Step3RulesTestSuite(): { total: number; passed: number;
   const ctxPlatformAdmin: SecurityRequestContext = { auth: { uid: "user_platform_admin", token: { email_verified: true, role: "admin", platform_admin: true } } };
   const ctxAlphaOwner: SecurityRequestContext = { auth: { uid: "user_alpha_owner", token: { email: "owner@alpha.com", orgId: "org_alpha", orgRole: "owner" } } };
   const ctxAlphaAdmin: SecurityRequestContext = { auth: { uid: "user_alpha_admin", token: { email: "admin@alpha.com", orgId: "org_alpha", orgRole: "org_admin" } } };
+  const ctxAlphaManager: SecurityRequestContext = { auth: { uid: "user_alpha_manager", token: { email: "manager@alpha.com", orgId: "org_alpha", orgRole: "team_manager" } } };
+  const ctxBetaAdmin: SecurityRequestContext = { auth: { uid: "user_beta_admin", token: { email: "admin@beta.com", orgId: "org_beta", orgRole: "org_admin" } } };
+  const ctxBetaManager: SecurityRequestContext = { auth: { uid: "user_beta_manager", token: { email: "manager@beta.com", orgId: "org_beta", orgRole: "team_manager" } } };
+  const ctxAlphaEditor: SecurityRequestContext = { auth: { uid: "user_alpha_editor", token: { email: "editor@alpha.com", orgId: "org_alpha", orgRole: "member" } } };
   const ctxAlphaCommenter: SecurityRequestContext = { auth: { uid: "user_alpha_commenter", token: { email: "commenter@alpha.com", orgId: "org_alpha", orgRole: "member" } } };
   const ctxAlphaViewer: SecurityRequestContext = { auth: { uid: "user_alpha_viewer", token: { email: "viewer@alpha.com", orgId: "org_alpha", orgRole: "member" } } };
   const ctxAlphaUnrelatedMember: SecurityRequestContext = { auth: { uid: "user_alpha_member", token: { email: "member@alpha.com", orgId: "org_alpha", orgRole: "member" } } };
@@ -991,6 +1088,151 @@ export function runPhase1Step3RulesTestSuite(): { total: number; passed: number;
   // --------------------------------------------------------------------------
   const t41 = engine.evaluateOperation('unknown_sensitive_collection', 'doc_1', 'get', ctxPlatformAdmin);
   recordTest(41, "unknown/unlisted collection access denied", !t41.allowed, t41.reason, "Denied");
+
+  // --------------------------------------------------------------------------
+  // SCENARIOS 42 - 47: PROJECT MEMBERSHIP RBAC ANTI-ESCALATION REGRESSION TESTS
+  // --------------------------------------------------------------------------
+  // 42. Project editor cannot create an admin membership for another user
+  const t42 = engine.evaluateOperation('projectMembers', 'new_guest_admin_proj_alpha_1', 'create', {
+    ...ctxAlphaEditor,
+    incomingData: { projectId: "proj_alpha_1", userId: "new_guest_admin", role: "admin" }
+  });
+  recordTest(42, "editor cannot create admin membership for another user", !t42.allowed, t42.reason, "Denied");
+
+  // 43. Project editor cannot create any membership (e.g. viewer) for another user
+  const t43 = engine.evaluateOperation('projectMembers', 'new_guest_viewer_proj_alpha_1', 'create', {
+    ...ctxAlphaEditor,
+    incomingData: { projectId: "proj_alpha_1", userId: "new_guest_viewer", role: "viewer" }
+  });
+  recordTest(43, "editor cannot create membership for another user", !t43.allowed, t43.reason, "Denied");
+
+  // 44. Project editor cannot promote an existing member to admin
+  const t44 = engine.evaluateOperation('projectMembers', 'user_alpha_viewer_proj_alpha_1', 'update', {
+    ...ctxAlphaEditor,
+    incomingData: { projectId: "proj_alpha_1", userId: "user_alpha_viewer", role: "admin" }
+  });
+  recordTest(44, "editor cannot promote existing member to admin", !t44.allowed, t44.reason, "Denied");
+
+  // 45. User cannot elevate their own role (e.g. editor self-promoting to admin or owner)
+  const t45_admin = engine.evaluateOperation('projectMembers', 'user_alpha_editor_proj_alpha_1', 'update', {
+    ...ctxAlphaEditor,
+    incomingData: { projectId: "proj_alpha_1", userId: "user_alpha_editor", role: "admin" }
+  });
+  const t45_owner = engine.evaluateOperation('projectMembers', 'user_alpha_editor_proj_alpha_1', 'update', {
+    ...ctxAlphaEditor,
+    incomingData: { projectId: "proj_alpha_1", userId: "user_alpha_editor", role: "owner" }
+  });
+  recordTest(45, "user cannot elevate own role to admin or owner", !t45_admin.allowed && !t45_owner.allowed, "admin=" + t45_admin.allowed + ", owner=" + t45_owner.allowed, "admin=false, owner=false");
+
+  // 46. Authorized project admin can perform permitted membership changes (create member and update role)
+  const t46_create = engine.evaluateOperation('projectMembers', 'user_alpha_new_member_proj_alpha_1', 'create', {
+    ...ctxAlphaAdmin,
+    incomingData: { projectId: "proj_alpha_1", userId: "user_alpha_new_member", role: "viewer" }
+  });
+  const t46_update = engine.evaluateOperation('projectMembers', 'user_alpha_viewer_proj_alpha_1', 'update', {
+    ...ctxAlphaAdmin,
+    incomingData: { projectId: "proj_alpha_1", userId: "user_alpha_viewer", role: "editor" }
+  });
+  recordTest(46, "authorized project admin can create and update member role", t46_create.allowed && t46_update.allowed, "create=" + t46_create.allowed + ", update=" + t46_update.allowed, "create=true, update=true");
+
+  // 47. Legitimate self-service non-role updates continue to work (displayName, email, lastActive)
+  const t47_self = engine.evaluateOperation('projectMembers', 'user_alpha_editor_proj_alpha_1', 'update', {
+    ...ctxAlphaEditor,
+    incomingData: { projectId: "proj_alpha_1", userId: "user_alpha_editor", role: "editor", displayName: "Updated Editor Name" }
+  });
+  recordTest(47, "legitimate self-service non-role update allowed", t47_self.allowed, t47_self.reason, "Allowed");
+
+  // --------------------------------------------------------------------------
+  // SCENARIOS 48 - 56: TEAM & DEPARTMENT CROSS-ORG REASSIGNMENT & DELETE ISOLATION
+  // --------------------------------------------------------------------------
+  // 48. Org Manager can create team and department within their own organization
+  const t48_team = engine.evaluateOperation('teams', 'team_alpha_2', 'create', {
+    ...ctxAlphaManager,
+    incomingData: { id: "team_alpha_2", orgId: "org_alpha", name: "Alpha QA Team" }
+  });
+  const t48_dept = engine.evaluateOperation('departments', 'dept_alpha_2', 'create', {
+    ...ctxAlphaAdmin,
+    incomingData: { id: "dept_alpha_2", orgId: "org_alpha", name: "Alpha Product" }
+  });
+  recordTest(48, "manager can create team and admin can create department in own org", t48_team.allowed && t48_dept.allowed, "team=" + t48_team.allowed + ", dept=" + t48_dept.allowed, "team=true, dept=true");
+
+  // 49. Org Manager cannot create team or department in another organization
+  const t49_team = engine.evaluateOperation('teams', 'team_beta_cross', 'create', {
+    ...ctxAlphaManager,
+    incomingData: { id: "team_beta_cross", orgId: "org_beta", name: "Cross Team" }
+  });
+  const t49_dept = engine.evaluateOperation('departments', 'dept_beta_cross', 'create', {
+    ...ctxAlphaAdmin,
+    incomingData: { id: "dept_beta_cross", orgId: "org_beta", name: "Cross Dept" }
+  });
+  recordTest(49, "manager/admin cannot create team or department in another org", !t49_team.allowed && !t49_dept.allowed, "team=" + t49_team.allowed + ", dept=" + t49_dept.allowed, "team=false, dept=false");
+
+  // 50. Org Manager cannot update an existing team/dept to change orgId to another organization
+  const t50_team = engine.evaluateOperation('teams', 'team_alpha_1', 'update', {
+    ...ctxAlphaManager,
+    incomingData: { id: "team_alpha_1", orgId: "org_beta", name: "Reassigned Team" }
+  });
+  const t50_dept = engine.evaluateOperation('departments', 'dept_alpha_1', 'update', {
+    ...ctxAlphaAdmin,
+    incomingData: { id: "dept_alpha_1", orgId: "org_beta", name: "Reassigned Dept" }
+  });
+  recordTest(50, "cannot change existing team or department orgId to another org", !t50_team.allowed && !t50_dept.allowed, "team=" + t50_team.allowed + ", dept=" + t50_dept.allowed, "team=false, dept=false");
+
+  // 51. Org Manager cannot update records belonging to another organization
+  const t51_team = engine.evaluateOperation('teams', 'team_beta_1', 'update', {
+    ...ctxAlphaManager,
+    incomingData: { id: "team_beta_1", orgId: "org_beta", name: "Tampered Beta Team" }
+  });
+  const t51_dept = engine.evaluateOperation('departments', 'dept_beta_1', 'update', {
+    ...ctxAlphaAdmin,
+    incomingData: { id: "dept_beta_1", orgId: "org_beta", name: "Tampered Beta Dept" }
+  });
+  recordTest(51, "manager/admin cannot update team or department in another org", !t51_team.allowed && !t51_dept.allowed, "team=" + t51_team.allowed + ", dept=" + t51_dept.allowed, "team=false, dept=false");
+
+  // 52. Org Manager cannot delete records belonging to another organization
+  const t52_team = engine.evaluateOperation('teams', 'team_beta_1', 'delete', ctxAlphaManager);
+  const t52_dept = engine.evaluateOperation('departments', 'dept_beta_1', 'delete', ctxAlphaAdmin);
+  recordTest(52, "manager/admin cannot delete team or department in another org", !t52_team.allowed && !t52_dept.allowed, "team=" + t52_team.allowed + ", dept=" + t52_dept.allowed, "team=false, dept=false");
+
+  // 53. Delete authorization succeeds without requiring request.resource data
+  // (In evaluateOperation for delete, context has no incomingData/request.resource)
+  const t53_team = engine.evaluateOperation('teams', 'team_alpha_1', 'delete', ctxAlphaManager);
+  const t53_dept = engine.evaluateOperation('departments', 'dept_alpha_1', 'delete', ctxAlphaAdmin);
+  recordTest(53, "delete authorization works without requiring request.resource", t53_team.allowed && t53_dept.allowed, "team=" + t53_team.allowed + ", dept=" + t53_dept.allowed, "team=true, dept=true");
+
+  // 54. Platform administrator retains intended management access across organizations
+  const t54_team_create = engine.evaluateOperation('teams', 'team_plat_1', 'create', {
+    ...ctxPlatformAdmin,
+    incomingData: { id: "team_plat_1", orgId: "org_alpha", name: "Platform Created Team" }
+  });
+  const t54_dept_update = engine.evaluateOperation('departments', 'dept_beta_1', 'update', {
+    ...ctxPlatformAdmin,
+    incomingData: { id: "dept_beta_1", orgId: "org_beta", name: "Platform Updated Dept" }
+  });
+  const t54_team_delete = engine.evaluateOperation('teams', 'team_beta_1', 'delete', ctxPlatformAdmin);
+  recordTest(54, "platform admin retains full management access across orgs", t54_team_create.allowed && t54_dept_update.allowed && t54_team_delete.allowed, "create=" + t54_team_create.allowed + ", update=" + t54_dept_update.allowed + ", delete=" + t54_team_delete.allowed, "create=true, update=true, delete=true");
+
+  // 55. Missing, null, or malformed organization identifiers are rejected on create
+  const t55_missing_org = engine.evaluateOperation('teams', 'team_no_org', 'create', {
+    ...ctxAlphaManager,
+    incomingData: { id: "team_no_org", name: "No Org Team" }
+  });
+  const t55_null_org = engine.evaluateOperation('teams', 'team_null_org', 'create', {
+    ...ctxAlphaManager,
+    incomingData: { id: "team_null_org", orgId: null, name: "Null Org Team" }
+  });
+  const t55_malformed_org = engine.evaluateOperation('teams', 'team_bad_org', 'create', {
+    ...ctxAlphaManager,
+    incomingData: { id: "team_bad_org", orgId: "bad/org/id!@#", name: "Malformed Org Team" }
+  });
+  recordTest(55, "missing, null, or malformed orgId on create is denied", !t55_missing_org.allowed && !t55_null_org.allowed && !t55_malformed_org.allowed, "missing=" + t55_missing_org.allowed + ", null=" + t55_null_org.allowed + ", malformed=" + t55_malformed_org.allowed, "missing=false, null=false, malformed=false");
+
+  // 56. Missing or null orgId on update is denied (fails closed)
+  const t56_null_update = engine.evaluateOperation('teams', 'team_alpha_1', 'update', {
+    ...ctxAlphaManager,
+    incomingData: { id: "team_alpha_1", orgId: null, name: "Null Org Update" }
+  });
+  recordTest(56, "missing or null orgId on update is denied", !t56_null_update.allowed, t56_null_update.reason, "Denied");
 
   // Summary
   const passed = results.filter(r => r.passed).length;

@@ -14,6 +14,8 @@ export interface Transcript {
   actionItems: string[];
   segments: TranscriptSegment[];
   entities?: string[];
+  meetingSessionId?: string;
+  provenanceManifestId?: string;
   createdAt: string;
 }
 
@@ -27,6 +29,17 @@ export interface Recording {
   duration?: number;
   mimeType?: string;
   errorMessage?: string;
+  meetingSessionId?: string;
+  externalMeetingId?: string;
+  provider?: MeetingPlatformProvider;
+  provenanceManifestId?: string;
+  isTrimmedVersion?: boolean;
+  parentRecordingId?: string;
+  trimRange?: {
+    startTime: number;
+    endTime: number;
+    duration: number;
+  };
   createdAt: string;
 }
 
@@ -146,6 +159,9 @@ export interface ProjectAccessResolution {
   permissions: ProjectPermissions;
   reason?: string;
   notFound?: boolean;
+  mfaRequired?: boolean;
+  mfaRequirement?: string;
+  mfaEnrolled?: boolean;
 }
 
 /**
@@ -260,6 +276,10 @@ export interface OrgAuditEvent {
     | 'MEMBER_DEPARTMENT_ASSIGNED'
     | 'ORGANIZATION_CREATED' 
     | 'SECURITY_UPDATED' 
+    | 'DOMAIN_ADDED'
+    | 'DOMAIN_VERIFIED'
+    | 'DOMAIN_VERIFICATION_FAILED'
+    | 'DOMAIN_REMOVED'
     | 'SSO_LOGIN_SUCCESS' 
     | 'SSO_LOGIN_FAILED' 
     | 'SSO_LOGIN_BLOCKED'
@@ -268,6 +288,10 @@ export interface OrgAuditEvent {
     | 'SSO_CONFIGURATION_DELETED'
     | 'SSO_BYPASS_BLOCKED' 
     | 'SSO_TENANT_MISMATCH' 
+    | 'SSO_AUDIENCE_MISMATCH'
+    | 'SSO_IDENTITY_MISMATCH'
+    | 'SSO_TOKEN_TYPE_INVALID'
+    | 'SSO_TOKEN_REPLAYED'
     | 'ENTERPRISE_LOGIN_SUCCESS'
     | 'ENTERPRISE_JIT_PROVISIONED'
     | 'SAML_CONFIGURATION_CREATED' 
@@ -305,8 +329,12 @@ export interface OrgAuditEvent {
     | 'MFA_CHALLENGE_SUCCESS'
     | 'MFA_CHALLENGE_FAILURE'
     | 'MFA_RECOVERY_USED'
+    | 'MFA_RECOVERY_CODES_GENERATED'
+    | 'MFA_RECOVERY_CODE_REDEEMED'
     | 'MEMBER_ACCOUNT_CLOSED'
-    | 'ORGANIZATION_DELETION_REQUESTED';
+    | 'ORGANIZATION_DELETION_REQUESTED'
+    | 'INTEGRATION_CONFIG_UPDATED'
+    | 'INTEGRATION_DISCONNECTED';
   timestamp: string;
   source?: string;
   details?: string;
@@ -392,14 +420,16 @@ export interface UserProfile {
   minuteTopupBalance?: number;
   billingStartDate?: string; // ISO string
   lastResetDate?: string; // ISO string
+  lastUsageResetDate?: string; // ISO string (backward compatible alias)
   planExpiresAt: string; // ISO string
   createdAt: string;
   subscriptionStartDate?: string; // ISO string
   billingCycle?: 'monthly' | 'yearly';
   nextRefreshDate?: string; // ISO string
-  lastUsageResetDate?: string; // ISO string
   mfaEnabled?: boolean;
   mfaEnrolledAt?: string; // ISO string
+  onboardingCompleted?: boolean;
+  onboardingCompletedAt?: string; // ISO string
 }
 
 export interface Subscription {
@@ -505,6 +535,17 @@ export interface AudioToTextRecord {
   group: string; 
   projectId?: string;
   storagePath?: string;
+  meetingSessionId?: string;
+  externalMeetingId?: string;
+  provider?: MeetingPlatformProvider;
+  provenanceManifestId?: string;
+  isTrimmedVersion?: boolean;
+  parentRecordingId?: string;
+  trimRange?: {
+    startTime: number;
+    endTime: number;
+    duration: number;
+  };
   deletedAt?: string; // ISO string when moved to trash
   _file?: Blob | File;
 }
@@ -924,6 +965,9 @@ export interface UnifiedDecision {
   peopleInvolved: string[];
   confidenceLevel: 'High' | 'Medium' | 'Low';
   relatedTaskIds: string[];
+  meetingSessionId?: string;
+  sourceTimestamp?: number;
+  transcriptSegmentIndex?: number;
 }
 
 export interface UnifiedTask {
@@ -933,6 +977,9 @@ export interface UnifiedTask {
   deadline?: string;
   priority: 'High' | 'Medium' | 'Low';
   relatedDecisionId?: string;
+  meetingSessionId?: string;
+  sourceTimestamp?: number;
+  transcriptSegmentIndex?: number;
 }
 
 export interface UnifiedUnresolvedTopic {
@@ -1052,12 +1099,244 @@ export interface ProjectTask {
   startDate?: string;
   milestoneId?: string;
   milestoneTitle?: string;
+  sourceType?: 'manual' | 'meeting_decision' | 'meeting_action_item' | 'transcript_mention';
+  sourceDecisionId?: string;
+  sourceActionItem?: string;
+  sourceMeetingSessionId?: string;
+  sourceRecordingId?: string;
+  isAiSuggested?: boolean;
+  acceptedBy?: string;
+  acceptedAt?: string;
   subTasks?: SubTask[];
   activityHistory?: TaskActivity[];
+  prerequisiteTaskIds?: string[];
+  dependencyStatus?: 'ready' | 'blocked' | 'completed';
+  blockingPrerequisites?: Array<{ id: string; title: string; status: string }>;
+  dependentTaskIds?: string[];
+  activeExceptions?: Array<{ id: string; type: string; severity: string; title: string; status: string }>;
   createdBy: string;
   creatorEmail?: string;
   createdAt: string;
   updatedAt?: string;
+}
+
+export interface TaskTemplateItem {
+  id: string; // Template-internal identifier (e.g. "tpl_task_1")
+  title: string;
+  description?: string;
+  priority: 'low' | 'medium' | 'high' | 'urgent';
+  startOffsetDays?: number; // Relative start date offset in days from instantiation anchor date
+  dueOffsetDays?: number;   // Relative due date offset in days from instantiation anchor date
+  prerequisiteTemplateItemIds?: string[]; // IDs of other template tasks within the same template that must finish first
+  order?: number;
+}
+
+export interface TaskTemplate {
+  id: string;
+  name: string;
+  description?: string;
+  scope: 'organization' | 'project';
+  organizationId?: string;
+  projectId?: string;
+  tasks: TaskTemplateItem[];
+  createdBy: string;
+  creatorEmail?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TaskExceptionHistoryEntry {
+  id: string;
+  action: 'created' | 'acknowledged' | 'in_progress' | 'resolved' | 'dismissed' | 'reopened' | 'updated' | 'assigned';
+  performedBy: string; // User ID
+  performedByName: string;
+  performedByEmail: string;
+  timestamp: string;
+  details?: string;
+  previousStatus?: string;
+  newStatus?: string;
+}
+
+export type TaskExceptionType = 'blocked' | 'overdue' | 'at_risk' | 'dependency_issue' | 'other';
+export type TaskExceptionSeverity = 'low' | 'medium' | 'high' | 'critical';
+export type TaskExceptionStatus = 'open' | 'acknowledged' | 'in_progress' | 'resolved' | 'dismissed';
+
+export interface TaskException {
+  id: string;
+  organizationId?: string;
+  projectId: string;
+  taskId: string;
+  taskTitle?: string;
+  type: TaskExceptionType;
+  title: string;
+  description: string;
+  severity: TaskExceptionSeverity;
+  status: TaskExceptionStatus;
+  reporterId: string;
+  reporterName: string;
+  reporterEmail: string;
+  assignedToId?: string;
+  assignedToName?: string;
+  assignedToEmail?: string;
+  resolutionSummary?: string;
+  resolvedAt?: string;
+  resolvedById?: string;
+  dismissalReason?: string;
+  dismissedAt?: string;
+  dismissedById?: string;
+  history: TaskExceptionHistoryEntry[];
+  source?: 'manual' | 'tracking_engine';
+  deduplicationKey?: string;
+  isAutoManaged?: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+// ==========================================
+// Phase 1B, Step 3.7: Dependency & Deadline Tracking Models
+// ==========================================
+
+export type TrackingRiskLevel = 'critical' | 'high' | 'medium' | 'low';
+
+export type TrackingRiskCategory =
+  | 'overdue'
+  | 'due_soon'
+  | 'starting_soon'
+  | 'blocked_by_prerequisite'
+  | 'blocked_by_overdue_prerequisite'
+  | 'downstream_deadline_at_risk'
+  | 'unresolved_exception'
+  | 'unscheduled_active_task';
+
+export interface TaskRiskIndicator {
+  taskId: string;
+  taskTitle: string;
+  category: TrackingRiskCategory;
+  severity: TrackingRiskLevel;
+  reason: string;
+  details: string;
+  dueDate?: string | null;
+  startDate?: string | null;
+  assigneeEmail?: string | null;
+  prerequisiteIds?: string[];
+  prerequisiteTitles?: string[];
+  blockingTaskIds?: string[];
+  associatedExceptionIds?: string[];
+  detectedAt: string;
+}
+
+export interface ProjectTrackingMetrics {
+  totalActiveTasks: number;
+  completedTasks: number;
+  overdueTasksCount: number;
+  dueSoonTasksCount: number;
+  startingSoonTasksCount: number;
+  blockedTasksCount: number;
+  blockedByOverduePrereqCount: number;
+  downstreamRiskCount: number;
+  activeExceptionsCount: number;
+  unscheduledTasksCount: number;
+  healthScore: number; // 0 - 100
+  evaluatedAt: string;
+  lastSuccessfulJobRunAt?: string | null;
+  monitoringStatus: 'healthy' | 'degraded' | 'pending' | 'never_run';
+}
+
+export interface ProjectTrackingReport {
+  projectId: string;
+  organizationId?: string | null;
+  metrics: ProjectTrackingMetrics;
+  risks: TaskRiskIndicator[];
+  evaluatedAt: string;
+  source: 'live_evaluation' | 'persisted_job';
+}
+
+export type MonitoringJobStatus = 'queued' | 'processing' | 'completed' | 'failed' | 'retryable_failed';
+
+export interface TrackingMonitoringJob {
+  id: string;
+  projectId: string;
+  organizationId?: string | null;
+  scope: 'project' | 'organization';
+  status: MonitoringJobStatus;
+  attempts: number;
+  maxAttempts: number;
+  leaseExpiresAt?: number | null;
+  workerId?: string | null;
+  lastError?: string | null;
+  lastRunAt?: string | null;
+  completedAt?: string | null;
+  nextRetryAt?: number | null;
+  summary?: {
+    tasksEvaluated: number;
+    risksDetected: number;
+    exceptionsCreated: number;
+    exceptionsResolved: number;
+  } | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type FollowUpMeetingStatus =
+  | 'draft'
+  | 'proposed'
+  | 'awaiting_confirmation'
+  | 'scheduled'
+  | 'reschedule_requested'
+  | 'completed'
+  | 'cancelled'
+  | 'failed';
+
+export interface FollowUpParticipant {
+  userId?: string;
+  name: string;
+  email: string;
+  role?: string;
+  status?: 'invited' | 'accepted' | 'declined' | 'tentative';
+}
+
+export interface FollowUpHistoryEntry {
+  id: string;
+  action: 'created' | 'proposed' | 'confirmed' | 'reschedule_requested' | 'rescheduled' | 'completed' | 'cancelled' | 'failed' | 'updated';
+  performedBy: string; // User ID
+  performedByName: string;
+  performedByEmail: string;
+  timestamp: string;
+  details?: string;
+  previousStatus?: string;
+  newStatus?: string;
+}
+
+export interface FollowUpMeeting {
+  id: string;
+  organizationId?: string | null;
+  projectId: string;
+  relatedTaskIds: string[];
+  relatedExceptionIds: string[];
+  sourceMeetingSessionIds?: string[];
+  title: string;
+  purpose: string;
+  generatedAgenda: string;
+  reason: string;
+  proposedParticipants: FollowUpParticipant[];
+  proposedStartTime: string; // ISO 8601 string
+  proposedEndTime: string;   // ISO 8601 string
+  timezone: string;
+  status: FollowUpMeetingStatus;
+  provider: 'none' | 'google_calendar' | 'outlook_calendar' | 'zoom';
+  externalEventId?: string | null;
+  externalEventUrl?: string | null;
+  lastSchedulingError?: string | null;
+  confirmedAt?: string | null;
+  rescheduledAt?: string | null;
+  cancelledAt?: string | null;
+  completedAt?: string | null;
+  history: FollowUpHistoryEntry[];
+  createdBy: string;
+  creatorName: string;
+  creatorEmail: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface AutomatedTaggingDetection {
@@ -1138,5 +1417,376 @@ export interface AuthAuditLog {
   metadata?: Record<string, any>;
   timestamp: string;
 }
+
+// ============================================================================
+// PHASE 1B: MEETING PROVENANCE & INTEGRATION SCHEMAS (Provider-Agnostic)
+// ============================================================================
+
+export type MeetingPlatformProvider = 
+  | 'zoom' 
+  | 'google_meet' 
+  | 'microsoft_teams' 
+  | 'webex' 
+  | 'native_upload' 
+  | 'custom';
+
+export type MeetingIntegrationStatus = 
+  | 'active' 
+  | 'disconnected' 
+  | 'error' 
+  | 'pending_auth' 
+  | 'rate_limited' 
+  | 'suspended';
+
+export type MeetingCaptureMode = 
+  | 'recording' 
+  | 'live_transcript' 
+  | 'post_meeting_webhook' 
+  | 'manual_upload';
+
+export type MeetingParticipantRole = 
+  | 'host' 
+  | 'co_host' 
+  | 'presenter' 
+  | 'attendee' 
+  | 'guest';
+
+export interface MeetingParticipant {
+  id?: string;
+  externalUserId?: string;
+  name: string;
+  email?: string;
+  role: MeetingParticipantRole;
+  joinedAt?: string;
+  leftAt?: string;
+}
+
+export interface MeetingSourceReference {
+  provider: MeetingPlatformProvider;
+  externalMeetingId: string;
+  calendarEventId?: string;
+  sourceUrl?: string;
+  seriesId?: string;
+  captureMode: MeetingCaptureMode;
+  instanceStartTime?: string;
+}
+
+export interface MeetingArtifactReference {
+  artifactId: string;
+  type: 'recording' | 'transcript' | 'summary' | 'decision_log' | 'task_manifest' | 'trimmed_recording';
+  uri: string;
+  mimeType?: string;
+  contentHash?: string;
+  sizeBytes?: number;
+  derivedFromArtifactId?: string;
+  trimRange?: {
+    startTime: number;
+    endTime: number;
+    duration: number;
+  };
+  createdAt: string;
+}
+
+export interface MeetingProvenanceManifest {
+  manifestId: string;
+  meetingSessionId: string;
+  provider: MeetingPlatformProvider;
+  externalMeetingId: string;
+  sourceReference: MeetingSourceReference;
+  captureMode: MeetingCaptureMode;
+  capturedAt: string;
+  ingestedAt: string;
+  schemaVersion: '1.0';
+  rawArtifacts: MeetingArtifactReference[];
+  participants: MeetingParticipant[];
+  metadataHash?: string;
+}
+
+export interface MeetingSessionRecord {
+  id: string;
+  projectId?: string;
+  organizationId?: string;
+  userId: string;
+  provider: MeetingPlatformProvider;
+  externalMeetingId: string;
+  calendarEventId?: string;
+  title: string;
+  scheduledStartTime?: string;
+  scheduledEndTime?: string;
+  actualStartTime?: string;
+  actualEndTime?: string;
+  durationSeconds?: number;
+  participants: MeetingParticipant[];
+  sourceReference: MeetingSourceReference;
+  recordingId?: string;
+  transcriptId?: string;
+  provenanceManifestId: string;
+  status: 'scheduled' | 'capturing' | 'ingested' | 'processing' | 'completed' | 'failed';
+  errorMessage?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface IntegrationConnectionPublicView {
+  id: string;
+  provider: MeetingPlatformProvider;
+  status: MeetingIntegrationStatus;
+  organizationId?: string;
+  userId: string;
+  scopes: string[];
+  externalAccountEmail?: string;
+  externalAccountName?: string;
+  lastSyncAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface IntegrationConnectionConfig {
+  id: string;
+  provider: MeetingPlatformProvider;
+  status: MeetingIntegrationStatus;
+  organizationId?: string;
+  userId: string;
+  scopes: string[];
+  externalAccountId?: string;
+  externalAccountEmail?: string;
+  externalAccountName?: string;
+  encryptedCredentials?: string;
+  encryptionKeyId?: string;
+  webhookSecretEncrypted?: string;
+  refreshTokenExpiresAt?: string;
+  lastSyncAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface OrgIntegrationPublicView {
+  id: string;
+  enabled: boolean;
+  status: 'connected' | 'disconnected' | 'error' | 'pending';
+  config: Record<string, any>;
+  updatedAt?: string | null;
+  hasEncryptedSecrets?: boolean;
+  encryptionKeyId?: string;
+}
+
+export interface OrgIntegrationListResponse {
+  success: boolean;
+  organizationId: string;
+  integrations: Record<string, OrgIntegrationPublicView>;
+}
+
+export interface OrgIntegrationDetailResponse {
+  success: boolean;
+  integration: OrgIntegrationPublicView;
+}
+
+export interface IngestMeetingPayload {
+  provider: MeetingPlatformProvider;
+  externalMeetingId: string;
+  title: string;
+  projectId?: string;
+  organizationId?: string;
+  calendarEventId?: string;
+  startTime?: string;
+  endTime?: string;
+  participants: MeetingParticipant[];
+  sourceReference: MeetingSourceReference;
+  artifacts?: {
+    recordingAudioBase64?: string;
+    recordingMimeType?: string;
+    recordingStoragePath?: string;
+    transcriptText?: string;
+    transcriptSegments?: TranscriptSegment[];
+  };
+}
+
+export interface IngestMeetingResponse {
+  meetingSessionId: string;
+  provenanceManifestId: string;
+  recordingId?: string;
+  transcriptId?: string;
+  status: 'ingested' | 'processing' | 'completed';
+}
+
+export interface GetMeetingProvenanceResponse {
+  meetingSession: MeetingSessionRecord;
+  provenanceManifest: MeetingProvenanceManifest;
+  recording?: Recording | null;
+  transcript?: Transcript | null;
+  intelligence?: {
+    decisions: UnifiedDecision[];
+    tasks: UnifiedTask[];
+  };
+}
+
+export interface UnassociatedMeetingItem {
+  id: string;
+  externalMeetingId: string;
+  meetingInstanceUuid?: string | null;
+  title: string;
+  provider: MeetingPlatformProvider;
+  actualStartTime?: string | null;
+  durationSeconds?: number | null;
+  participants: MeetingParticipant[];
+  recordingId?: string | null;
+  transcriptId?: string | null;
+  provenanceManifestId?: string | null;
+  organizationId?: string | null;
+  status: string;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface AssociateMeetingPayload {
+  projectId: string | null;
+}
+
+export interface AssociateMeetingResponse {
+  success: boolean;
+  message: string;
+  sessionId: string;
+  projectId: string | null;
+  organizationId?: string | null;
+}
+
+export interface ProjectMeetingListResponse {
+  success: boolean;
+  projectId: string;
+  meetings: UnassociatedMeetingItem[];
+  count: number;
+}
+
+export type ProjectSearchResultType = 'meeting' | 'transcript' | 'decision' | 'task' | 'unresolved_topic';
+
+export interface ProjectSearchResultItem {
+  id: string;
+  type: ProjectSearchResultType;
+  title: string;
+  excerpt: string;
+  date?: string | null;
+  score: number;
+  metadata: {
+    meetingSessionId?: string | null;
+    externalMeetingId?: string | null;
+    meetingTitle?: string | null;
+    recordingId?: string | null;
+    transcriptId?: string | null;
+    provenanceManifestId?: string | null;
+    speaker?: string | null;
+    timestampSeconds?: number | null;
+    assignee?: string | null;
+    status?: string | null;
+    priority?: string | null;
+    confidenceLevel?: string | null;
+    sourceType?: 'evidence' | 'intelligence' | 'execution';
+  };
+}
+
+export interface ProjectSearchResponse {
+  success: boolean;
+  projectId: string;
+  query: string;
+  totalMatches: number;
+  countsByType: Record<ProjectSearchResultType, number>;
+  results: ProjectSearchResultItem[];
+  page: number;
+  pageSize: number;
+  hasMore: boolean;
+}
+
+export interface SearchHistoryFilters {
+  selectedTypes?: ProjectSearchResultType[];
+  startDate?: string | null;
+  endDate?: string | null;
+}
+
+export interface SearchHistoryEntry {
+  id: string;
+  userId: string;
+  organizationId?: string | null;
+  projectId?: string | null;
+  projectName?: string | null;
+  query: string;
+  scope: 'global' | 'project';
+  filters?: SearchHistoryFilters;
+  createdAt: string;
+  lastUsedAt: string;
+}
+
+export interface SearchHistoryListResponse {
+  success: boolean;
+  entries: SearchHistoryEntry[];
+}
+
+// ============================================================================
+// TASK & DEADLINE NOTIFICATIONS (Phase 3 Step 3.1)
+// ============================================================================
+
+export type TaskNotificationType =
+  | 'task_assignment'
+  | 'upcoming_deadline'
+  | 'overdue_task'
+  | 'blocked_task';
+
+export type TaskNotificationDeliveryStatus =
+  | 'pending'
+  | 'processing'
+  | 'dispatching'
+  | 'sent'
+  | 'retryable_failed'
+  | 'permanently_failed'
+  | 'ambiguous_delivery';
+
+
+export interface TaskNotificationPayload {
+  taskId: string;
+  taskTitle: string;
+  projectId: string;
+  projectName?: string;
+  organizationId?: string | null;
+  recipientEmail: string;
+  recipientName?: string;
+  dueDate?: string | null;
+  priority?: string | null;
+  status?: string | null;
+  exceptionId?: string | null;
+  exceptionTitle?: string | null;
+  exceptionSeverity?: string | null;
+  details?: string | null;
+  appUrl?: string;
+}
+
+export interface TaskNotificationRecord {
+  id: string; // Deterministic deduplication key
+  taskId: string;
+  projectId: string;
+  organizationId: string | null;
+  type: TaskNotificationType;
+  recipientEmail: string;
+  recipientName?: string;
+  eventHash: string;
+  status: TaskNotificationDeliveryStatus;
+  leaseExpiresAt: number | null;
+  workerId: string | null;
+  attempts: number;
+  maxAttempts: number;
+  lastError: string | null;
+  providerMessageId: string | null;
+  payload: TaskNotificationPayload;
+  createdAt: string;
+  updatedAt: string;
+  sentAt: string | null;
+  dispatchStartedAt?: string | null;
+  quarantinedAt?: string | null;
+  reconciliation?: {
+    reconciledBy: string;
+    reconciledAt: string;
+    reconciliationReason: string;
+    reconciliationDecision: string;
+  } | null;
+}
+
+
 
 
