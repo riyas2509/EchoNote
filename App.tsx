@@ -1,4 +1,3 @@
-
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { Routes, Route, useNavigate, useLocation, Navigate, Link } from 'react-router-dom';
 import Navigation from './components/Navigation';
@@ -30,6 +29,12 @@ import Solutions from './pages/Solutions';
 import SubscriptionModal from './components/SubscriptionModal';
 import { CollaborationDashboard } from './components/CollaborationDashboard';
 import { OrganizationDashboard } from './components/OrganizationDashboard';
+import { MfaPolicyEnforcementModal } from './components/MfaPolicyEnforcementModal';
+import { MfaWorkspaceGuard } from './components/MfaWorkspaceGuard';
+import { OnboardingModal } from './components/OnboardingModal';
+import { InteractiveDemoModal } from './components/InteractiveDemoModal';
+import { useDemoWorkspace, DEMO_PROJECT_NAME } from './lib/demoStateManager';
+import { MfaPolicyChallengeDetail } from './lib/apiClient';
 import { AppWorkflow, AudioToTextRecord, TextToAudioRecord, AuthStatus, UserProfile, PlaybackMetadata, PlaybackStatus, AppNotification, UsageStats, SubscriptionTier, Project, ProjectMember, CollaborationRole, MainView, ProjectActivity, OrgRole, OrgMember, Team, normalizeOrgRole } from './types';
 import { PLAN_FEATURES } from './config/planConfig';
 import { useFirebase } from './components/FirebaseProvider';
@@ -39,6 +44,7 @@ import { summarizeTranscript, analyzeDecisionIntelligence, analyzeStrategically 
 import { getMinutesUsage, getThinkingUsage, formatRefreshDate } from './lib/usageUtils';
 import { logAction } from './services/auditService';
 import { apiFetch, safeApiJson } from './lib/apiClient';
+import { useDocumentSeo } from './components/public/SeoManager';
 
 const ScrollToTop = () => {
   const { pathname } = useLocation();
@@ -49,6 +55,7 @@ const ScrollToTop = () => {
 };
 
 const App: React.FC = () => {
+  useDocumentSeo();
   const navigate = useNavigate();
   const location = useLocation();
   const { user, profile, customClaims, isAuthReady } = useFirebase();
@@ -145,8 +152,73 @@ const App: React.FC = () => {
   const [selectedGroupFilter, setSelectedGroupFilter] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [showUpgradeModal, setShowUpgradeModal] = useState(false);
+  const [isOnboardingOpen, setIsOnboardingOpen] = useState(false);
+  const [isDemoOpen, setIsDemoOpen] = useState(false);
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [toasts, setToasts] = useState<{id: string, title: string, message: string, type: 'info' | 'error' | 'success'}[]>([]);
+
+  // Automatically trigger onboarding for newly logged-in users who haven't completed onboarding
+  useEffect(() => {
+    if (authStatus === AuthStatus.LOGGED_IN && userProfile && userProfile.onboardingCompleted !== true) {
+      // Check if user has dismissed it this session to avoid annoyance
+      const sessionDismissed = sessionStorage.getItem(`echonote_onboarding_dismissed_${userProfile.uid || user?.uid}`);
+      if (!sessionDismissed) {
+        setIsOnboardingOpen(true);
+      }
+    }
+  }, [authStatus, userProfile, user]);
+
+  const handleCompleteOnboarding = async () => {
+    if (!userProfile) {
+      setIsOnboardingOpen(false);
+      return;
+    }
+
+    // Call server authoritative endpoint to persist onboarding completion
+    const res = await apiFetch('/api/onboarding/complete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId: userProfile.uid || user?.uid })
+    });
+
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}));
+      throw new Error(errData?.message || 'Failed to save onboarding completion state on the server. Please try again.');
+    }
+
+    // Update local profile state on verified persistence
+    const updatedProfile: UserProfile = {
+      ...userProfile,
+      onboardingCompleted: true,
+      onboardingCompletedAt: new Date().toISOString()
+    };
+    setUserProfile(updatedProfile);
+    setIsOnboardingOpen(false);
+    addToast('Onboarding Completed', 'Welcome to your EchoNote workspace!', 'success');
+  };
+
+  const demoContext = useDemoWorkspace();
+
+  const handleStartInteractiveDemo = () => {
+    // 1. Initialize and reset in-memory demo state & activate explicit demo mode
+    if (demoContext) {
+      demoContext.resetDemoState();
+      demoContext.enterDemo();
+      demoContext.setTourStepIndex(0);
+    }
+    // 2. Open actual workspace UI with Enterprise API Migration project selected
+    setSelectedGroupFilter(DEMO_PROJECT_NAME);
+    setCurrentTab(AppWorkflow.COLLABORATION_DASHBOARD);
+    setIsOnboardingOpen(false);
+    navigate('/app');
+  };
+
+  const handleDismissOnboarding = () => {
+    setIsOnboardingOpen(false);
+    if (userProfile?.uid || user?.uid) {
+      sessionStorage.setItem(`echonote_onboarding_dismissed_${userProfile?.uid || user?.uid}`, 'true');
+    }
+  };
 
   const addToast = (title: string, message: string, type: 'info' | 'error' | 'success' = 'info') => {
     const id = Math.random().toString(36).substr(2, 9);
@@ -375,6 +447,69 @@ const App: React.FC = () => {
   const [currentOrgMember, setCurrentOrgMember] = useState<OrgMember | null>(null);
   const [orgTeams, setOrgTeams] = useState<Team[]>([]);
   const [userOrgRole, setUserOrgRole] = useState<OrgRole>('viewer');
+
+  // MFA Enforcement States (Step 3B.2)
+  const [sessionMfaActive, setSessionMfaActive] = useState<boolean>(false);
+  const [userMfaEnrolled, setUserMfaEnrolled] = useState<boolean>(false);
+  const [showMfaPolicyModal, setShowMfaPolicyModal] = useState<boolean>(false);
+  const [mfaChallengeDetail, setMfaChallengeDetail] = useState<MfaPolicyChallengeDetail | null>(null);
+
+  // Authoritatively inspect session MFA state
+  const refreshMfaSessionState = useCallback(async () => {
+    if (!auth?.currentUser) {
+      setSessionMfaActive(false);
+      setUserMfaEnrolled(false);
+      return;
+    }
+    try {
+      const res = await apiFetch('/api/auth/mfa/status');
+      if (res.ok) {
+        const data = await res.json();
+        setUserMfaEnrolled(Boolean(data.mfaEnabled));
+        setSessionMfaActive(Boolean(data.currentSessionSecondFactor));
+      } else {
+        const tokenRes = await auth.currentUser.getIdTokenResult();
+        const factor = (tokenRes.claims as any)?.firebase?.sign_in_second_factor;
+        setSessionMfaActive(Boolean(factor));
+      }
+    } catch {
+      // Safe fallback
+    }
+  }, []);
+
+  useEffect(() => {
+    if (authStatus === AuthStatus.LOGGED_IN && user) {
+      refreshMfaSessionState();
+    }
+  }, [authStatus, user, refreshMfaSessionState]);
+
+  // Global listener for API 403 MFA policy challenges
+  useEffect(() => {
+    const handlePolicyChallenge = (evt: Event) => {
+      const customEvt = evt as CustomEvent<MfaPolicyChallengeDetail>;
+      if (customEvt.detail) {
+        setMfaChallengeDetail(customEvt.detail);
+        setShowMfaPolicyModal(true);
+      }
+    };
+
+    window.addEventListener('echonote:mfa-policy-challenge', handlePolicyChallenge);
+    return () => {
+      window.removeEventListener('echonote:mfa-policy-challenge', handlePolicyChallenge);
+    };
+  }, []);
+
+  // Compute if current organization workspace is gated by organization MFA policy
+  const orgMfaRequirement = currentOrg?.securitySettings?.mfaRequirement || 'MFA_OPTIONAL';
+  const isOrgAdminRole = userOrgRole === 'owner' || userOrgRole === 'org_admin';
+  const isMfaMandatoryForOrg = Boolean(
+    currentOrg && (
+      orgMfaRequirement === 'MFA_ENFORCED_ALL' ||
+      orgMfaRequirement === 'MFA_REQUIRED_ALL' ||
+      (orgMfaRequirement === 'MFA_REQUIRED_ADMINS' && isOrgAdminRole)
+    )
+  );
+  const isMfaWorkspaceBlocked = isMfaMandatoryForOrg && !sessionMfaActive;
 
   const [manualAnalyticsTrigger, setManualAnalyticsTrigger] = useState(0);
 
@@ -1671,6 +1806,30 @@ const App: React.FC = () => {
         }
         return <ProductAnalyticsView userProfile={userProfile} onBack={() => setCurrentTab(AppWorkflow.HOME)} />;
       case AppWorkflow.COLLABORATION_DASHBOARD:
+        if (isMfaWorkspaceBlocked) {
+          return (
+            <MfaWorkspaceGuard 
+              orgName={currentOrg?.name || 'Your Organization'}
+              requirement={orgMfaRequirement}
+              userRole={userOrgRole}
+              isEnrolled={userMfaEnrolled}
+              onOpenMfaModal={() => {
+                setMfaChallengeDetail({
+                  code: userMfaEnrolled ? 'MFA_REQUIRED' : 'MFA_ENROLLMENT_REQUIRED',
+                  message: userMfaEnrolled 
+                    ? 'Session second-factor challenge required.' 
+                    : 'Two-factor authentication enrollment required by organization security policy.',
+                  mfaRequirement: orgMfaRequirement,
+                  mfaEnrolled: userMfaEnrolled,
+                  organizationId: currentOrg?.id,
+                  role: userOrgRole
+                });
+                setShowMfaPolicyModal(true);
+              }}
+              onLogout={handleLogout}
+            />
+          );
+        }
         return (
           <CollaborationDashboard 
             projects={projects}
@@ -1687,6 +1846,30 @@ const App: React.FC = () => {
           />
         );
       case AppWorkflow.ORGANIZATION_DASHBOARD:
+        if (isMfaWorkspaceBlocked) {
+          return (
+            <MfaWorkspaceGuard 
+              orgName={currentOrg?.name || 'Your Organization'}
+              requirement={orgMfaRequirement}
+              userRole={userOrgRole}
+              isEnrolled={userMfaEnrolled}
+              onOpenMfaModal={() => {
+                setMfaChallengeDetail({
+                  code: userMfaEnrolled ? 'MFA_REQUIRED' : 'MFA_ENROLLMENT_REQUIRED',
+                  message: userMfaEnrolled 
+                    ? 'Session second-factor challenge required.' 
+                    : 'Two-factor authentication enrollment required by organization security policy.',
+                  mfaRequirement: orgMfaRequirement,
+                  mfaEnrolled: userMfaEnrolled,
+                  organizationId: currentOrg?.id,
+                  role: userOrgRole
+                });
+                setShowMfaPolicyModal(true);
+              }}
+              onLogout={handleLogout}
+            />
+          );
+        }
         return (
           <OrganizationDashboard 
             projects={projects}
@@ -1706,6 +1889,20 @@ const App: React.FC = () => {
         {showSettings && (
           <AuthView onAuth={handleAuth} isSettingsMode onCloseSettings={() => setShowSettings(false)} onLogout={handleLogout} userProfile={userProfile} onBackToHome={handleBackToHome} />
         )}
+
+        {/* MFA Policy Enforcement Modal */}
+        <MfaPolicyEnforcementModal
+          isOpen={showMfaPolicyModal}
+          onClose={() => setShowMfaPolicyModal(false)}
+          onSuccess={async () => {
+            setShowMfaPolicyModal(false);
+            await refreshMfaSessionState();
+          }}
+          onLogout={handleLogout}
+          challengeDetail={mfaChallengeDetail}
+          orgName={currentOrg?.name}
+          isMandatoryBlock={isMfaWorkspaceBlocked}
+        />
         
         {/* Project Creation Modal */}
         {isCreateProjectModalOpen && (
@@ -1765,6 +1962,26 @@ const App: React.FC = () => {
           </div>
         )}
 
+        {/* Guided First-Login Onboarding */}
+        <OnboardingModal
+          isOpen={isOnboardingOpen}
+          userProfile={userProfile}
+          projects={projects}
+          onCreateProject={addGroup}
+          onSelectProject={(projectName) => {
+            setSelectedGroupFilter(projectName);
+          }}
+          onComplete={handleCompleteOnboarding}
+          onClose={handleDismissOnboarding}
+          onLaunchDemo={handleStartInteractiveDemo}
+        />
+
+        {/* Interactive Product Demo (Modal Fallback) */}
+        <InteractiveDemoModal
+          isOpen={isDemoOpen}
+          onClose={() => setIsDemoOpen(false)}
+        />
+
         <Navigation 
           currentTab={currentTab} 
           setTab={(tab) => { 
@@ -1807,13 +2024,18 @@ const App: React.FC = () => {
             onSearchChange={setSearchQuery}
             showSearch={currentTab === AppWorkflow.HISTORY}
             selectedProjectName={selectedGroupFilter}
+            onSelectProjectName={setSelectedGroupFilter}
+            currentWorkflow={currentTab}
+            onNavigateWorkflow={setCurrentTab}
+            onOpenOnboarding={() => setIsOnboardingOpen(true)}
+            onOpenDemo={handleStartInteractiveDemo}
             onToggleSidebar={() => setIsSidebarOpen(!isSidebarOpen)}
             notifications={notifications}
             onMarkNotificationRead={markNotificationRead}
             onClearNotifications={clearNotifications}
           />
           
-          <div className="w-full max-w-screen-xl mx-auto px-4 py-6 md:px-8 md:py-12 lg:px-16 lg:py-20 pb-48">
+          <div className="w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 md:py-10 pb-32">
             {renderContent()}
           </div>
           
@@ -1831,20 +2053,46 @@ const App: React.FC = () => {
           />
         </main>
 
-        <div className="md:hidden fixed bottom-0 left-0 right-0 bg-white text-brand-primary flex justify-around p-4 shadow-2xl border-t border-brand-divider/20 z-30">
-          <button onClick={() => { setCurrentTab(AppWorkflow.HOME); setSelectedGroupFilter(null); }} className={`flex flex-col items-center space-y-1 ${currentTab === AppWorkflow.HOME ? 'text-brand-accent' : 'text-slate-400'}`}>
-            <i className="fa-solid fa-house"></i>
-            <span className="text-[11px] font-medium">Home</span>
+        <nav aria-label="Mobile Bottom Navigation" className="md:hidden fixed bottom-0 left-0 right-0 bg-white text-brand-primary flex justify-around p-3 shadow-2xl border-t border-brand-divider/20 z-30">
+          <button 
+            type="button"
+            onClick={() => { setCurrentTab(AppWorkflow.HOME); setSelectedGroupFilter(null); }} 
+            aria-current={currentTab === AppWorkflow.HOME && selectedGroupFilter === null ? 'page' : undefined}
+            className={`flex flex-col items-center space-y-1 ${currentTab === AppWorkflow.HOME && selectedGroupFilter === null ? 'text-indigo-600 font-bold' : 'text-slate-400'}`}
+          >
+            <i className="fa-solid fa-house text-base"></i>
+            <span className="text-[11px]">Home</span>
           </button>
-          <button onClick={() => { setCurrentTab(AppWorkflow.AUDIO_TO_TEXT); setSelectedGroupFilter(null); }} className={`flex flex-col items-center space-y-1 ${currentTab === AppWorkflow.AUDIO_TO_TEXT ? 'text-brand-accent' : 'text-slate-400'}`}>
-            <i className="fa-solid fa-microphone"></i>
-            <span className="text-[11px] font-medium">Transcribe</span>
+          {authStatus === AuthStatus.LOGGED_IN && (
+            <button 
+              type="button"
+              onClick={() => { setCurrentTab(AppWorkflow.COLLABORATION_DASHBOARD); }} 
+              aria-current={currentTab === AppWorkflow.COLLABORATION_DASHBOARD ? 'page' : undefined}
+              className={`flex flex-col items-center space-y-1 ${currentTab === AppWorkflow.COLLABORATION_DASHBOARD ? 'text-indigo-600 font-bold' : 'text-slate-400'}`}
+            >
+              <i className="fa-solid fa-folder-tree text-base"></i>
+              <span className="text-[11px]">Projects</span>
+            </button>
+          )}
+          <button 
+            type="button"
+            onClick={() => { setCurrentTab(AppWorkflow.AUDIO_TO_TEXT); setSelectedGroupFilter(null); }} 
+            aria-current={currentTab === AppWorkflow.AUDIO_TO_TEXT ? 'page' : undefined}
+            className={`flex flex-col items-center space-y-1 ${currentTab === AppWorkflow.AUDIO_TO_TEXT ? 'text-indigo-600 font-bold' : 'text-slate-400'}`}
+          >
+            <i className="fa-solid fa-microphone text-base"></i>
+            <span className="text-[11px]">Transcribe</span>
           </button>
-          <button onClick={() => { setCurrentTab(AppWorkflow.HISTORY); setSelectedGroupFilter(null); }} className={`flex flex-col items-center space-y-1 ${currentTab === AppWorkflow.HISTORY ? 'text-brand-accent' : 'text-slate-400'}`}>
-            <i className="fa-solid fa-box-archive"></i>
-            <span className="text-[11px] font-medium">Archive</span>
+          <button 
+            type="button"
+            onClick={() => { setCurrentTab(AppWorkflow.HISTORY); setSelectedGroupFilter(null); }} 
+            aria-current={currentTab === AppWorkflow.HISTORY ? 'page' : undefined}
+            className={`flex flex-col items-center space-y-1 ${currentTab === AppWorkflow.HISTORY ? 'text-indigo-600 font-bold' : 'text-slate-400'}`}
+          >
+            <i className="fa-solid fa-box-archive text-base"></i>
+            <span className="text-[11px]">Archive</span>
           </button>
-        </div>
+        </nav>
       </div>
     );
   };

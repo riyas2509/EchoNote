@@ -12,6 +12,7 @@ import {
   Layers
 } from 'lucide-react';
 import { Project } from '../types';
+import { useDemoWorkspace, isDemoIdentifier } from '../lib/demoStateManager';
 
 export interface ProjectActivityItem {
   id: string;
@@ -79,10 +80,18 @@ export const ProjectCard: React.FC<ProjectCardProps> = ({
     ? membersCount 
     : (project.members?.length ? project.members.length : 1);
 
+  const demoContext = useDemoWorkspace();
+  const isDemoProject = Boolean(
+    (demoContext?.isDemoMode && (project.id === 'demo-proj-migration' || project.name === 'Enterprise API Migration')) ||
+    isDemoIdentifier(project.id)
+  );
+
   return (
     <div 
       id={`project-card-${project.id}`}
       data-project-id={project.id}
+      data-tour={isDemoProject ? "project-card-api-migration" : "project-card"}
+      data-tour-demo={isDemoProject ? "demo-project-card" : undefined}
       onClick={() => onSelect(project.name)}
       className={`relative bg-white rounded-2xl border transition-all duration-300 p-6 flex flex-col justify-between group cursor-pointer ${
         isActive 

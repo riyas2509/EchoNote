@@ -54,7 +54,7 @@ export const ProductAnalyticsView: React.FC<ProductAnalyticsViewProps> = ({ user
   }
 
   return (
-    <div className="space-y-8 animate-in fade-in duration-300">
+    <div className="w-full space-y-8 animate-in fade-in duration-300">
       {/* Top Banner & Title */}
       <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-6 pb-6 border-b border-brand-divider/20">
         <div className="space-y-1">

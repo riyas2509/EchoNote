@@ -1,6 +1,6 @@
 
 import React, { useState, useMemo, useEffect, useRef } from 'react';
-import { Sparkles, GripVertical, Folder, FolderInput, FolderPlus, ArrowRight } from 'lucide-react';
+import { Sparkles, GripVertical, Folder, FolderInput, FolderPlus, ArrowRight, Scissors } from 'lucide-react';
 import { AudioToTextRecord, TextToAudioRecord, TranscriptSegment, ReadStatus, CollaborationRole, PlaybackMetadata, PlaybackStatus, Bookmark, AuthStatus, UserProfile, Project, UsageStats, StrategicAnalysis, UnifiedMeetingIntelligence, ExecutionTracker, OrgRole, ProductEventName } from '../types';
 import { executeDownload, generateTranscriptBlob } from '../services/downloadService';
 import { analyzeStrategically, processUnifiedMeetingIntelligence, generateSmartRecap } from '../services/geminiService';
@@ -12,6 +12,7 @@ import ExecutionTrackerView from './ExecutionTrackerView';
 import SmartReminderView from './SmartReminderView';
 import UnresolvedTopicsDetector from './UnresolvedTopicsDetector';
 import { SmartRecapModal } from './SmartRecapModal';
+import { AudioTrimmerModal } from './AudioTrimmerModal';
 
 interface HistoryDashboardProps {
   audioHistory: AudioToTextRecord[];
@@ -105,6 +106,85 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
   const [smartRecapRecord, setSmartRecapRecord] = useState<AudioToTextRecord | null>(null);
   const [isSmartRecapOpen, setIsSmartRecapOpen] = useState(false);
   const [isGeneratingRecap, setIsGeneratingRecap] = useState(false);
+
+  // Audio Trimming Modal State
+  const [trimmerRecord, setTrimmerRecord] = useState<AudioToTextRecord | null>(null);
+
+  // Task Conversion State
+  const [convertingTaskId, setConvertingTaskId] = useState<string | null>(null);
+
+  const handleConvertToTask = async (
+    record: AudioToTextRecord,
+    title: string,
+    sourceType: 'meeting_action_item' | 'meeting_decision',
+    sourceRef: string
+  ) => {
+    const project = (projects as Project[]).find(p => p.name === record.group || p.id === record.projectId);
+    if (!project) {
+      addNotification({
+        title: 'Project Required',
+        message: 'This meeting must be associated with a project before converting to a project task.',
+        type: 'warning'
+      });
+      return;
+    }
+
+    const itemKey = `${record.id}_${sourceRef}`;
+    setConvertingTaskId(itemKey);
+    try {
+      const payload: any = {
+        title,
+        description: `Generated from meeting "${record.fileName || 'Meeting'}" (${sourceType === 'meeting_action_item' ? 'Action Item' : 'Decision'})`,
+        priority: 'medium',
+        status: 'pending',
+        sourceType,
+        sourceMeetingSessionId: record.id,
+        sourceRecordingId: record.id,
+        isAiSuggested: true,
+        createdBy: userProfile?.email || 'user'
+      };
+
+      if (sourceType === 'meeting_decision') {
+        payload.sourceDecisionId = sourceRef;
+      } else {
+        payload.sourceActionItem = sourceRef;
+      }
+
+      const res = await fetch(`/api/projects/${project.id}/tasks`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to convert item to task');
+      }
+
+      if (data.reused) {
+        addNotification({
+          title: 'Existing Task Linked',
+          message: `Reused existing task "${data.task.title}" (Status: ${data.task.status})`,
+          type: 'info'
+        });
+      } else {
+        addNotification({
+          title: 'Task Created',
+          message: `Converted "${title.slice(0, 35)}..." to a project task in ${project.name}.`,
+          type: 'success'
+        });
+      }
+    } catch (err: any) {
+      console.error('Task conversion error:', err);
+      addNotification({
+        title: 'Conversion Failed',
+        message: err.message || 'Unable to create project task from item.',
+        type: 'error'
+      });
+    } finally {
+      setConvertingTaskId(null);
+    }
+  };
 
   const handleTriggerSmartRecap = async (record: AudioToTextRecord) => {
     setSmartRecapRecord(record);
@@ -2136,6 +2216,15 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
                                 >
                                   {item.fileName}
                                 </h4>
+                                {item.isTrimmedVersion && (
+                                  <span 
+                                    className="px-2 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-indigo-100 text-indigo-700 border border-indigo-200 inline-flex items-center gap-1 shrink-0"
+                                    title={item.trimRange ? `Trimmed clip: ${item.trimRange.startTime}s - ${item.trimRange.endTime}s (Parent: ${item.parentRecordingId || 'Original'})` : 'Trimmed Clip'}
+                                  >
+                                    <Scissors className="w-2.5 h-2.5" />
+                                    <span>Trimmed Clip</span>
+                                  </span>
+                                )}
                               </div>
                             )}
                             <div className="flex items-center space-x-2">
@@ -2228,6 +2317,26 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
                                     >
                                       <Sparkles className="w-3 h-3 text-amber-300" />
                                       <span>AI Recap</span>
+                                    </button>
+
+                                    {/* Audio Trim Button */}
+                                    <button 
+                                      onClick={() => {
+                                        if (usageStats.mode === 'guest') {
+                                          addNotification({
+                                            title: 'Feature Restricted',
+                                            message: 'Audio trimming requires an authenticated account. Please sign in.',
+                                            type: 'error'
+                                          });
+                                          return;
+                                        }
+                                        setTrimmerRecord(item);
+                                      }}
+                                      className="px-3.5 py-3.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-indigo-700 font-black text-[9px] uppercase tracking-wider flex items-center gap-1.5 shadow-sm transition-all active:scale-95 border border-slate-200"
+                                      title="Trim Audio: Create derived clip with aligned transcripts"
+                                    >
+                                      <Scissors className="w-3 h-3 text-indigo-600" />
+                                      <span>Trim</span>
                                     </button>
 
                                     <button 
@@ -2371,9 +2480,40 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
                                   </ul>
                                 </div>
                                 <div className="space-y-2">
-                                  <span className="text-[11px] font-medium text-slate-400 tracking-widest font-mono">Action items</span>
-                                  <ul className="space-y-1">
-                                    {(item.summary.actionItems || []).map((a, i) => <li key={i} className="text-xs font-normal text-slate-600 flex items-start gap-2"><span className="text-brand-secondary mt-1">•</span>{a}</li>)}
+                                  <div className="flex items-center justify-between">
+                                    <span className="text-[11px] font-medium text-slate-400 tracking-widest font-mono">Action items</span>
+                                    <span className="text-[10px] text-slate-400 font-mono">Click to convert</span>
+                                  </div>
+                                  <ul className="space-y-2">
+                                    {(item.summary.actionItems || []).map((a, i) => {
+                                      const itemKey = `${item.id}_ai_${i}`;
+                                      const isConverting = convertingTaskId === itemKey;
+                                      return (
+                                        <li key={i} className="text-xs font-normal text-slate-600 flex items-start justify-between gap-2 p-1.5 rounded-lg hover:bg-slate-50 transition-colors group">
+                                          <div className="flex items-start gap-2 flex-1">
+                                            <span className="text-brand-secondary mt-1">•</span>
+                                            <span>{a}</span>
+                                          </div>
+                                          <button
+                                            type="button"
+                                            disabled={isConverting}
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              handleConvertToTask(item, a, 'meeting_action_item', `ai_${i}`);
+                                            }}
+                                            title="Convert to project task"
+                                            className="opacity-0 group-hover:opacity-100 transition-opacity text-[10px] font-bold text-brand-primary bg-brand-primary/10 hover:bg-brand-primary hover:text-white px-2 py-0.5 rounded flex items-center gap-1 shrink-0"
+                                          >
+                                            {isConverting ? (
+                                              <i className="fa-solid fa-spinner fa-spin"></i>
+                                            ) : (
+                                              <i className="fa-solid fa-list-check"></i>
+                                            )}
+                                            <span>To Task</span>
+                                          </button>
+                                        </li>
+                                      );
+                                    })}
                                   </ul>
                                 </div>
                               </div>
@@ -3066,6 +3206,49 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
         isGenerating={isGeneratingRecap}
         onRegenerate={handleRegenerateRecap}
       />
+
+      {/* Audio Trimmer Modal */}
+      {trimmerRecord && (
+        <AudioTrimmerModal
+          isOpen={!!trimmerRecord}
+          onClose={() => setTrimmerRecord(null)}
+          recordingId={trimmerRecord.id}
+          recordingTitle={trimmerRecord.fileName}
+          audioUrl={trimmerRecord.originalAudioUrl}
+          projectId={trimmerRecord.projectId}
+          getIdToken={() => userProfile?.getIdToken?.() || Promise.resolve(undefined)}
+          onTrimSuccess={(derived) => {
+            if (derived) {
+              const newRecord: AudioToTextRecord = {
+                id: derived.id,
+                userId: userProfile?.uid || 'user',
+                date: new Date().toISOString(),
+                fileName: derived.fileName,
+                sourceType: 'recorded',
+                originalAudioUrl: derived.storagePath ? `/api/recordings/${encodeURIComponent(derived.id)}/audio` : undefined,
+                transcript: [],
+                status: 'completed',
+                readStatus: 'not-read',
+                bookmarks: [],
+                ownerEmail: userProfile?.email || '',
+                speakerMap: {},
+                collaborators: [],
+                group: trimmerRecord.group || 'General',
+                projectId: derived.projectId || trimmerRecord.projectId,
+                storagePath: derived.storagePath,
+                meetingSessionId: derived.meetingSessionId || trimmerRecord.meetingSessionId,
+                externalMeetingId: trimmerRecord.externalMeetingId,
+                provider: trimmerRecord.provider,
+                provenanceManifestId: trimmerRecord.provenanceManifestId,
+                isTrimmedVersion: true,
+                parentRecordingId: trimmerRecord.id,
+                trimRange: derived.trimRange
+              };
+              onUpdateAudio(newRecord);
+            }
+          }}
+        />
+      )}
     </div>
   );
 };

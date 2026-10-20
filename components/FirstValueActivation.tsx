@@ -734,7 +734,7 @@ export const FirstValueActivation: React.FC<FirstValueActivationProps> = ({
   };
 
   return (
-    <div className="w-full max-w-5xl mx-auto space-y-8 animate-in fade-in duration-500 pb-16">
+    <div className="w-full space-y-8 animate-in fade-in duration-500 pb-16">
       {/* Top Value Positioning Bar */}
       <div className="bg-slate-50 border border-slate-200/80 rounded-2xl p-6 md:p-8 text-left space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-4">

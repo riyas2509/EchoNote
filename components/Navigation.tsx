@@ -57,6 +57,18 @@ const Navigation: React.FC<NavigationProps> = ({
   const [inviteEmail, setInviteEmail] = useState('');
   const [inviteRole, setInviteRole] = useState<CollaborationRole>('viewer');
 
+  // Accessibility: Close mobile navigation drawer on Escape
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setIsOpen(false);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isOpen, setIsOpen]);
+
   useEffect(() => {
     if (!projectToManage) {
       setProjectMembers([]);
@@ -82,24 +94,31 @@ const Navigation: React.FC<NavigationProps> = ({
   }, [projectToManage]);
 
 
-  const tabs = [
-    { id: AppWorkflow.HOME, label: 'Workspace Home', icon: 'fa-house' },
-    { id: AppWorkflow.AUDIO_TO_TEXT, label: 'Transcription', icon: 'fa-microphone' },
-    { id: AppWorkflow.TEXT_TO_AUDIO, label: 'Speech Synthesis', icon: 'fa-keyboard' },
-    { id: AppWorkflow.HISTORY, label: 'Intelligence Archive', icon: 'fa-box-archive' },
-    { id: AppWorkflow.DECISION_INTELLIGENCE, label: 'Decision Intelligence', icon: 'fa-brain' },
-    { id: AppWorkflow.DECISION_HISTORY, label: 'Decision History', icon: 'fa-clock-rotate-left' },
+  // Workspace-level destinations
+  const workspaceTabs = [
+    { id: AppWorkflow.HOME, label: 'Workspace Home', icon: 'fa-house', ariaLabel: 'Navigate to Workspace Home' },
+    ...(authStatus === AuthStatus.LOGGED_IN
+      ? [{ id: AppWorkflow.COLLABORATION_DASHBOARD, label: 'Projects Overview', icon: 'fa-folder-tree', ariaLabel: 'Navigate to Projects Overview' }]
+      : []),
+    { id: AppWorkflow.HISTORY, label: 'Intelligence Archive', icon: 'fa-box-archive', ariaLabel: 'Search Intelligence Archive' },
+    ...(authStatus === AuthStatus.LOGGED_IN
+      ? [{ id: AppWorkflow.ORGANIZATION_DASHBOARD, label: 'Organization', icon: 'fa-building', ariaLabel: 'Manage Organization' }]
+      : []),
   ];
 
-  if (authStatus === AuthStatus.LOGGED_IN) {
-    tabs.push({ id: AppWorkflow.COLLABORATION_DASHBOARD, label: 'Project Dashboard', icon: 'fa-users' });
-    tabs.push({ id: AppWorkflow.ORGANIZATION_DASHBOARD, label: 'Organization', icon: 'fa-building' });
-  }
+  // Studio & Intelligence tools
+  const studioTabs = [
+    { id: AppWorkflow.AUDIO_TO_TEXT, label: 'Transcription', icon: 'fa-microphone', ariaLabel: 'Open Transcription Studio' },
+    { id: AppWorkflow.TEXT_TO_AUDIO, label: 'Speech Synthesis', icon: 'fa-keyboard', ariaLabel: 'Open Speech Synthesis' },
+    { id: AppWorkflow.DECISION_INTELLIGENCE, label: 'Decision Intelligence', icon: 'fa-brain', ariaLabel: 'Open Decision Intelligence' },
+    { id: AppWorkflow.DECISION_HISTORY, label: 'Decision History', icon: 'fa-clock-rotate-left', ariaLabel: 'View Decision History' },
+  ];
 
-  if (userProfile?.role === 'admin') {
-    tabs.push({ id: AppWorkflow.ADMIN_TRACKER, label: 'Admin Cost Tracker', icon: 'fa-shield' });
-    tabs.push({ id: AppWorkflow.PRODUCT_ANALYTICS, label: 'PMF & Telemetry', icon: 'fa-chart-line' });
-  }
+  // Administrative tools (admin profile only)
+  const adminTabs = userProfile?.role === 'admin' ? [
+    { id: AppWorkflow.ADMIN_TRACKER, label: 'Admin Cost Tracker', icon: 'fa-shield', ariaLabel: 'View Admin Cost Tracker' },
+    { id: AppWorkflow.PRODUCT_ANALYTICS, label: 'PMF & Telemetry', icon: 'fa-chart-line', ariaLabel: 'View Product Telemetry' },
+  ] : [];
 
   const isTabLocked = (tabId: AppWorkflow) => {
     const isGuest = authStatus === AuthStatus.GUEST;
@@ -137,6 +156,34 @@ const Navigation: React.FC<NavigationProps> = ({
     setEditingGroup(null);
   };
 
+  const renderNavButton = (tab: { id: AppWorkflow; label: string; icon: string; ariaLabel: string }) => {
+    const isActive = currentTab === tab.id && selectedGroupFilter === null;
+    const locked = isTabLocked(tab.id);
+    return (
+      <button
+        key={tab.id}
+        onClick={() => {
+          setTab(tab.id);
+          if (window.innerWidth < 1024) setIsOpen(false);
+        }}
+        aria-label={tab.ariaLabel}
+        aria-current={isActive ? 'page' : undefined}
+        className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg transition-all duration-200 group text-sm md:text-base font-medium tracking-wide ${isCollapsed ? 'justify-center' : ''} ${
+          isActive
+            ? 'bg-brand-secondary text-white shadow-lg shadow-black/10 font-bold' 
+            : 'hover:bg-brand-secondary/60 text-white/70 hover:text-white'
+        }`}
+        title={isCollapsed ? tab.label : ''}
+      >
+        <i className={`fa-solid ${tab.icon} w-5 text-center shrink-0 ${isActive ? 'text-amber-400' : 'text-white/60 group-hover:text-white'}`}></i>
+        {!isCollapsed && <span className="truncate">{tab.label}</span>}
+        {!isCollapsed && locked && (
+          <i className="fa-solid fa-lock text-[10px] ml-auto text-white/40" title="Locked feature"></i>
+        )}
+      </button>
+    );
+  };
+
   return (
     <>
       {/* Mobile Overlay Backdrop */}
@@ -147,7 +194,15 @@ const Navigation: React.FC<NavigationProps> = ({
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             onClick={() => setIsOpen(false)}
-            className="fixed inset-0 bg-black/50 z-[55] md:hidden backdrop-blur-sm"
+            onKeyDown={(e) => {
+              if (e.key === 'Escape' || e.key === 'Enter' || e.key === ' ') {
+                setIsOpen(false);
+              }
+            }}
+            role="button"
+            tabIndex={0}
+            aria-label="Close navigation menu"
+            className="fixed inset-0 bg-black/50 z-[55] lg:hidden backdrop-blur-sm cursor-pointer focus:outline-none"
           />
         )}
       </AnimatePresence>
@@ -191,43 +246,58 @@ const Navigation: React.FC<NavigationProps> = ({
         {/* Scrollable Body */}
         <div className={`flex-1 min-h-0 overflow-y-auto custom-scrollbar flex flex-col justify-between py-4 ${isCollapsed ? 'px-2' : 'px-4 md:px-6'}`}>
           <div className="space-y-1.5">
-            <div className={`px-4 flex items-center justify-between mb-4 ${isCollapsed ? 'justify-center px-0' : ''}`}>
-            {!isCollapsed ? (
-              <>
-                <p className="text-[10px] md:text-[12px] font-bold uppercase tracking-widest text-white/30">Module access</p>
-                <button 
-                  onClick={() => setIsModuleAccessCollapsed(!isModuleAccessCollapsed)}
-                  className="text-white/30 hover:text-white transition-colors"
-                >
-                  <i className={`fa-solid ${isModuleAccessCollapsed ? 'fa-plus' : 'fa-minus'} text-[8px] md:text-[10px]`}></i>
-                </button>
-              </>
-            ) : (
-              <div className="h-px w-8 bg-white/10" />
-            )}
-          </div>
-          
-          {!isModuleAccessCollapsed && tabs.map((tab) => (
-            <button
-              key={tab.id}
-              onClick={() => {
-                setTab(tab.id);
-                if (window.innerWidth < 1024) setIsOpen(false);
-              }}
-              className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg transition-all duration-200 group text-sm md:text-base font-medium tracking-wide ${isCollapsed ? 'justify-center' : ''} ${
-                currentTab === tab.id && selectedGroupFilter === null
-                  ? 'bg-brand-secondary text-white shadow-lg shadow-black/10' 
-                  : 'hover:bg-brand-secondary text-white/70 hover:text-white'
-              }`}
-              title={isCollapsed ? tab.label : ''}
-            >
-              <i className={`fa-solid ${tab.icon} w-5 text-center shrink-0`}></i>
-              {!isCollapsed && <span className="truncate">{tab.label}</span>}
-              {!isCollapsed && isTabLocked(tab.id) && (
-                <i className="fa-solid fa-lock text-[10px] ml-auto text-white/40"></i>
+            {/* 1. Workspace Section */}
+            <div className={`px-4 flex items-center justify-between mb-2 ${isCollapsed ? 'justify-center px-0' : ''}`}>
+              {!isCollapsed ? (
+                <p className="text-[10px] md:text-[11px] font-bold uppercase tracking-widest text-white/40">Workspace</p>
+              ) : (
+                <div className="h-px w-8 bg-white/10" />
               )}
-            </button>
-          ))}
+            </div>
+            
+            <div className="space-y-1">
+              {workspaceTabs.map(renderNavButton)}
+            </div>
+
+            {/* 2. Studio & Intelligence Section */}
+            <div className={`px-4 flex items-center justify-between mt-6 mb-2 ${isCollapsed ? 'justify-center px-0' : ''}`}>
+              {!isCollapsed ? (
+                <>
+                  <p className="text-[10px] md:text-[11px] font-bold uppercase tracking-widest text-white/40">Studio & Tools</p>
+                  <button 
+                    onClick={() => setIsModuleAccessCollapsed(!isModuleAccessCollapsed)}
+                    className="text-white/30 hover:text-white transition-colors"
+                    aria-label="Toggle Studio tools"
+                  >
+                    <i className={`fa-solid ${isModuleAccessCollapsed ? 'fa-plus' : 'fa-minus'} text-[8px] md:text-[10px]`}></i>
+                  </button>
+                </>
+              ) : (
+                <div className="h-px w-8 bg-white/10" />
+              )}
+            </div>
+            
+            {!isModuleAccessCollapsed && (
+              <div className="space-y-1">
+                {studioTabs.map(renderNavButton)}
+              </div>
+            )}
+
+            {/* 3. Administration Section (if admin) */}
+            {adminTabs.length > 0 && (
+              <>
+                <div className={`px-4 flex items-center justify-between mt-6 mb-2 ${isCollapsed ? 'justify-center px-0' : ''}`}>
+                  {!isCollapsed ? (
+                    <p className="text-[10px] md:text-[11px] font-bold uppercase tracking-widest text-white/40">Administration</p>
+                  ) : (
+                    <div className="h-px w-8 bg-white/10" />
+                  )}
+                </div>
+                <div className="space-y-1">
+                  {adminTabs.map(renderNavButton)}
+                </div>
+              </>
+            )}
 
           {/* Projects Section */}
           {authStatus === AuthStatus.LOGGED_IN && (

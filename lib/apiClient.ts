@@ -40,6 +40,21 @@ export function getApiBaseUrl(): string {
   return '';
 }
 
+export interface MfaPolicyChallengeDetail {
+  code: 'MFA_ENROLLMENT_REQUIRED' | 'MFA_REQUIRED';
+  message: string;
+  mfaRequirement: 'MFA_REQUIRED_ADMINS' | 'MFA_ENFORCED_ALL' | string;
+  mfaEnrolled?: boolean;
+  organizationId?: string;
+  role?: string;
+}
+
+export function isMfaPolicyError(err: any): boolean {
+  if (!err) return false;
+  const code = err.code || err.data?.code;
+  return code === 'MFA_ENROLLMENT_REQUIRED' || code === 'MFA_REQUIRED';
+}
+
 export interface ApiResponse<T = any> {
   ok: boolean;
   status: number;
@@ -293,11 +308,27 @@ if (typeof window !== 'undefined') {
   (window as any).__ECHONOTE_DIAGNOSTICS__ = getFrontendDiagnostic;
 }
 
+// In-memory single-use MFA Recovery Ticket for active recovery session (TTL 10 min)
+let activeRecoveryTicket: string | null = null;
+
+export function setRecoveryTicket(ticket: string | null): void {
+  activeRecoveryTicket = ticket;
+}
+
+export function getRecoveryTicket(): string | null {
+  return activeRecoveryTicket;
+}
+
+export function clearRecoveryTicket(): void {
+  activeRecoveryTicket = null;
+}
+
 /**
  * Wrapper around standard fetch that:
  * 1. Automatically resolves relative endpoints via getApiUrl()
  * 2. Automatically attaches the Firebase ID token in Authorization header
- * 3. Provides clean error wrapping on network failure without leaking secrets
+ * 3. Recovery tickets are strictly NEVER attached automatically to general API requests (dedicated recovery calls only)
+ * 4. Provides clean error wrapping on network failure without leaking secrets
  */
 export async function apiFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
   let finalInput = input;
@@ -322,10 +353,35 @@ export async function apiFetch(input: RequestInfo | URL, init: RequestInit = {})
   }
 
   try {
-    return await fetch(finalInput, {
+    const res = await fetch(finalInput, {
       ...init,
       headers,
     });
+
+    if (res.status === 403) {
+      try {
+        const clone = res.clone();
+        const json = await clone.json();
+        if (json && (json.code === 'MFA_ENROLLMENT_REQUIRED' || json.code === 'MFA_REQUIRED')) {
+          if (typeof window !== 'undefined') {
+            window.dispatchEvent(new CustomEvent('echonote:mfa-policy-challenge', {
+              detail: {
+                code: json.code,
+                message: json.message || 'Two-factor authentication required by organization policy.',
+                mfaRequirement: json.mfaRequirement || 'MFA_REQUIRED',
+                mfaEnrolled: Boolean(json.mfaEnrolled),
+                organizationId: json.organizationId,
+                role: json.role
+              }
+            }));
+          }
+        }
+      } catch {
+        // Safe ignore non-JSON error bodies
+      }
+    }
+
+    return res;
   } catch (err: any) {
     // If the browser threw TypeError: Failed to fetch, wrap it in a descriptive ApiNetworkError
     console.error(`[apiClient] Network request failed for ${targetUrlStr}:`, err?.message || err);
@@ -704,6 +760,92 @@ export async function acceptOrgInvite(inviteId: string): Promise<{
   });
   return safeApiJson(res);
 }
+
+/* ==========================================================================
+   MFA RECOVERY CODES API METHODS (Step 3B.4.2)
+   ========================================================================== */
+
+export interface RecoveryCodesStatus {
+  configured: boolean;
+  remainingCodes: number;
+  totalCodes: number;
+  createdAt: string | null;
+}
+
+export interface GeneratedRecoveryCodesResponse {
+  success: boolean;
+  codes: string[];
+  totalCodes: number;
+  message: string;
+}
+
+export interface RedeemRecoveryCodeResponse {
+  success: boolean;
+  message: string;
+  recoveryTicket: string;
+  remainingCodes: number;
+}
+
+/**
+ * Fetches status of user's MFA recovery codes (count and whether configured).
+ * Does not leak codes or verifiers.
+ */
+export async function getRecoveryCodesStatus(): Promise<RecoveryCodesStatus> {
+  const res = await apiFetch('/api/auth/mfa/recovery-codes/status', {
+    method: 'GET'
+  });
+  return safeApiJson<RecoveryCodesStatus>(res);
+}
+
+/**
+ * Generates or regenerates a fresh set of 10 single-use recovery codes.
+ * Requires recent reauthentication. Codes are only shown once.
+ */
+export async function generateRecoveryCodes(): Promise<GeneratedRecoveryCodesResponse> {
+  const res = await apiFetch('/api/auth/mfa/recovery-codes/generate', {
+    method: 'POST'
+  });
+  return safeApiJson<GeneratedRecoveryCodesResponse>(res);
+}
+
+/**
+ * Atomically redeems a single-use recovery code and sets active recovery ticket.
+ */
+export async function redeemRecoveryCode(code: string): Promise<RedeemRecoveryCodeResponse> {
+  const res = await apiFetch('/api/auth/mfa/recovery/redeem', {
+    method: 'POST',
+    body: JSON.stringify({ code })
+  });
+  const data = await safeApiJson<RedeemRecoveryCodeResponse>(res);
+  if (data?.recoveryTicket) {
+    setRecoveryTicket(data.recoveryTicket);
+  }
+  return data;
+}
+
+/**
+ * Explicitly sends the recovery ticket to the dedicated recovery reset endpoint.
+ * This is the ONLY endpoint permitted to consume the recovery ticket.
+ */
+export async function resetLostFactorWithRecovery(recoveryTicket?: string): Promise<{ success: boolean; message: string }> {
+  const ticket = recoveryTicket || getRecoveryTicket();
+  if (!ticket) {
+    throw new Error("No recovery ticket available. Please redeem a recovery code first.");
+  }
+
+  const res = await apiFetch('/api/auth/mfa/recovery/reset-factors', {
+    method: 'POST',
+    headers: {
+      'X-MFA-Recovery-Ticket': ticket
+    }
+  });
+
+  const data = await safeApiJson<{ success: boolean; message: string }>(res);
+  // Clear the ticket in-memory immediately after successful single-use factor reset
+  clearRecoveryTicket();
+  return data;
+}
+
 
 
 

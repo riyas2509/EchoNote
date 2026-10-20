@@ -14,6 +14,7 @@ interface InviteDetails {
   projectName: string;
   role: string;
   invitedBy?: string;
+  inviterName?: string;
   status: 'pending' | 'accepted' | 'rejected' | 'cancelled' | 'revoked' | 'expired';
 }
 
@@ -41,29 +42,30 @@ const JoinPage: React.FC = () => {
 
     const fetchInvite = async () => {
       try {
-        // Fetch invite details directly from client Firestore SDK (read rule is allow read: if true)
-        const inviteDoc = await getDoc(doc(db, 'invites', cleanToken));
-        if (inviteDoc.exists()) {
-          const data = inviteDoc.data() as InviteDetails;
-          setInvite({
-            ...data,
-            id: data.id || inviteDoc.id
-          });
-        } else {
-          throw new Error('Invitation document not found by token ID, trying backend API');
+        // Authoritative server preview endpoint is primary path (SEC-04: minimal public metadata)
+        const response = await apiFetch(`/api/invite-details/${encodeURIComponent(cleanToken)}`);
+        if (!response.ok) {
+          const data = await response.json().catch(() => ({}));
+          throw new Error(data.message || data.error || 'Failed to load invitation');
         }
-      } catch (err: any) {
-        console.warn('Direct client Firestore fetch note, trying fallback API:', err?.message || err);
+        const data = await response.json();
+        setInvite(data);
+      } catch (apiErr: any) {
+        console.warn('Backend API invite lookup note, checking fallback:', apiErr?.message || apiErr);
+        // Fallback: If user is authenticated and is project admin/member/recipient, query client SDK
         try {
-          const response = await apiFetch(`/api/invite-details/${encodeURIComponent(cleanToken)}`);
-          if (!response.ok) {
-            const data = await response.json().catch(() => ({}));
-            throw new Error(data.message || data.error || 'Failed to load invitation');
+          const inviteDoc = await getDoc(doc(db, 'invites', cleanToken));
+          if (inviteDoc.exists()) {
+            const data = inviteDoc.data() as InviteDetails;
+            setInvite({
+              ...data,
+              id: data.id || inviteDoc.id
+            });
+          } else {
+            setError(apiErr.message || 'Invitation not found');
           }
-          const data = await response.json();
-          setInvite(data);
-        } catch (apiErr: any) {
-          setError(apiErr.message);
+        } catch {
+          setError(apiErr.message || 'Failed to load invitation');
         }
       } finally {
         setLoading(false);
@@ -87,7 +89,7 @@ const JoinPage: React.FC = () => {
     if (!invite) return;
 
     // Client-side guard for obvious email mismatch before dispatching
-    if (user.email && invite.email && user.email.toLowerCase().trim() !== invite.email.toLowerCase().trim()) {
+    if (user.email && invite.email && !invite.email.includes('*') && user.email.toLowerCase().trim() !== invite.email.toLowerCase().trim()) {
       setError(`This invitation was issued to ${invite.email}. You are currently authenticated as ${user.email}. Please switch accounts to accept.`);
       return;
     }
@@ -144,6 +146,16 @@ const JoinPage: React.FC = () => {
   const handleDecline = async () => {
     if (!invite) return;
 
+    if (!user) {
+      // Must authenticate to decline invitation so only recipient can decline
+      if (token) {
+        sessionStorage.setItem('redirectAfterLogin', `/join?token=${token}`);
+        localStorage.setItem('redirectAfterLogin', `/join?token=${token}`);
+      }
+      navigate('/auth');
+      return;
+    }
+
     setDeclining(true);
     setError(null);
 
@@ -153,7 +165,7 @@ const JoinPage: React.FC = () => {
         throw new Error('Missing invitation token');
       }
 
-      // Authoritative backend invitation decline
+      // Authoritative backend invitation decline (protected with requireAuth)
       const response = await apiFetch('/api/invite-decline', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -307,18 +319,18 @@ const JoinPage: React.FC = () => {
                   Join Project:<br />{invite?.projectName}
                 </h1>
                 <p className="text-slate-400 font-medium text-sm mt-2">
-                  Invited by <span className="text-brand-primary font-bold">{invite?.invitedBy}</span> as a <span className="text-brand-primary font-black uppercase tracking-tighter">{invite?.role}</span>
+                  Invited by <span className="text-brand-primary font-bold">{invite?.invitedBy || invite?.inviterName || 'Project administrator'}</span> as a <span className="text-brand-primary font-black uppercase tracking-tighter">{invite?.role}</span>
                 </p>
               </div>
 
               <div className="bg-slate-50 rounded-2xl p-5 space-y-4 border border-slate-100">
                 <div className="flex items-center gap-4">
                   <div className="w-10 h-10 rounded-full bg-slate-200 flex items-center justify-center font-bold text-slate-500 text-sm">
-                    {invite?.email.charAt(0).toUpperCase()}
+                    {invite?.email ? invite.email.charAt(0).toUpperCase() : '✉'}
                   </div>
                   <div>
                     <p className="text-[11px] font-black text-slate-400 uppercase tracking-widest">Invited Email</p>
-                    <p className="text-sm font-bold text-slate-800">{invite?.email}</p>
+                    <p className="text-sm font-bold text-slate-800">{invite?.email || 'Invited Member'}</p>
                   </div>
                 </div>
                 <div className="flex items-center gap-4">

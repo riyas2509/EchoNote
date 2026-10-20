@@ -362,7 +362,7 @@ const TextToAudioView: React.FC<TextToAudioViewProps> = ({
   };
 
   return (
-    <div className="max-w-4xl mx-auto space-y-10 animate-in fade-in duration-500 pb-24 h-full relative">
+    <div className="w-full space-y-10 animate-in fade-in duration-500 pb-24 h-full relative">
       <header className="space-y-2 text-left">
         <h1 className="text-brand-primary tracking-tight text-[28px] md:text-[38px] font-semibold">Speech Synthesis</h1>
         <p className="text-slate-600 text-sm md:text-lg font-normal">High-fidelity corporate documentation narration with differentiated voice profiles.</p>

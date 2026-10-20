@@ -41,6 +41,7 @@ export const Solutions: React.FC<SolutionsProps> = ({
     "@graph": [
       {
         "@type": "WebPage",
+        "@id": "https://echonote-25.vercel.app/solutions#webpage",
         "name": "EchoNote Solutions for Coordination-Heavy Teams",
         "description": "Tailored decision intelligence and organizational memory workflows for Product & Engineering, Operations, Consulting, and Compliance-Sensitive Teams."
       },
