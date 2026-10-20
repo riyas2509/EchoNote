@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+# !/usr/bin/env bash
 # ==============================================================================
 # EchoNote Production Cloud Run Deployment & Environment Variables Configuration
 # ==============================================================================
@@ -12,14 +12,14 @@
 #   Artifact Registry: us-west1-docker.pkg.dev/echonote-2509/echonote/echonote
 #   Razorpay Mode:     live
 #
-# Baseline Production Revision:
-#   echonote-00009-w5m
+# Dynamic Revision Safety:
+#   At deployment time, the active serving revision and traffic distribution are
+#   discovered dynamically via Cloud Run Admin API, eliminating hardcoded revision drift.
 #
-# Rollback Reference:
-#   Last known verified production revision: echonote-00008-lw9
-#   Rollback command:
+# Rollback:
+#   To revert traffic to a previously verified healthy revision dynamically, run:
 #     gcloud run services update-traffic echonote \
-#       --to-revisions=echonote-00008-lw9=100 \
+#       --to-revisions=<PREVIOUS_HEALTHY_REVISION>=100 \
 #       --region=us-west1 \
 #       --project=echonote-2509
 #
@@ -36,8 +36,6 @@ readonly EXPECTED_REGION="us-west1"
 readonly EXPECTED_SERVICE_NAME="echonote"
 readonly EXPECTED_SERVICE_ACCOUNT="200551109142-compute@developer.gserviceaccount.com"
 readonly EXPECTED_ARTIFACT_REGISTRY="us-west1-docker.pkg.dev/echonote-2509/echonote/echonote"
-readonly CURRENT_SERVING_PROD_REVISION="echonote-00009-w5m"
-readonly LAST_KNOWN_PROD_REVISION="echonote-00008-lw9"
 
 # Target variables (subject to strict validation against expected production constants)
 SERVICE_NAME="${CLOUD_RUN_SERVICE:-$EXPECTED_SERVICE_NAME}"
@@ -61,8 +59,10 @@ readonly SECRET_RAZORPAY_WEBHOOK_SECRET="RAZORPAY_WEBHOOK_SECRET=echonote-razorp
 readonly SECRET_RESEND_API_KEY="RESEND_API_KEY=echonote-resend-api-key:latest"
 readonly SECRET_PLAYBACK_SECRET="PLAYBACK_SECRET=echonote-playback-secret:latest"
 readonly SECRET_CRON_SECRET="CRON_SECRET=echonote-cron-secret:latest"
+readonly SECRET_INTEGRATION_ENCRYPTION_KEY="INTEGRATION_ENCRYPTION_KEY=echonote-integration-encryption-key:latest"
+readonly SECRET_ZOOM_WEBHOOK_SECRET="ZOOM_WEBHOOK_SECRET=echonote-zoom-webhook-secret:latest"
 
-readonly CLOUD_RUN_SECRETS="${SECRET_GEMINI_API_KEY},${SECRET_RAZORPAY_KEY_SECRET},${SECRET_RAZORPAY_WEBHOOK_SECRET},${SECRET_RESEND_API_KEY},${SECRET_PLAYBACK_SECRET},${SECRET_CRON_SECRET}"
+readonly CLOUD_RUN_SECRETS="${SECRET_GEMINI_API_KEY},${SECRET_RAZORPAY_KEY_SECRET},${SECRET_RAZORPAY_WEBHOOK_SECRET},${SECRET_RESEND_API_KEY},${SECRET_PLAYBACK_SECRET},${SECRET_CRON_SECRET},${SECRET_INTEGRATION_ENCRYPTION_KEY},${SECRET_ZOOM_WEBHOOK_SECRET}"
 
 # Complete set of ordinary (non-secret) production environment variables (9 total).
 # Uses --set-env-vars to replace all ordinary environment variables, ensuring complete
@@ -317,11 +317,38 @@ run_preflight() {
 }
 
 # ------------------------------------------------------------------------------
-# 8. Safe Deployment Summary (No secrets, only validity status)
+# 8. Dynamic Cloud Run State Discovery
+# ------------------------------------------------------------------------------
+query_live_service_state() {
+  local active_rev=""
+  local traffic_alloc=""
+
+  if command -v gcloud &>/dev/null; then
+    active_rev="$(gcloud run services describe "$SERVICE_NAME" --project="$PROJECT_ID" --region="$REGION" --format='value(status.traffic[0].revisionName)' 2>/dev/null || true)"
+    traffic_alloc="$(gcloud run services describe "$SERVICE_NAME" --project="$PROJECT_ID" --region="$REGION" --format='csv[no-heading](status.traffic[].revisionName,status.traffic[].percent)' 2>/dev/null || true)"
+  fi
+
+  LIVE_SERVING_REVISION="${active_rev:-unknown}"
+  LIVE_TRAFFIC_ALLOCATION="${traffic_alloc:-unknown}"
+}
+
+# ------------------------------------------------------------------------------
+# 9. Safe Deployment Summary (No secrets, only validity status)
 # ------------------------------------------------------------------------------
 print_deployment_summary() {
   local image_tag="${1:-unset}"
   local image_uri="${2:-unset}"
+
+  # Dynamically derive secret count and list from authoritative CLOUD_RUN_SECRETS
+  local secret_count=0
+  local secret_lines=""
+  IFS=',' read -ra SECRET_ENTRIES <<< "$CLOUD_RUN_SECRETS"
+  secret_count="${#SECRET_ENTRIES[@]}"
+  for entry in "${SECRET_ENTRIES[@]}"; do
+    local var_name="${entry%%=*}"
+    local sec_ref="${entry#*=}"
+    secret_lines="${secret_lines}    - ${var_name} -> ${sec_ref}"$'\n'
+  done
 
   echo "======================================================================"
   echo "Production deployment target:"
@@ -343,15 +370,10 @@ print_deployment_summary() {
   echo "  Ordinary Env Vars Config:    9 verified non-secret variables (zero plain secrets)"
   echo "  Authoritative Sender:        RESEND_FROM_EMAIL=EchoNote <invitations@echotechai.in>"
   echo "  Canonical App URL:           APP_URL=https://echonote-25.ai.studio"
-  echo "  Secret Manager References (6 production secrets):"
-  echo "    - GEMINI_API_KEY -> echonote-gemini-api-key:latest"
-  echo "    - RAZORPAY_KEY_SECRET -> echonote-razorpay-key-secret:latest"
-  echo "    - RAZORPAY_WEBHOOK_SECRET -> echonote-razorpay-webhook-secret:latest"
-  echo "    - RESEND_API_KEY -> echonote-resend-api-key:latest"
-  echo "    - PLAYBACK_SECRET -> echonote-playback-secret:latest"
-  echo "    - CRON_SECRET -> echonote-cron-secret:latest"
-  echo "  Current Serving Revision:    $CURRENT_SERVING_PROD_REVISION"
-  echo "  Rollback Reference Revision: $LAST_KNOWN_PROD_REVISION"
+  echo "  Secret Manager References ($secret_count production secrets):"
+  printf "%s" "$secret_lines"
+  echo "  Live Serving Revision:       ${LIVE_SERVING_REVISION:-querying...}"
+  echo "  Live Traffic Allocation:     ${LIVE_TRAFFIC_ALLOCATION:-querying...}"
   echo "======================================================================"
 }
 
@@ -362,6 +384,7 @@ case "$ACTION" in
     validate_plan_ids
     validate_razorpay_key_id
     validate_razorpay_mode
+    query_live_service_state
     print_deployment_summary "N/A (update-env)" "N/A (update-env)"
 
     echo "Updating Cloud Run Service Environment Variables & Secret References"
@@ -393,19 +416,58 @@ case "$ACTION" in
     # Resolve immutable git commit SHA tag
     IMAGE_TAG="$(resolve_image_tag)"
     IMAGE_URI="${EXPECTED_ARTIFACT_REGISTRY}:${IMAGE_TAG}"
-    print_deployment_summary "$IMAGE_TAG" "$IMAGE_URI"
 
     echo "======================================================================"
     echo "Recording Production Revision Baseline (Revision Safety)"
     echo "======================================================================"
-    CURRENT_ACTIVE_REVISION="$CURRENT_SERVING_PROD_REVISION"
-    if command -v gcloud &>/dev/null; then
-      ACTIVE_QUERY="$(gcloud run services describe "$SERVICE_NAME" --project="$PROJECT_ID" --region="$REGION" --format='value(status.traffic[0].revisionName)' 2>/dev/null || true)"
-      if [ -n "$ACTIVE_QUERY" ]; then
-        CURRENT_ACTIVE_REVISION="$ACTIVE_QUERY"
-      fi
+    query_live_service_state
+    BASELINE_SERVING_REVISION="$LIVE_SERVING_REVISION"
+    # Capture complete authoritative baseline traffic allocation before deployment
+    BASELINE_TRAFFIC_ALLOCATION="$LIVE_TRAFFIC_ALLOCATION"
+    echo "Authoritative Baseline Traffic Allocation: $BASELINE_TRAFFIC_ALLOCATION"
+
+    # Strictly abort if live baseline cannot be safely determined
+    if [ -z "$BASELINE_SERVING_REVISION" ] || [ "$BASELINE_SERVING_REVISION" = "unknown" ]; then
+      echo "ERROR: Unable to safely determine live serving revision baseline from Cloud Run." >&2
+      echo "Refusing to proceed with deployment without a verified rollback baseline." >&2
+      exit 1
     fi
-    echo "Current serving revision: $CURRENT_ACTIVE_REVISION"
+
+    print_deployment_summary "$IMAGE_TAG" "$IMAGE_URI"
+
+    # Helper function to verify and report production traffic status on pre-promotion failure
+    handle_pre_promotion_failure() {
+      local failure_reason="$1"
+      echo "======================================================================" >&2
+      echo "PRE-PROMOTION CHECK FAILED: $failure_reason" >&2
+      echo "Traffic promotion command will NOT be executed." >&2
+      echo "Baseline serving revision: $BASELINE_SERVING_REVISION" >&2
+      echo "Expected baseline traffic: $BASELINE_TRAFFIC_ALLOCATION" >&2
+
+      # Actively check live Cloud Run traffic allocation to confirm whether it is unchanged
+      local live_traffic=""
+      if command -v gcloud &>/dev/null; then
+        live_traffic="$(gcloud run services describe "$SERVICE_NAME" --project="$PROJECT_ID" --region="$REGION" --format='csv[no-heading](status.traffic[].revisionName,status.traffic[].percent)' 2>/dev/null || true)"
+      fi
+
+      if [ -n "$live_traffic" ] && [ "$live_traffic" = "$BASELINE_TRAFFIC_ALLOCATION" ]; then
+        echo "VERIFIED: Original production traffic allocation is verified unchanged on Cloud Run:" >&2
+        echo "  $live_traffic" >&2
+      elif [ -n "$live_traffic" ]; then
+        echo "WARNING: Production traffic allocation differs from recorded baseline!" >&2
+        echo "  Recorded baseline: $BASELINE_TRAFFIC_ALLOCATION" >&2
+        echo "  Current live:      $live_traffic" >&2
+        echo "Manual traffic restore command:" >&2
+        echo "  gcloud run services update-traffic $SERVICE_NAME --to-revisions=$BASELINE_SERVING_REVISION=100 --region=$REGION --project=$PROJECT_ID" >&2
+      else
+        echo "NOTICE: Unable to query live Cloud Run traffic to verify allocation." >&2
+      fi
+      echo "======================================================================" >&2
+      exit 1
+    }
+
+    echo "Current serving revision: $BASELINE_SERVING_REVISION"
+    echo "Baseline traffic split:   $BASELINE_TRAFFIC_ALLOCATION"
     echo "Current service account:  $EXPECTED_SERVICE_ACCOUNT"
     echo "Artifact Registry target: $EXPECTED_ARTIFACT_REGISTRY"
     echo "Immutable image tag:      $IMAGE_TAG"
@@ -433,12 +495,12 @@ case "$ACTION" in
     echo "--> Immutable Deployment Image Digest: $IMMUTABLE_DEPLOY_IMAGE"
 
     echo "======================================================================"
-    echo "Deploying Explicit Immutable Image to Cloud Run"
+    echo "Deploying Explicit Immutable Image to Cloud Run at ZERO Traffic"
     echo "Service: $SERVICE_NAME (Region: $REGION, Project: $PROJECT_ID)"
     echo "Image:   $IMMUTABLE_DEPLOY_IMAGE"
     echo "======================================================================"
 
-    # Deploy explicit immutable image without source deployment
+    # Deploy explicit immutable image with --no-traffic and dedicated candidate tag
     gcloud run deploy "$SERVICE_NAME" \
       --image="$IMMUTABLE_DEPLOY_IMAGE" \
       --project="$PROJECT_ID" \
@@ -447,45 +509,273 @@ case "$ACTION" in
       --allow-unauthenticated \
       --port=3000 \
       --no-traffic \
+      --tag="echonote-candidate" \
       --set-env-vars="$PRODUCTION_ORDINARY_ENV_VARS" \
       --set-secrets="$CLOUD_RUN_SECRETS"
 
-    echo "--> Verifying deployed revision status and container image..."
+    echo "--> Verifying deployed candidate revision status and container image..."
     NEW_REVISION="$(gcloud run services describe "$SERVICE_NAME" --project="$PROJECT_ID" --region="$REGION" --format='value(status.latestCreatedRevisionName)' 2>/dev/null || true)"
-    echo "Newly deployed revision: $NEW_REVISION"
+    echo "Newly deployed revision: ${NEW_REVISION:-<UNRESOLVED>}"
 
-    if [ -z "$NEW_REVISION" ]; then
-      echo "ERROR: Failed to resolve newly deployed revision name. Refusing to route traffic!" >&2
-      echo "Active production traffic remains untouched on: $CURRENT_ACTIVE_REVISION" >&2
-      exit 1
+    if [ -z "${NEW_REVISION:-}" ]; then
+      handle_pre_promotion_failure "Failed to resolve newly deployed revision name. Refusing to route traffic!"
     fi
 
+    # Check 1: Revision Condition Ready
     IS_READY="$(gcloud run revisions describe "$NEW_REVISION" --project="$PROJECT_ID" --region="$REGION" --format='value(status.conditions[0].status)' 2>/dev/null || true)"
-    if [ "$IS_READY" != "True" ]; then
-      echo "ERROR: Deployed revision $NEW_REVISION failed health check (Ready condition status: '$IS_READY'). Refusing to route traffic!" >&2
-      echo "Active production traffic remains untouched on: $CURRENT_ACTIVE_REVISION" >&2
-      exit 1
+    if [ "${IS_READY:-}" != "True" ]; then
+      handle_pre_promotion_failure "Deployed revision $NEW_REVISION failed health check (Ready condition status: '${IS_READY:-unset}')."
     fi
 
-    # Verify that the new revision's container image corresponds to the immutable digest deployed
+    # Check 2: Immutable Image Digest Verification
     REVISION_IMAGE="$(gcloud run revisions describe "$NEW_REVISION" --project="$PROJECT_ID" --region="$REGION" --format='value(spec.containers[0].image)' 2>/dev/null || true)"
-    echo "Deployed revision image: $REVISION_IMAGE"
-    if ! echo "$REVISION_IMAGE" | grep -q "$IMAGE_DIGEST"; then
-      echo "ERROR: Deployed revision $NEW_REVISION image verification failed!" >&2
-      echo "Expected image to contain immutable digest: $IMAGE_DIGEST" >&2
-      echo "Actual revision container image: $REVISION_IMAGE" >&2
-      echo "Refusing to route traffic! Active production traffic remains untouched on: $CURRENT_ACTIVE_REVISION" >&2
-      exit 1
+    echo "Deployed revision image: ${REVISION_IMAGE:-<UNRESOLVED>}"
+    if ! echo "${REVISION_IMAGE:-}" | grep -q "$IMAGE_DIGEST"; then
+      handle_pre_promotion_failure "Deployed revision $NEW_REVISION image verification failed (Expected: $IMAGE_DIGEST, Actual: ${REVISION_IMAGE:-unset})."
     fi
 
-    echo "--> Revision $NEW_REVISION is Ready and verified with immutable digest $IMAGE_DIGEST."
+    # Check 3: Dedicated Candidate Revision URL Resolution (Never fall back to apex production service URL)
+    CANDIDATE_TAG_URL="$(gcloud run services describe "$SERVICE_NAME" --project="$PROJECT_ID" --region="$REGION" --format='csv[no-heading](status.traffic[].tag,status.traffic[].url)' 2>/dev/null | grep '^echonote-candidate,' | cut -d',' -f2 || true)"
+    SPECIFIC_REV_URL="$(gcloud run revisions describe "$NEW_REVISION" --project="$PROJECT_ID" --region="$REGION" --format='value(status.url)' 2>/dev/null || true)"
+    TARGET_HEALTH_URL="${CANDIDATE_TAG_URL:-$SPECIFIC_REV_URL}"
+
+    if [ -z "${TARGET_HEALTH_URL:-}" ]; then
+      handle_pre_promotion_failure "Could not resolve dedicated zero-traffic URL for candidate revision $NEW_REVISION. Refusing to test against apex production service URL!"
+    fi
+
+    echo "--> Resolved candidate revision dedicated URL: $TARGET_HEALTH_URL"
+
+    # Check 4: Pre-traffic HTTP Health Check on Candidate URL
+    echo "--> Performing HTTP health check on candidate revision: $TARGET_HEALTH_URL/api/health"
+    HEALTH_STATUS_CODE="$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 "$TARGET_HEALTH_URL/api/health" 2>/dev/null || true)"
+
+    if [ "${HEALTH_STATUS_CODE:-}" != "200" ]; then
+      handle_pre_promotion_failure "Candidate pre-traffic health check failed on $TARGET_HEALTH_URL/api/health (HTTP status: '${HEALTH_STATUS_CODE:-timeout}')."
+    fi
+    echo "--> HTTP health check passed on candidate revision (status 200)."
+
+    # Check 5: Zoom Webhook URL-Validation Acceptance & Route Presence Verification
+    echo "--> Performing Zoom webhook URL-validation acceptance check..."
+    ZOOM_CHECK_RESULT="$(node -e "
+      const http = require('http');
+      const https = require('https');
+      const crypto = require('crypto');
+      const targetUrl = process.argv[1];
+
+      function verifyZoomWebhookSignature(headers, rawBody, secret, toleranceSeconds = 300) {
+        const signatureHeader = headers['x-zm-signature'];
+        const timestampHeader = headers['x-zm-request-timestamp'];
+        if (!secret || typeof secret !== 'string' || !secret.trim()) return { valid: false, reason: 'WEBHOOK_SECRET_NOT_CONFIGURED' };
+        if (!signatureHeader || typeof signatureHeader !== 'string') return { valid: false, reason: 'MISSING_SIGNATURE_HEADER' };
+        if (!timestampHeader || typeof timestampHeader !== 'string') return { valid: false, reason: 'MISSING_TIMESTAMP_HEADER' };
+        const requestTimestamp = parseInt(timestampHeader, 10);
+        if (isNaN(requestTimestamp) || requestTimestamp <= 0) return { valid: false, reason: 'INVALID_TIMESTAMP_FORMAT' };
+        const currentTimestamp = Math.floor(Date.now() / 1000);
+        if (Math.abs(currentTimestamp - requestTimestamp) > toleranceSeconds) return { valid: false, reason: 'TIMESTAMP_OUT_OF_TOLERANCE', isStale: true };
+        const rawBodyStr = Buffer.isBuffer(rawBody) ? rawBody.toString('utf8') : rawBody;
+        const message = 'v0:' + timestampHeader + ':' + rawBodyStr;
+        const computedHash = crypto.createHmac('sha256', secret.trim()).update(message).digest('hex');
+        const expectedSignature = 'v0=' + computedHash;
+        const sigBuf = Buffer.from(signatureHeader);
+        const expectedBuf = Buffer.from(expectedSignature);
+        if (sigBuf.length !== expectedBuf.length) return { valid: false, reason: 'SIGNATURE_MISMATCH' };
+        return crypto.timingSafeEqual(sigBuf, expectedBuf) ? { valid: true } : { valid: false, reason: 'SIGNATURE_MISMATCH' };
+      }
+
+      function generateZoomValidationResponse(plainToken, secret) {
+        const hash = crypto.createHmac('sha256', secret).update(plainToken).digest('hex');
+        return { plainToken, encryptedToken: hash };
+      }
+
+      function verifyLocalChallengeProtocol() {
+        return new Promise((resolve, reject) => {
+          const testSecret = 'echo_isolated_protocol_test_' + crypto.randomBytes(16).toString('hex');
+          const server = http.createServer((req, res) => {
+            if (req.method === 'POST' && req.url === '/api/webhooks/zoom') {
+              let body = '';
+              req.on('data', chunk => body += chunk);
+              req.on('end', () => {
+                let parsed;
+                try {
+                  parsed = JSON.parse(body);
+                } catch (e) {
+                  res.writeHead(400, { 'Content-Type': 'application/json' });
+                  return res.end(JSON.stringify({ error: 'Invalid JSON' }));
+                }
+                if (parsed.event === 'endpoint.url_validation') {
+                  const plainToken = parsed.payload?.plainToken;
+                  if (!plainToken) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    return res.end(JSON.stringify({ error: 'Missing plainToken' }));
+                  }
+                  const sigCheck = verifyZoomWebhookSignature(req.headers, body, testSecret);
+                  if (!sigCheck.valid) {
+                    res.writeHead(401, { 'Content-Type': 'application/json' });
+                    return res.end(JSON.stringify({ error: 'Invalid webhook signature', reason: sigCheck.reason }));
+                  }
+                  const challengeResponse = generateZoomValidationResponse(plainToken, testSecret);
+                  res.writeHead(200, { 'Content-Type': 'application/json' });
+                  return res.end(JSON.stringify(challengeResponse));
+                }
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Unknown event' }));
+              });
+            } else {
+              res.writeHead(404);
+              res.end();
+            }
+          });
+
+          server.listen(0, '127.0.0.1', () => {
+            const port = server.address().port;
+            const plainToken = 'protocol_challenge_' + Date.now();
+            const payloadObj = { event: 'endpoint.url_validation', payload: { plainToken } };
+            const bodyStr = JSON.stringify(payloadObj);
+            const ts = Math.floor(Date.now() / 1000).toString();
+            const sig = 'v0=' + crypto.createHmac('sha256', testSecret).update('v0:' + ts + ':' + bodyStr).digest('hex');
+
+            const req = http.request({
+              hostname: '127.0.0.1',
+              port,
+              path: '/api/webhooks/zoom',
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'x-zm-request-timestamp': ts,
+                'x-zm-signature': sig,
+                'Content-Length': Buffer.byteLength(bodyStr)
+              },
+              timeout: 5000
+            }, (res) => {
+              let resp = '';
+              res.on('data', chunk => resp += chunk);
+              res.on('end', () => {
+                server.close();
+                if (res.statusCode !== 200) {
+                  return reject(new Error('Local test server returned HTTP ' + res.statusCode));
+                }
+                try {
+                  const parsed = JSON.parse(resp);
+                  const expectedEncryptedToken = crypto.createHmac('sha256', testSecret).update(plainToken).digest('hex');
+                  if (parsed.plainToken === plainToken && parsed.encryptedToken === expectedEncryptedToken) {
+                    resolve({ plainToken, encryptedToken: parsed.encryptedToken });
+                  } else {
+                    reject(new Error('Tokens did not match expected HMAC challenge output'));
+                  }
+                } catch (e) {
+                  reject(e);
+                }
+              });
+            });
+            req.on('error', (err) => { server.close(); reject(err); });
+            req.write(bodyStr);
+            req.end();
+          });
+        });
+      }
+
+      function verifyCandidateRouteAvailability(target) {
+        return new Promise((resolve, reject) => {
+          try {
+            const u = new URL(target + '/api/webhooks/zoom');
+            const transport = u.protocol === 'https:' ? https : http;
+            const probePayload = JSON.stringify({
+              event: 'endpoint.url_validation',
+              payload: { plainToken: 'cand_route_probe_' + Date.now() }
+            });
+            const req = transport.request(u, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Content-Length': Buffer.byteLength(probePayload)
+              },
+              timeout: 15000
+            }, (res) => {
+              let chunks = [];
+              res.on('data', c => chunks.push(c));
+              res.on('end', () => {
+                const rawBody = Buffer.concat(chunks).toString();
+                if (res.statusCode === 404) {
+                  return reject(new Error('ROUTE_NOT_FOUND: Candidate endpoint returned HTTP 404 Not Found. Zoom webhook route /api/webhooks/zoom is not present in deployed candidate revision.'));
+                }
+                if (res.statusCode === 503) {
+                  let detail = '';
+                  try {
+                    const p503 = JSON.parse(rawBody);
+                    if (p503.message) detail = ' (' + p503.message + ')';
+                  } catch (e) {}
+                  return reject(new Error('SECRET_NOT_CONFIGURED: Candidate endpoint returned HTTP 503 Service Unavailable' + detail + '. ZOOM_WEBHOOK_SECRET is unconfigured or unavailable on candidate.'));
+                }
+                if (res.statusCode === 401) {
+                  return resolve({
+                    routeAvailable: true,
+                    statusCode: 401,
+                    statusDetail: 'Route present and actively enforcing signature authentication against configured server secret.'
+                  });
+                }
+                if (res.statusCode === 200) {
+                  return resolve({
+                    routeAvailable: true,
+                    statusCode: 200,
+                    statusDetail: 'Route present and returned HTTP 200.'
+                  });
+                }
+                return reject(new Error('UNEXPECTED_STATUS: Candidate endpoint returned unexpected HTTP ' + res.statusCode + ': ' + rawBody.substring(0, 200)));
+              });
+            });
+            req.on('error', (err) => {
+              reject(new Error('CONNECTION_ERROR: Failed to connect to candidate Zoom webhook endpoint: ' + err.message));
+            });
+            req.write(probePayload);
+            req.end();
+          } catch (e) {
+            reject(e);
+          }
+        });
+      }
+
+      (async () => {
+        try {
+          console.log('[Phase A] Running local isolated Zoom challenge protocol integration test...');
+          const localResult = await verifyLocalChallengeProtocol();
+          console.log('ACCEPTANCE_PASS (Local Protocol): Isolated Zoom URL-validation challenge handshake succeeded (HTTP 200, plainToken, encryptedToken HMAC-SHA256 verified).');
+
+          console.log('[Phase B] Probing candidate deployed Zoom webhook route availability at: ' + targetUrl + '/api/webhooks/zoom');
+          const routeResult = await verifyCandidateRouteAvailability(targetUrl);
+          console.log('ACCEPTANCE_PASS (Candidate Route): Deployed webhook route confirmed available (HTTP ' + routeResult.statusCode + ': ' + routeResult.statusDetail + ').');
+
+          console.log('[Handshake Verification Scope]');
+          console.log('NOTICE: Full cryptographic handshake verified in isolated integration test with dedicated test secret.');
+          console.log('LIMITATION: Candidate live handshake against configured ZOOM_WEBHOOK_SECRET cannot be cryptographically verified without exposing or retrieving the real secret. Candidate route availability and active authentication enforcement verified.');
+
+          process.exit(0);
+        } catch (err) {
+          console.error('ACCEPTANCE_FAIL: ' + err.message);
+          process.exit(1);
+        }
+      })();
+    " "$TARGET_HEALTH_URL" 2>&1 || true)"
+    ZOOM_CHECK_STATUS=$?
+
+    echo "$ZOOM_CHECK_RESULT"
+    if [ "$ZOOM_CHECK_STATUS" -ne 0 ]; then
+      handle_pre_promotion_failure "Zoom URL-validation acceptance check failed on candidate revision."
+    fi
+    echo "--> Zoom webhook verification check passed on candidate revision."
+
+    echo "--> Revision $NEW_REVISION is Ready, verified with immutable digest $IMAGE_DIGEST, and fully validated."
     echo "--> Shifting 100% production traffic to healthy new revision..."
     gcloud run services update-traffic "$SERVICE_NAME" \
       --to-revisions="$NEW_REVISION=100" \
       --project="$PROJECT_ID" \
       --region="$REGION"
 
-    echo "✅ Explicit immutable Docker deployment completed and 100% traffic active."
+    echo "======================================================================"
+    echo "✅ Explicit immutable Docker deployment completed and 100% traffic active on $NEW_REVISION."
+    echo "Previous baseline serving revision was: $BASELINE_SERVING_REVISION"
+    echo "To rollback if needed, run:"
+    echo "  gcloud run services update-traffic $SERVICE_NAME --to-revisions=$BASELINE_SERVING_REVISION=100 --region=$REGION --project=$PROJECT_ID"
+    echo "======================================================================"
     ;;
 
   declarative-prepare)

@@ -23,6 +23,8 @@ export const SECRET_MAPPINGS: readonly SecretMapping[] = [
   { name: 'RESEND_API_KEY', secretName: 'echonote-resend-api-key', secretKey: 'latest' },
   { name: 'PLAYBACK_SECRET', secretName: 'echonote-playback-secret', secretKey: 'latest' },
   { name: 'CRON_SECRET', secretName: 'echonote-cron-secret', secretKey: 'latest' },
+  { name: 'INTEGRATION_ENCRYPTION_KEY', secretName: 'echonote-integration-encryption-key', secretKey: 'latest' },
+  { name: 'ZOOM_WEBHOOK_SECRET', secretName: 'echonote-zoom-webhook-secret', secretKey: 'latest' },
 ] as const;
 
 export interface OrdinaryEnvVarConfig {
@@ -71,7 +73,7 @@ export interface TransformResult {
 /**
  * Validates and transforms a Cloud Run Knative Service manifest
  * into an atomic, declarative desired-state manifest:
- * - Converts the 6 sensitive variables from literal to Secret Manager references.
+ * - Converts the 8 sensitive variables from literal to Secret Manager references.
  * - Enforces exactly 9 ordinary variables with zero overlap.
  * - Pins 100% traffic strictly to the existing serving revision.
  * - Preserves all container resources, ports, annotations, and service account.
@@ -248,7 +250,7 @@ export function transformServiceManifest(options: TransformOptions): TransformRe
     });
   }
 
-  // Add 6 secret variables with secretKeyRef
+  // Add 8 secret variables with secretKeyRef
   for (const secret of SECRET_MAPPINGS) {
     desiredEnv.push({
       name: secret.name,
@@ -270,8 +272,9 @@ export function transformServiceManifest(options: TransformOptions): TransformRe
     seenNames.add(item.name);
   }
 
-  if (desiredEnv.length !== 15) {
-    throw new Error(`Expected exactly 15 environment entries, got ${desiredEnv.length}`);
+  const expectedTotalEnvCount = ordinaryKeys.length + SECRET_MAPPINGS.length;
+  if (desiredEnv.length !== expectedTotalEnvCount) {
+    throw new Error(`Expected exactly ${expectedTotalEnvCount} environment entries, got ${desiredEnv.length}`);
   }
 
   container.env = desiredEnv;
