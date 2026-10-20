@@ -1,0 +1,11 @@
+{
+  "name": "echonote-gemini-canary",
+  "version": "1.0.0",
+  "private": true,
+  "type": "commonjs",
+  "dependencies": {
+    "@google/genai": "1.42.0",
+    "cors": "2.8.6",
+    "express": "5.2.1"
+  }
+}

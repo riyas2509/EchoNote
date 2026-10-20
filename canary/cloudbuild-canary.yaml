@@ -1,0 +1,29 @@
+# ==============================================================================
+# EchoNote Dedicated Gemini Canary Cloud Build Configuration (Step 3B.4U-AH.4)
+# ==============================================================================
+# - Builds strictly the isolated canary image using canary/Dockerfile.canary.
+# - Build context: repository root (.).
+# - ZERO bundling or execution of production server.ts or production Vite frontend.
+# - Requires custom substitution _IMAGE_NAME (e.g. us-west1-docker.pkg.dev/...).
+# - Emits image to images list for recording build artifact metadata and digest.
+# - ZERO secrets, API keys, IAM bindings, or Cloud Run deployment steps.
+# ==============================================================================
+
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - '$_IMAGE_NAME'
+      - '-f'
+      - 'canary/Dockerfile.canary'
+      - '.'
+
+images:
+  - '$_IMAGE_NAME'
+
+substitutions:
+  _IMAGE_NAME: ''
+
+options:
+  logging: CLOUD_LOGGING_ONLY
