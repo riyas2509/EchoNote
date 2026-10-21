@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 
 /**
  * tests/test_assistant_context_and_quality.ts
@@ -725,6 +726,136 @@ function runSuite() {
     assert(!JSON.stringify(ctx).includes("Top Secret Merger"), 'Secret title must not leak');
   });
 
+
+  // AH.150 - 1. Dashboard assistant context passes authorized recording and project IDs
+  test('AH.150-1: Dashboard assistant context passes authorized recording and project IDs', () => {
+    const mockAudioHistory = [{ id: 'rec_101', name: 'Board Sync.mp3', transcript: 'Q3 numbers discussed' }];
+    const mockProjects = [{ id: 'proj_sales', name: 'Sales Pipeline' }];
+    const activeRecordId = 'rec_101';
+    const selectedGroupFilter = 'Sales Pipeline';
+
+    const dashboardContext = {
+      current_page: 'HOME',
+      current_project: selectedGroupFilter || 'All Projects',
+      selected_file_name: mockAudioHistory.find(r => r.id === activeRecordId)?.name || 'None',
+      recordingId: activeRecordId || undefined,
+      projectId: selectedGroupFilter ? mockProjects.find(p => p.name === selectedGroupFilter)?.id : undefined
+    };
+
+    assert.equal(dashboardContext.recordingId, 'rec_101');
+    assert.equal(dashboardContext.projectId, 'proj_sales');
+    assert.equal(dashboardContext.current_page, 'HOME');
+  });
+
+  // AH.150 - 2. Dashboard question with recording context receives authoritative context
+  test('AH.150-2: Dashboard question with recording context receives authoritative context', () => {
+    const ctx = assembleServerContext({
+      user: { uid: 'user_alice' },
+      recordId: 'rec_101',
+      recordStore: {
+        rec_101: { id: 'rec_101', userId: 'user_alice', transcript: 'Revenue was 5M', title: 'Q3 Financials' }
+      }
+    });
+
+    assert.equal(ctx.error, undefined);
+    assert.equal(ctx.authorizedRecord?.id, 'rec_101');
+    assert(ctx.contextBlock.includes('Revenue was 5M'));
+  });
+
+  // AH.150 - 3. Dashboard project question works without active recording
+  test('AH.150-3: Dashboard project question works without active recording', () => {
+    const ctx = assembleServerContext({
+      user: { uid: 'user_alice' },
+      projectId: 'proj_marketing',
+      recordId: undefined,
+      projectStore: {
+        proj_marketing: { id: 'proj_marketing', name: 'Marketing' }
+      },
+      taskStore: [
+        { projectId: 'proj_marketing', title: 'Launch campaign', status: 'IN_PROGRESS', dueDate: '2026-11-01', assigneeId: 'user_alice' }
+      ]
+    });
+
+    assert.equal(ctx.error, undefined);
+    assert.equal(ctx.authorizedRecord, null);
+    assert(ctx.contextBlock.includes('Launch campaign'));
+    assert(ctx.contextBlock.includes('IN_PROGRESS'));
+  });
+
+  // AH.150 - 4. Missing context result is returned honestly without generic fallback replacement
+  test('AH.150-4: Missing context is returned honestly without generic fallback replacement', () => {
+    const rawModelResponse = {
+      reply: 'I could not find information regarding the legal budget in the available context.',
+      intent: 'none',
+      outcome: 'INSUFFICIENT_CONTEXT',
+      missingSources: ['financial ledger'],
+      suggestedNextStep: 'Please select a financial recording or provide the ledger.'
+    };
+
+    const validated = validateAssistantResponse(rawModelResponse, 'What is our legal budget?');
+    assert(validated !== null);
+    assert.equal(validated.outcome, 'INSUFFICIENT_CONTEXT');
+    assert(!validated.reply.includes('I can help with transcripts, summaries, decisions'));
+  });
+
+  // AH.150 - 5. Sanitized API failure is rendered as retryable error, not generic prompt text
+  test('AH.150-5: Sanitized API failure is rendered as retryable error, not generic prompt text', () => {
+    const classified = classifyAiError(new Error('Rate limit exceeded: 429 too many requests'));
+    assert.equal(classified.code, 'AI_RATE_LIMITED');
+    assert.equal(classified.statusCode, 429);
+    assert.equal(classified.retryable, true);
+    assert(!classified.sanitizedMessage.includes('I can help with transcripts, summaries, decisions'));
+  });
+  // AH.151 - 1. Verify standalone EchoNoteAssistant launcher is retired from App.tsx
+  test('AH.151-1: Standalone EchoNoteAssistant launcher is retired from App.tsx', () => {
+    const appSource = fs.readFileSync('C:/Users/riyam/Desktop/EchoNote-github-review/App.tsx', 'utf-8');
+    assert(!appSource.includes('<EchoNoteAssistant'), 'Standalone EchoNoteAssistant launcher must not be rendered');
+    assert(!appSource.includes('import EchoNoteAssistant'), 'EchoNoteAssistant import must not remain in App.tsx');
+  });
+
+  // AH.151 - 2. Verify task-specific AI workflows (summaries, decisions, search) remain wired
+  test('AH.151-2: Task-specific AI workflows (summaries, decisions, search) remain wired in App.tsx', () => {
+    const appSource = fs.readFileSync('C:/Users/riyam/Desktop/EchoNote-github-review/App.tsx', 'utf-8');
+    assert(appSource.includes('handleSummarizeTranscript'), 'Summarization workflow must be preserved');
+    assert(appSource.includes('analyzeDecisionIntelligence'), 'Decision intelligence workflow must be preserved');
+    assert(appSource.includes('setSearchQuery'), 'Global search workflow must be preserved');
+  });
+  // AH.152 - 1. Verify AudioToTextView exposes SmartRecapModal and handleTriggerSmartRecap
+  test('AH.152-1: Verify AudioToTextView wires SmartRecapModal and handleTriggerSmartRecap', () => {
+    const src = fs.readFileSync('C:/Users/riyam/Desktop/EchoNote-github-review/components/AudioToTextView.tsx', 'utf-8');
+    assert(src.includes('handleTriggerSmartRecap'), 'AudioToTextView must define handleTriggerSmartRecap');
+    assert(src.includes('<SmartRecapModal'), 'AudioToTextView must render SmartRecapModal');
+    assert(src.includes('generateSmartRecap'), 'AudioToTextView must call generateSmartRecap');
+  });
+
+  // AH.152 - 2. Verify AudioToTextView wires Strategic Thinking Partner
+  test('AH.152-2: Verify AudioToTextView wires Strategic Thinking Partner', () => {
+    const src = fs.readFileSync('C:/Users/riyam/Desktop/EchoNote-github-review/components/AudioToTextView.tsx', 'utf-8');
+    assert(src.includes('analyzeStrategically'), 'AudioToTextView must import analyzeStrategically');
+    assert(src.includes('Strategic Thinking Partner'), 'AudioToTextView must expose Strategic Thinking Partner');
+  });
+
+  // AH.152 - 3. Verify DecisionIntelligence component exists and connects to analyzeDecisionIntelligence
+  test('AH.152-3: Verify DecisionIntelligence connects to analyzeDecisionIntelligence', () => {
+    const src = fs.readFileSync('C:/Users/riyam/Desktop/EchoNote-github-review/components/DecisionIntelligence.tsx', 'utf-8');
+    assert(src.includes('analyzeDecisionIntelligence'), 'DecisionIntelligence must import analyzeDecisionIntelligence');
+    assert(src.includes('handleAnalyze'), 'DecisionIntelligence must define handleAnalyze');
+  });
+
+  // AH.152 - 4. Verify TextToAudioView exposes Speech Synthesis workflow
+  test('AH.152-4: Verify TextToAudioView exposes Speech Synthesis workflow', () => {
+    const src = fs.readFileSync('C:/Users/riyam/Desktop/EchoNote-github-review/components/TextToAudioView.tsx', 'utf-8');
+    assert(src.includes('synthesizeSpeech'), 'TextToAudioView must import synthesizeSpeech');
+    assert(src.includes('Speech Synthesis'), 'TextToAudioView must render Speech Synthesis title');
+  });
+
+  // AH.152 - 5. Verify App.tsx handles global search input and query wiring
+  test('AH.152-5: Verify App.tsx wires global search and Navigation tabs without Assistant launcher', () => {
+    const src = fs.readFileSync('C:/Users/riyam/Desktop/EchoNote-github-review/App.tsx', 'utf-8');
+    assert(src.includes('setSearchQuery'), 'App.tsx must maintain search state');
+    assert(src.includes('searchQuery'), 'App.tsx must pass searchQuery to Topbar');
+    assert(!src.includes('<EchoNoteAssistant'), 'App.tsx must not mount EchoNoteAssistant');
+  });
   console.log('\n=================================================');
   console.log('RESULTS: ' + passed + ' PASSED, ' + failed + ' FAILED');
   console.log('=================================================\n');

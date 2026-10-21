@@ -1787,6 +1787,20 @@ export interface TaskNotificationRecord {
   } | null;
 }
 
+// ============================================================================
+// EchoNote Assistant Shared Types (Retained for backend/contract compatibility)
+// ============================================================================
+export type AssistantOutcome = 'ANSWERED' | 'INSUFFICIENT_CONTEXT' | 'CLARIFICATION_NEEDED' | 'ACTION_REQUESTED' | 'ACTION_EXECUTED';
+export type AssistantIntent = 'summarize' | 'analyze thinking' | 'decisions' | 'add to project' | 'usage / minutes' | 'none';
 
-
-
+export interface AssistantApiResponse {
+  reply: string;
+  intent: AssistantIntent;
+  outcome: AssistantOutcome;
+  executeAction: boolean;
+  missingSources?: string[];
+  suggestedNextStep?: string;
+  code?: string;
+  error?: string;
+  retryable?: boolean;
+}

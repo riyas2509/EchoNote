@@ -22,7 +22,6 @@ import BookDemoPage from './components/BookDemoPage';
 import JoinPage from './pages/JoinPage';
 import OrgInviteAcceptPage from './pages/OrgInviteAcceptPage';
 import PricingPage from './pages/PricingPage';
-import EchoNoteAssistant from './components/EchoNoteAssistant';
 import Home from './pages/Home';
 import Features from './pages/Features';
 import Solutions from './pages/Solutions';
@@ -2242,57 +2241,6 @@ const App: React.FC = () => {
         {/* Fallback */}
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
-      <EchoNoteAssistant 
-        context={{
-          current_page: currentTab,
-          current_project: selectedGroupFilter || 'All Projects',
-          selected_file_name: audioHistory.find(r => r.id === activeRecordId)?.name || textHistory.find(r => r.id === activeRecordId)?.name || 'None',
-          transcript_text: audioHistory.find(r => r.id === activeRecordId)?.transcript || 'None',
-          summary: audioHistory.find(r => r.id === activeRecordId)?.summary || 'None',
-          user_plan: usageStats.plan,
-          minutes_used: usageStats.usedMinutes,
-          minutes_remaining: Math.max(0, usageStats.totalMinutes - usageStats.usedMinutes)
-        }}
-        actions={{
-          summarizeTranscript: () => {
-            if (activeRecordId) {
-              handleSummarizeTranscript(activeRecordId);
-            } else {
-              addToast('AI Action', 'Please select a file first.', 'error');
-            }
-          },
-          runThinkingEngine: () => {
-            if (activeRecordId) {
-              const record = audioHistory.find(r => r.id === activeRecordId);
-              if (record) {
-                handleReuseDecision(record.transcript, 'transcript');
-                addToast('AI Action', 'Processing AI request...', 'info');
-              }
-            } else {
-              addToast('AI Action', 'Please select a file first.', 'error');
-            }
-          },
-          extractDecisions: () => {
-            if (activeRecordId) {
-              const record = audioHistory.find(r => r.id === activeRecordId);
-              if (record) {
-                handleReuseDecision(record.transcript, 'transcript');
-                addToast('AI Action', 'Extracting decisions...', 'info');
-              }
-            } else {
-              addToast('AI Action', 'Please select a file first.', 'error');
-            }
-          },
-          assignToProject: () => {
-            if (activeRecordId) {
-              addToast('AI Action', 'Opening project selector...', 'info');
-              // Logic to open project selector
-            } else {
-              addToast('AI Action', 'Please select a file first.', 'error');
-            }
-          }
-        }}
-      />
     </>
   );
 };
