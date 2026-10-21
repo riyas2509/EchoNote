@@ -1,10 +1,24 @@
-
 import React, { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { MessageCircle, X, Send, Minus, Maximize2, Sparkles, Layout, FileText, Brain, CheckSquare, BarChart2 } from 'lucide-react';
+import { MessageCircle, X, Send, Minus, Maximize2, Sparkles, Layout, FileText, Brain, CheckSquare, BarChart2, AlertCircle, RefreshCw, HelpCircle, Info, ThumbsUp, ThumbsDown, Check } from 'lucide-react';
 import { apiFetch } from '../lib/apiClient';
 import { ProductEventName } from '../types';
 import { trackProductEvent, trackDecisionRetrieved } from '../services/productAnalyticsService';
+
+export type AssistantOutcome = 'ANSWERED' | 'INSUFFICIENT_CONTEXT' | 'CLARIFICATION_NEEDED' | 'ACTION_REQUESTED' | 'ACTION_EXECUTED';
+export type AssistantIntent = 'summarize' | 'analyze thinking' | 'decisions' | 'add to project' | 'usage / minutes' | 'none';
+
+export interface AssistantApiResponse {
+  reply: string;
+  intent: AssistantIntent;
+  outcome: AssistantOutcome;
+  executeAction: boolean;
+  missingSources?: string[];
+  suggestedNextStep?: string;
+  code?: string;
+  error?: string;
+  retryable?: boolean;
+}
 
 interface AssistantContext {
   current_page: string;
@@ -15,6 +29,8 @@ interface AssistantContext {
   user_plan: string;
   minutes_used: number;
   minutes_remaining: number;
+  recordingId?: string;
+  projectId?: string;
 }
 
 interface AssistantActions {
@@ -29,15 +45,58 @@ interface EchoNoteAssistantProps {
   actions: AssistantActions;
 }
 
+export interface ChatMessage {
+  role: 'user' | 'assistant' | 'error';
+  text: string;
+  timestamp: number;
+  outcome?: AssistantOutcome;
+  intent?: AssistantIntent;
+  missingSources?: string[];
+  suggestedNextStep?: string;
+  isRetryable?: boolean;
+  retryQuery?: string;
+}
+
 const EchoNoteAssistant: React.FC<EchoNoteAssistantProps> = ({ context, actions }) => {
   const [isOpen, setIsOpen] = useState(false);
   const [isMinimized, setIsMinimized] = useState(false);
   const [message, setMessage] = useState('');
   const [isTyping, setIsTyping] = useState(false);
-  const [chatHistory, setChatHistory] = useState<{role: 'user' | 'assistant', text: string, timestamp: number}[]>([
-    { role: 'assistant', text: 'Hi! I\'m your EchoNote Assistant. How can I help you today?', timestamp: Date.now() }
+  const [chatHistory, setChatHistory] = useState<ChatMessage[]>([
+    { role: 'assistant', text: "Hi! I'm your EchoNote Assistant. How can I help you today?", timestamp: Date.now(), outcome: 'ANSWERED' }
   ]);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const [feedbackGiven, setFeedbackGiven] = useState<Record<number, 'helpful' | 'unhelpful'>>({});
+
+  const handleFeedback = async (msgIndex: number, rating: 'helpful' | 'unhelpful', assistantMsg: ChatMessage) => {
+    if (feedbackGiven[msgIndex]) return;
+    setFeedbackGiven(prev => ({ ...prev, [msgIndex]: rating }));
+
+    // Find preceding user question
+    let userQuestion = '';
+    for (let j = msgIndex - 1; j >= 0; j--) {
+      if (chatHistory[j].role === 'user') {
+        userQuestion = chatHistory[j].text;
+        break;
+      }
+    }
+
+    try {
+      await apiFetch('/api/ai/assistant-feedback', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message: userQuestion || assistantMsg.text,
+          responseReply: assistantMsg.text,
+          outcome: assistantMsg.outcome,
+          rating,
+          context
+        })
+      });
+    } catch (fbErr) {
+      console.warn('Failed recording feedback:', fbErr);
+    }
+  };
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -45,14 +104,20 @@ const EchoNoteAssistant: React.FC<EchoNoteAssistantProps> = ({ context, actions 
     }
   }, [chatHistory, isOpen, isTyping]);
 
-  const handleSendMessage = async (e?: React.FormEvent, overrideMessage?: string) => {
+  const handleSendMessage = async (e?: React.FormEvent, overrideMessage?: string, isRetry: boolean = false) => {
     if (e) e.preventDefault();
-    const textToSend = overrideMessage || message;
-    if (!textToSend.trim()) return;
+    if (isTyping) return; // Prevent duplicate sends while request is in progress
 
-    const newUserMsg = { role: 'user' as const, text: textToSend, timestamp: Date.now() };
-    setChatHistory(prev => [...prev, newUserMsg]);
-    setMessage('');
+    const textToSend = (overrideMessage !== undefined ? overrideMessage : message).trim();
+    if (!textToSend) return;
+
+    // Only add new user bubble if not retrying an already shown user bubble
+    if (!isRetry) {
+      const newUserMsg: ChatMessage = { role: 'user', text: textToSend, timestamp: Date.now() };
+      setChatHistory(prev => [...prev, newUserMsg]);
+      setMessage('');
+    }
+
     setIsTyping(true);
 
     trackProductEvent({
@@ -60,9 +125,15 @@ const EchoNoteAssistant: React.FC<EchoNoteAssistantProps> = ({ context, actions 
       entityType: 'search',
       source: 'ask_echonote',
       metadata: {
-        searchQueryLength: textToSend.trim().length
+        searchQueryLength: textToSend.length
       }
     });
+
+    // Prepare bounded conversation history for multi-turn support (excluding errors)
+    const historyPayload = chatHistory
+      .filter(m => m.role === 'user' || m.role === 'assistant')
+      .slice(-6)
+      .map(m => ({ role: m.role, text: m.text }));
 
     try {
       const response = await apiFetch('/api/ai/assistant-chat', {
@@ -70,54 +141,98 @@ const EchoNoteAssistant: React.FC<EchoNoteAssistantProps> = ({ context, actions 
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           message: textToSend,
-          context
+          context,
+          conversationHistory: historyPayload
         })
       });
 
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.error || 'Assistant service failed to respond');
+        const sanitizedErrorMsg = errorData.error || (
+          response.status === 429
+            ? 'The AI assistant is temporarily rate-limited. Please wait a moment and try again.'
+            : response.status === 504
+              ? 'The AI assistant timed out while processing your request. Please try again.'
+              : 'The AI assistant encountered an unexpected error. Please try again later.'
+        );
+        const retryable = errorData.retryable ?? (response.status === 429 || response.status >= 500);
+
+        setChatHistory(prev => [
+          ...prev,
+          {
+            role: 'error',
+            text: sanitizedErrorMsg,
+            timestamp: Date.now(),
+            isRetryable: retryable,
+            retryQuery: textToSend
+          }
+        ]);
+        return;
       }
 
-      const data = await response.json();
+      const data: AssistantApiResponse = await response.json();
       
-      setChatHistory(prev => [...prev, { 
+      const assistantMsg: ChatMessage = { 
         role: 'assistant', 
         text: data.reply, 
-        timestamp: Date.now() 
-      }]);
+        timestamp: Date.now(),
+        outcome: data.outcome || 'ANSWERED',
+        intent: data.intent || 'none',
+        missingSources: data.missingSources,
+        suggestedNextStep: data.suggestedNextStep
+      };
 
-      // Execute actions based on intent
-      if (data.intent === 'summarize') actions.summarizeTranscript();
-      if (data.intent === 'analyze thinking') {
-        actions.runThinkingEngine();
-        trackDecisionRetrieved({
-          entityId: context.selected_file_name || 'assistant_retrieval',
-          source: 'ask_echonote'
-        });
-      }
-      if (data.intent === 'decisions') {
-        actions.extractDecisions();
-        trackDecisionRetrieved({
-          entityId: context.selected_file_name || 'assistant_retrieval',
-          source: 'ask_echonote'
-        });
-      }
-      if (data.intent === 'add to project') actions.assignToProject();
-      if (data.intent === 'usage / minutes') {
-        // Handled by reply
+      setChatHistory(prev => [...prev, assistantMsg]);
+
+      // Only execute action if executeAction is strictly true and matches an explicit action request
+      // (Never run actions on informational questions, absent context, clarification, or fake ACTION_EXECUTED)
+      if (data.executeAction === true) {
+        if (data.intent === 'summarize') actions.summarizeTranscript();
+        if (data.intent === 'analyze thinking') {
+          actions.runThinkingEngine();
+          trackDecisionRetrieved({
+            entityId: context.selected_file_name || 'assistant_retrieval',
+            source: 'ask_echonote'
+          });
+        }
+        if (data.intent === 'decisions') {
+          actions.extractDecisions();
+          trackDecisionRetrieved({
+            entityId: context.selected_file_name || 'assistant_retrieval',
+            source: 'ask_echonote'
+          });
+        }
+        if (data.intent === 'add to project') actions.assignToProject();
       }
 
-    } catch (error) {
+    } catch (error: any) {
       console.error('AI Assistant Error:', error);
-      setChatHistory(prev => [...prev, { 
-        role: 'assistant', 
-        text: "I can help with transcripts, summaries, decisions, and projects. Try asking: 'Summarize this call' or 'What decisions were made?'", 
-        timestamp: Date.now() 
-      }]);
+      setChatHistory(prev => [
+        ...prev,
+        { 
+          role: 'error', 
+          text: 'Unable to reach the assistant service. Please check your connection and try again.', 
+          timestamp: Date.now(),
+          isRetryable: true,
+          retryQuery: textToSend
+        }
+      ]);
     } finally {
       setIsTyping(false);
     }
+  };
+
+  const handleRetry = (queryToRetry?: string) => {
+    if (!queryToRetry || isTyping) return;
+    // Remove the trailing error message if it matches this retry
+    setChatHistory(prev => {
+      const last = prev[prev.length - 1];
+      if (last && last.role === 'error') {
+        return prev.slice(0, -1);
+      }
+      return prev;
+    });
+    handleSendMessage(undefined, queryToRetry, true);
   };
 
   const quickActions = [
@@ -137,7 +252,7 @@ const EchoNoteAssistant: React.FC<EchoNoteAssistantProps> = ({ context, actions 
               opacity: 1, 
               scale: 1, 
               y: 0,
-              height: isMinimized ? '64px' : '500px'
+              height: isMinimized ? '64px' : '520px'
             }}
             exit={{ opacity: 0, scale: 0.9, y: 20 }}
             className="mb-4 w-[380px] bg-white rounded-2xl shadow-[0_20px_50px_rgba(0,0,0,0.15)] border border-brand-divider/20 overflow-hidden flex flex-col"
@@ -157,12 +272,14 @@ const EchoNoteAssistant: React.FC<EchoNoteAssistantProps> = ({ context, actions 
                 <button 
                   onClick={() => setIsMinimized(!isMinimized)}
                   className="p-1 hover:bg-white/10 rounded-lg transition-colors"
+                  title={isMinimized ? "Maximize" : "Minimize"}
                 >
                   {isMinimized ? <Maximize2 size={16} /> : <Minus size={16} />}
                 </button>
                 <button 
                   onClick={() => setIsOpen(false)}
                   className="p-1 hover:bg-white/10 rounded-lg transition-colors"
+                  title="Close"
                 >
                   <X size={16} />
                 </button>
@@ -183,7 +300,8 @@ const EchoNoteAssistant: React.FC<EchoNoteAssistantProps> = ({ context, actions 
                         <button
                           key={i}
                           onClick={qa.action}
-                          className="flex items-center space-x-2 p-3 bg-white border border-brand-divider/10 rounded-xl text-[11px] font-medium text-brand-primary hover:bg-brand-accent/10 transition-colors text-left"
+                          disabled={isTyping}
+                          className="flex items-center space-x-2 p-3 bg-white border border-brand-divider/10 rounded-xl text-[11px] font-medium text-brand-primary hover:bg-brand-accent/10 transition-colors text-left disabled:opacity-50"
                         >
                           <qa.icon size={14} className="text-brand-accent shrink-0" />
                           <span>{qa.label}</span>
@@ -192,23 +310,98 @@ const EchoNoteAssistant: React.FC<EchoNoteAssistantProps> = ({ context, actions 
                     </div>
                   )}
 
-                  {chatHistory.map((msg, i) => (
-                    <div 
-                      key={i} 
-                      className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
-                    >
-                      <div className={`max-w-[85%] p-3 rounded-2xl text-sm leading-relaxed ${
-                        msg.role === 'user' 
-                          ? 'bg-brand-primary text-white rounded-tr-none' 
-                          : 'bg-white text-brand-primary border border-brand-divider/10 rounded-tl-none shadow-sm'
-                      }`}>
-                        {msg.text}
-                        <div className={`text-[9px] mt-1 ${msg.role === 'user' ? 'text-white/40' : 'text-brand-secondary/40'}`}>
-                          {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                  {chatHistory.map((msg, i) => {
+                    if (msg.role === 'user') {
+                      return (
+                        <div key={i} className="flex justify-end">
+                          <div className="max-w-[85%] p-3 rounded-2xl text-sm leading-relaxed bg-brand-primary text-white rounded-tr-none shadow-sm">
+                            {msg.text}
+                            <div className="text-[9px] mt-1 text-white/40">
+                              {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    }
+
+                    if (msg.role === 'error') {
+                      return (
+                        <div key={i} className="flex justify-start">
+                          <div className="max-w-[85%] p-3 rounded-2xl text-sm leading-relaxed bg-red-50 border border-red-200 text-red-800 rounded-tl-none shadow-sm">
+                            <div className="flex items-start space-x-2">
+                              <AlertCircle size={16} className="text-red-500 shrink-0 mt-0.5" />
+                              <div className="flex-1">
+                                <p className="font-medium text-xs text-red-900">Request Issue</p>
+                                <p className="text-xs mt-0.5 text-red-700">{msg.text}</p>
+                                {msg.isRetryable && msg.retryQuery && (
+                                  <button
+                                    onClick={() => handleRetry(msg.retryQuery)}
+                                    disabled={isTyping}
+                                    className="mt-2 inline-flex items-center space-x-1.5 px-2.5 py-1 bg-white border border-red-300 rounded-lg text-[11px] font-medium text-red-700 hover:bg-red-50 transition-colors disabled:opacity-50"
+                                  >
+                                    <RefreshCw size={12} className={isTyping ? "animate-spin" : ""} />
+                                    <span>Retry Question</span>
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                            <div className="text-[9px] mt-1 text-red-400 text-right">
+                              {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    }
+
+                    // Outcome-specific badge / styling for assistant messages
+                    const isInsufficient = msg.outcome === 'INSUFFICIENT_CONTEXT';
+                    const isClarification = msg.outcome === 'CLARIFICATION_NEEDED';
+
+                    return (
+                      <div key={i} className="flex justify-start">
+                        <div className={`max-w-[85%] p-3 rounded-2xl text-sm leading-relaxed bg-white text-brand-primary border rounded-tl-none shadow-sm ${
+                          isInsufficient 
+                            ? 'border-amber-300 bg-amber-50/30' 
+                            : isClarification 
+                              ? 'border-sky-300 bg-sky-50/30' 
+                              : 'border-brand-divider/10'
+                        }`}>
+                          {/* Outcome Indicator Tag */}
+                          {isInsufficient && (
+                            <div className="flex items-center space-x-1 mb-1.5 text-amber-700 text-[11px] font-medium">
+                              <Info size={13} className="shrink-0 text-amber-600" />
+                              <span>Not in current context</span>
+                            </div>
+                          )}
+                          {isClarification && (
+                            <div className="flex items-center space-x-1 mb-1.5 text-sky-700 text-[11px] font-medium">
+                              <HelpCircle size={13} className="shrink-0 text-sky-600" />
+                              <span>Clarification needed</span>
+                            </div>
+                          )}
+
+                          <div className="whitespace-pre-wrap">{msg.text}</div>
+
+                          {/* Missing sources or suggested next steps */}
+                          {msg.missingSources && msg.missingSources.length > 0 && (
+                            <div className="mt-2 pt-2 border-t border-brand-divider/10 text-[11px] text-brand-secondary/80">
+                              <span className="font-medium">Missing info:</span> {msg.missingSources.join(', ')}
+                            </div>
+                          )}
+                          {msg.suggestedNextStep && (
+                            <div className="mt-1.5 text-[11px] text-brand-primary/90 bg-brand-background/60 p-2 rounded-lg border border-brand-divider/10">
+                              <span className="font-medium">Next step:</span> {msg.suggestedNextStep}
+                            </div>
+                          )}
+
+                          <div className="text-[9px] mt-1.5 text-brand-secondary/40 text-right">
+                            {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                          </div>
                         </div>
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
+
                   {isTyping && (
                     <div className="flex justify-start">
                       <div className="bg-white p-3 rounded-2xl rounded-tl-none border border-brand-divider/10 shadow-sm">
@@ -229,7 +422,8 @@ const EchoNoteAssistant: React.FC<EchoNoteAssistantProps> = ({ context, actions 
                     value={message}
                     onChange={(e) => setMessage(e.target.value)}
                     placeholder="Ask me to summarize, analyze..."
-                    className="flex-1 bg-brand-background border border-brand-divider/20 rounded-xl px-4 py-2 text-sm focus:outline-none focus:border-brand-primary transition-colors"
+                    disabled={isTyping}
+                    className="flex-1 bg-brand-background border border-brand-divider/20 rounded-xl px-4 py-2 text-sm focus:outline-none focus:border-brand-primary transition-colors disabled:opacity-60"
                   />
                   <button 
                     type="submit"

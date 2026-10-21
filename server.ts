@@ -19,6 +19,7 @@ import { GoogleGenAI, Type, Modality, ThinkingLevel } from "@google/genai";
 import { trackAIUsage, getAiUsageOverview, getRecentAiUsageLogs } from "./lib/aiTracker.js";
 import { emailService, resolveSenderEmail } from "./lib/emailService.js";
 import { maskEmailForLogs } from "./lib/emailService.js";
+import { triggerAssistantEscalationIfEligible } from "./lib/assistantEscalationService.js";
 import { 
   requireAuth, 
   optionalAuth, 
@@ -8072,18 +8073,164 @@ If you did not expect this invitation, you can safely ignore this email.
     }
   });
 
-  // Helper to sanitize error messages from AI provider calls to prevent credentials or stack traces from leaking
+  // Classification and sanitization for AI provider and infrastructure errors
+  interface ClassifiedAiError {
+    statusCode: number;
+    code: string;
+    sanitizedMessage: string;
+    retryable: boolean;
+  }
+
+  function classifyAiError(err: any): ClassifiedAiError {
+    const rawMsg = String(err?.message || err?.error || err || "");
+    const status = Number(err?.status || err?.statusCode || 0);
+
+    // 1. Rate limiting & quota checks (distinguish where detectable)
+    if (
+      status === 429 ||
+      /RESOURCE_EXHAUSTED|RATE_LIMIT_EXCEEDED|quota|rate limit|too many requests/i.test(rawMsg)
+    ) {
+      if (/quota|billing|credit|exhausted/i.test(rawMsg)) {
+        return {
+          statusCode: 429,
+          code: "AI_QUOTA_EXCEEDED",
+          sanitizedMessage: "The AI service has reached its usage or billing quota. Please verify your account tier or contact support.",
+          retryable: false
+        };
+      }
+      return {
+        statusCode: 429,
+        code: "AI_RATE_LIMITED",
+        sanitizedMessage: "The AI assistant is temporarily rate-limited. Please wait a moment and try again.",
+        retryable: true
+      };
+    }
+
+    // 2. Authentication or Configuration failures
+    if (
+      status === 401 ||
+      status === 403 ||
+      /API_KEY_INVALID|INVALID_ARGUMENT.*api_key|UNAUTHENTICATED|permission denied|unauthorized/i.test(rawMsg)
+    ) {
+      return {
+        statusCode: 503,
+        code: "AI_CONFIG_ERROR",
+        sanitizedMessage: "The AI assistant service is temporarily misconfigured or unavailable. Please contact an administrator.",
+        retryable: false
+      };
+    }
+
+    // 3. Timeouts
+    if (
+      status === 408 ||
+      status === 504 ||
+      /DEADLINE_EXCEEDED|timeout|timed out|ETIMEDOUT|ESOCKETTIMEDOUT/i.test(rawMsg)
+    ) {
+      return {
+        statusCode: 504,
+        code: "AI_TIMEOUT",
+        sanitizedMessage: "The AI assistant timed out while processing your request. Please try again.",
+        retryable: true
+      };
+    }
+
+    // 4. Network or upstream provider failures
+    if (
+      status === 502 ||
+      status === 503 ||
+      /ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|UNAVAILABLE|network|fetch failed|service unavailable/i.test(rawMsg)
+    ) {
+      return {
+        statusCode: 502,
+        code: "AI_UPSTREAM_UNAVAILABLE",
+        sanitizedMessage: "Upstream AI model provider is currently unreachable. Please try again in a moment.",
+        retryable: true
+      };
+    }
+
+    // 5. Default generic internal failure
+    return {
+      statusCode: 500,
+      code: "AI_INTERNAL_ERROR",
+      sanitizedMessage: "The AI assistant encountered an unexpected error. Please try again later.",
+      retryable: true
+    };
+  }
+
+  // Helper to sanitize error messages from AI provider calls to prevent credentials, stack traces, or internal paths from leaking
   function sanitizeAiErrorMessage(errMsg: any): string {
     if (!errMsg || typeof errMsg !== 'string') return "AI processing failed. Please try again.";
     let sanitized = errMsg
-      .replace(/AIza[0-9A-Za-z-_]{35}/g, '[REDACTED]')
-      .replace(/(?:key|apiKey|token|secret|authorization)=[^&\s]+/gi, '$1=[REDACTED]')
-      .replace(/Bearer\s+[A-Za-z0-9._-]+/gi, 'Bearer [REDACTED]');
+      .replace(/AIza[0-9A-Za-z-_]{30,45}/g, '[REDACTED]')
+      .replace(/(?:key|apiKey|token|secret|authorization)=[^&\\s]+/gi, '=[REDACTED]')
+      .replace(/Bearer\\s+[A-Za-z0-9._-]+/gi, 'Bearer [REDACTED]')
+      .replace(/[A-Za-z]:[\\/][^:\r\n]+|\/(?:home|usr|var|tmp|app)[^:\r\n]*/g, '[INTERNAL_PATH]');
     if (sanitized.includes('at ') && sanitized.includes('(')) {
-      sanitized = sanitized.split('\n')[0];
+      sanitized = sanitized.split('\\n')[0];
     }
     return sanitized;
   }
+
+  type AssistantOutcome = 'ANSWERED' | 'INSUFFICIENT_CONTEXT' | 'CLARIFICATION_NEEDED' | 'ACTION_REQUESTED' | 'ACTION_EXECUTED';
+  type AssistantIntent = 'summarize' | 'analyze thinking' | 'decisions' | 'add to project' | 'usage / minutes' | 'none';
+
+  interface ValidatedAssistantResponse {
+    reply: string;
+    intent: AssistantIntent;
+    outcome: AssistantOutcome;
+    executeAction: boolean;
+    missingSources?: string[];
+    suggestedNextStep?: string;
+  }
+
+  function validateAssistantResponse(parsed: any, userMessage: string): ValidatedAssistantResponse | null {
+    if (!parsed || typeof parsed !== 'object') return null;
+
+    let { reply, intent, outcome, executeAction, missingSources, suggestedNextStep } = parsed;
+
+    if (typeof reply !== 'string' || reply.trim().length === 0) {
+      return null;
+    }
+
+    const validIntents: AssistantIntent[] = ["summarize", 'analyze thinking', 'decisions', 'add to project', 'usage / minutes', 'none'];
+    if (typeof intent !== 'string' || !validIntents.includes(intent as AssistantIntent)) {
+      intent = 'none';
+    }
+
+    const validOutcomes: AssistantOutcome[] = ['ANSWERED', 'INSUFFICIENT_CONTEXT', 'CLARIFICATION_NEEDED', 'ACTION_REQUESTED', 'ACTION_EXECUTED'];
+    if (typeof outcome !== 'string' || !validOutcomes.includes(outcome as AssistantOutcome)) {
+      return null;
+    }
+
+    if (outcome === 'ACTION_EXECUTED') {
+      outcome = 'ACTION_REQUESTED';
+    }
+
+    if (typeof executeAction !== 'boolean') {
+      executeAction = (outcome === 'ACTION_REQUESTED' && intent !== 'none');
+    }
+
+    const isInformational = /^(?:what|who|where|when|why|how|is|are|does|did|can|could|would|tell me about|describe)\\b/i.test(userMessage.trim());
+    if (isInformational && executeAction) {
+      executeAction = false;
+      if (outcome === 'ACTION_REQUESTED') outcome = 'ANSWERED';
+    }
+
+    const validatedMissing = Array.isArray(missingSources)
+      ? missingSources.filter(s => typeof s === 'string')
+      : undefined;
+
+    return {
+      reply: reply.trim(),
+      intent: intent as AssistantIntent,
+      outcome: outcome as AssistantOutcome,
+      executeAction,
+      missingSources: validatedMissing,
+      suggestedNextStep: typeof suggestedNextStep === 'string' ? suggestedNextStep.trim() : undefined
+    };
+  }
+
+
 
   // AI Tracking & Execution Endpoints - strictly requireAuth & server-authoritative context
   app.post("/api/ai/transcribe-audio", requireAuth, async (req: AuthenticatedRequest, res) => {
@@ -9802,9 +9949,9 @@ ${transcriptText}`,
 
   // Assistant Chat Endpoint (Server-Side EchoNote Assistant) - strictly requireAuth & server-authoritative context
   app.post("/api/ai/assistant-chat", requireAuth, async (req: AuthenticatedRequest, res) => {
-    const { message, context } = req.body;
-    if (!message || typeof message !== 'string') {
-      return res.status(400).json({ error: "Missing or invalid message parameter" });
+    const { message, context, conversationHistory } = req.body;
+    if (!message || typeof message !== 'string' || message.trim().length === 0) {
+      return res.status(400).json({ error: "Missing or invalid message parameter", code: "INVALID_INPUT" });
     }
 
     const userCtx = await resolveUserContext(req);
@@ -9823,7 +9970,10 @@ ${transcriptText}`,
         operationType: 'read'
       });
       if (!accessCheck.allowed) {
-        return res.status(accessCheck.status).json({ error: "Forbidden", message: accessCheck.message });
+        return res.status(accessCheck.status).json({
+          error: accessCheck.message || "Forbidden",
+          code: accessCheck.status === 404 ? "NOT_FOUND" : "ACCESS_DENIED"
+        });
       }
     }
 
@@ -9835,46 +9985,139 @@ ${transcriptText}`,
     const model = "gemini-3-flash-preview";
     const featureName = "EchoNote Assistant";
 
-    const systemInstruction = `You are EchoNote Assistant, an AI embedded inside an audio intelligence platform.
-Your role is NOT just to answer questions, but to help users take actions on their audio data.
-You have access to:
-* transcripts
-* summaries
-* projects
-* user usage data
-
-Current Context:
-- Page: ${context?.current_page || 'unknown'}
-- Project: ${context?.current_project || 'none'}
-- Selected File: ${context?.selected_file_name || 'none'}
-- User Plan: ${plan}
-- Minutes Used: ${userData.minutes_used || userData.audioMinutesUsed || 0}
-- Minutes Remaining: ${userData.minutes_remaining || (plan === 'free' ? 60 : 300)}
-
-You must:
-1. Understand user intent
-2. If the request is actionable → suggest or trigger an action
-3. If unclear → ask a clarifying question
-4. Keep responses short, clear, and actionable (2-5 lines)
-
-You can perform:
-* Summarization
-* Thinking analysis
-* Decision extraction
-* Project assignment
-* Usage explanation
-
-Always prioritize helping the user move forward, not just explaining things.
-
-If you detect an intent, specify it in the JSON response.
-Intents: "summarize", "analyze thinking", "decisions", "add to project", "usage / minutes", "none".`;
-
     try {
+      // 1. Authoritative server-side context retrieval
+      let recordingTitle: string | null = null;
+      let recordingSummary: string | null = null;
+      let recordingDecisions: string[] = [];
+      let recordingTranscript: string | null = null;
+      let transcriptTruncated = false;
+
+      if (candidateRecId) {
+        try {
+          const recDoc = await db.collection('recordings').doc(candidateRecId).get();
+          if (recDoc.exists) {
+            const data = recDoc.data() || {};
+            recordingTitle = data.title || data.name || data.originalFileName || null;
+            recordingSummary = data.summary || null;
+            if (Array.isArray(data.decisions)) {
+              recordingDecisions = data.decisions;
+            }
+            const fullTranscript = data.transcript || data.text || null;
+            const MAX_TRANSCRIPT_CHARS = 12000;
+            if (fullTranscript && typeof fullTranscript === 'string') {
+              if (fullTranscript.length > MAX_TRANSCRIPT_CHARS) {
+                recordingTranscript = fullTranscript.slice(0, MAX_TRANSCRIPT_CHARS) + "\n[... TRANSCRIPT_TRUNCATED_DUE_TO_CONTEXT_BUDGET ...]";
+                transcriptTruncated = true;
+              } else {
+                recordingTranscript = fullTranscript;
+              }
+            }
+          }
+        } catch (dbErr) {
+          console.warn('[Assistant] Failed reading authoritative recording context:', dbErr);
+        }
+      }
+
+      let projectTaskSummaries: string[] = [];
+      if (candidateProjId) {
+        try {
+          const tasksSnap = await db.collection('tasks').where('projectId', '==', candidateProjId).limit(20).get();
+          if (!tasksSnap.empty) {
+            projectTaskSummaries = tasksSnap.docs.map(d => {
+              const td = d.data();
+              return `- [${td.status || 'TODO'}] ${td.title || 'Untitled task'} (Due: ${td.dueDate || 'N/A'}, Assignee: ${td.assigneeId || 'Unassigned'})`;
+            });
+          }
+        } catch (taskErr) {
+          console.warn('[Assistant] Failed reading authoritative project tasks:', taskErr);
+        }
+      }
+
+      // Build authoritative context block (NEVER accept client-supplied transcript)
+      let authoritativeContext = "=== AUTHORITATIVE SERVER CONTEXT ===\n";
+      authoritativeContext += `- User Plan: ${plan}\n`;
+      authoritativeContext += `- Minutes Used: ${userData.minutes_used || userData.audioMinutesUsed || 0}\n`;
+      authoritativeContext += `- Minutes Remaining: ${userData.minutes_remaining || (plan === 'free' ? 60 : 300)}\n`;
+
+      if (candidateRecId) {
+        authoritativeContext += "\n[ACTIVE RECORDING DETAILS]\n";
+        authoritativeContext += `- Recording ID: ${candidateRecId}\n`;
+        authoritativeContext += `- Title / File: ${recordingTitle || 'Untitled'}\n`;
+        if (recordingSummary) {
+          authoritativeContext += `- Meeting Summary: ${recordingSummary}\n`;
+        }
+        if (recordingDecisions.length > 0) {
+          authoritativeContext += `- Logged Decisions:\n${recordingDecisions.map(d => '  * ' + d).join('\n')}\n`;
+        }
+        if (recordingTranscript) {
+          authoritativeContext += `- Transcript Content:\n"""\n${recordingTranscript}\n"""\n`;
+        } else {
+          authoritativeContext += "- Transcript Content: [No transcript available for this recording]\n";
+        }
+      } else {
+        authoritativeContext += "\n[ACTIVE RECORDING DETAILS]\n- No recording currently selected or authorized.\n";
+      }
+
+      if (candidateProjId) {
+        authoritativeContext += "\n[PROJECT CONTEXT]\n";
+        authoritativeContext += `- Project ID: ${candidateProjId}\n`;
+        if (projectTaskSummaries.length > 0) {
+          authoritativeContext += `- Project Tasks:\n${projectTaskSummaries.join('\n')}\n`;
+        } else {
+          authoritativeContext += "- Project Tasks: [No tasks logged for this project]\n";
+        }
+      }
+      authoritativeContext += "=== END CONTEXT ===";
+
+      // 2. Bound and sanitize multi-turn conversation history
+      const formattedContents: Array<{ role: 'user' | 'model'; parts: Array<{ text: string }> }> = [];
+
+      if (Array.isArray(conversationHistory) && conversationHistory.length > 0) {
+        const recentHistory = conversationHistory.slice(-6);
+        for (const item of recentHistory) {
+          if (!item || typeof item.text !== 'string' || item.text.trim().length === 0) continue;
+          const mappedRole = item.role === 'assistant' || item.role === 'model' ? 'model' : 'user';
+          const trimmedText = item.text.trim().slice(0, 1000);
+          formattedContents.push({
+            role: mappedRole,
+            parts: [{ text: trimmedText }]
+          });
+        }
+      }
+
+      // Append current user message
+      formattedContents.push({
+        role: 'user',
+        parts: [{ text: message.trim().slice(0, 2000) }]
+      });
+
+      const systemInstruction = `You are EchoNote Assistant, an intelligent, honest AI embedded inside the EchoNote audio intelligence platform.
+Your job is to answer questions, explain metrics, and assist users with their recordings, transcripts, summaries, decisions, and projects.
+
+=== ACCURACY & HONESTY GUIDELINES (CRITICAL) ===
+1. ANSWER DIRECTLY: When the context contains the requested facts, provide a concise, direct, helpful answer (2-5 lines). Outcome MUST be "ANSWERED".
+2. HONEST ABOUT ABSENT FACTS / INSUFFICIENT CONTEXT:
+   - If the user asks about a fact, person, decision, budget, date, or event that is NOT present in the authoritative context above, NEVER fabricate, guess, or substitute generic EchoNote feature suggestions.
+   - State clearly that the requested information could not be found in the available recording, summary, decisions, or project data.
+   - When possible, identify what source is missing (e.g. "recording transcript", "project tasks", "decisions").
+   - Offer one specific next step only when it is relevant (e.g. selecting a specific recording or providing the missing detail).
+   - Set outcome to "INSUFFICIENT_CONTEXT".
+3. CLARIFICATION NEEDED:
+   - If the user's request is ambiguous, underspecified, or unclear, ask a concise, targeted clarifying question.
+   - Do NOT classify ordinary follow-up questions as unanswerable or ambiguous if the conversation history and context resolve them.
+   - Set outcome to "CLARIFICATION_NEEDED".
+4. SAFE ACTION GATING & TRUTHFULNESS:
+   - Distinguish between informational questions (e.g. "What did Bob say?", "Can you summarize?", "What decisions were made?", "Who is assigned to the task?") and explicit commands to execute an operation (e.g. "Summarize this now", "Run thinking engine", "Add this to project X").
+   - For informational questions: answer the question directly. executeAction MUST be false. Outcome MUST be "ANSWERED".
+   - For explicit action requests: set outcome to "ACTION_REQUESTED", intent to the action name ("summarize" | "analyze thinking" | "decisions" | "add to project"), and executeAction to true.
+   - NEVER output "ACTION_EXECUTED". Actions are executed by the application on the client or server AFTER verification, not hallucinated in advance by the model.
+
+\${authoritativeContext}`;
+
       const response = await aiGen.models.generateContent({
         model,
-        contents: [
-          { role: 'user', parts: [{ text: message }] }
-        ],
+        contents: formattedContents,
         config: {
           systemInstruction,
           responseMimeType: "application/json",
@@ -9885,9 +10128,19 @@ Intents: "summarize", "analyze thinking", "decisions", "add to project", "usage 
               intent: { 
                 type: Type.STRING, 
                 enum: ["summarize", "analyze thinking", "decisions", "add to project", "usage / minutes", "none"] 
-              }
+              },
+              outcome: {
+                type: Type.STRING,
+                enum: ["ANSWERED", "INSUFFICIENT_CONTEXT", "CLARIFICATION_NEEDED", "ACTION_REQUESTED", "ACTION_EXECUTED"]
+              },
+              executeAction: { type: Type.BOOLEAN },
+              missingSources: {
+                type: Type.ARRAY,
+                items: { type: Type.STRING }
+              },
+              suggestedNextStep: { type: Type.STRING }
             },
-            required: ["reply", "intent"]
+            required: ["reply", "intent", "outcome", "executeAction"]
           }
         }
       });
@@ -9908,10 +10161,27 @@ Intents: "summarize", "analyze thinking", "decisions", "add to project", "usage 
         status: "success",
       });
 
-      const parsed = JSON.parse(response.text || '{"reply": "I am here to help.", "intent": "none"}');
-      res.json(parsed);
+      let rawParsed: any = null;
+      try {
+        rawParsed = JSON.parse(response.text || '{}');
+      } catch (parseErr) {
+        console.warn('[Assistant] Failed parsing Gemini JSON response:', parseErr);
+        rawParsed = null;
+      }
+
+      const validated = validateAssistantResponse(rawParsed, message);
+      if (!validated) {
+        console.error('[Assistant] Malformed or invalid model response payload:', response.text);
+        return res.status(502).json({
+          error: "The AI assistant returned an invalid response format. Please try again.",
+          code: "AI_INVALID_RESPONSE",
+          retryable: true
+        });
+      }
+
+      return res.json(validated);
     } catch (error: any) {
-      console.error(`[AI Endpoint Error] ${featureName}:`, error);
+      console.error(`[AI Endpoint Error] \${featureName}:`, error);
       const duration = Date.now() - start;
       await trackAIUsage({
         userId,
@@ -9924,10 +10194,147 @@ Intents: "summarize", "analyze thinking", "decisions", "add to project", "usage 
         requestDuration: duration,
         status: "failure",
       });
-      res.status(500).json({ error: sanitizeAiErrorMessage(error?.message) || "Execution failed" });
+
+      const classified = classifyAiError(error);
+
+      // AH.145: Asynchronously check and trigger email escalation for repeated failures (non-blocking)
+      (async () => {
+        try {
+          const failureKey = `fail_${userId}_${candidateRecId || 'none'}`;
+          const failRef = db.collection('assistantFailureTracking').doc(failureKey);
+          let shouldEscalate = false;
+          let currentFailCount = 1;
+
+          await db.runTransaction(async (t) => {
+            const doc = await t.get(failRef);
+            const nowMs = Date.now();
+            if (doc.exists) {
+              const d = doc.data();
+              // If last failure was within 10 minutes, increment counter
+              if (d && (nowMs - (d.lastFailedAtMs || 0)) < 10 * 60 * 1000) {
+                currentFailCount = (d.count || 0) + 1;
+              }
+            }
+            t.set(failRef, {
+              count: currentFailCount,
+              lastFailedAtMs: nowMs,
+              lastErrorCode: classified.code,
+              userId
+            }, { merge: true });
+
+            if (currentFailCount >= 2) {
+              shouldEscalate = true;
+            }
+          });
+
+          if (shouldEscalate) {
+            await triggerAssistantEscalationIfEligible(db, {
+              reason: 'repeated_failure',
+              question: message,
+              userId,
+              userEmail: email,
+              userPlan: plan,
+              errorCode: classified.code,
+              errorMessage: classified.sanitizedMessage,
+              contextSummary: {
+                recordingId: candidateRecId,
+                projectId: candidateProjId,
+                page: context?.current_page
+              }
+            });
+          }
+        } catch (escErr: any) {
+          console.warn('[Assistant Escalation] Background tracking caught error:', escErr?.message || escErr);
+        }
+      })().catch(() => {});
+
+      return res.status(classified.statusCode).json({
+        error: classified.sanitizedMessage,
+        code: classified.code,
+        retryable: classified.retryable
+      });
     } finally {
       // Step 8.1A: Always release concurrency slot on completion or failure
       slot.release();
+    }
+  });
+
+  
+  // Assistant Explicit User Feedback & Escalation Endpoint (AH.145)
+  app.post("/api/ai/assistant-feedback", requireAuth, async (req: AuthenticatedRequest, res) => {
+    const { message, responseReply, outcome, rating, comment, context } = req.body;
+    if (!message || typeof message !== 'string' || !rating || (rating !== 'helpful' && rating !== 'unhelpful')) {
+      return res.status(400).json({ error: "Missing or invalid feedback parameters", code: "INVALID_INPUT" });
+    }
+
+    if (comment !== undefined && typeof comment !== String.fromCharCode(115,116,114,105,110,103)) {
+      return res.status(400).json({ error: String.fromCharCode(70,101,101,100,98,97,99,107,32,99,111,109,109,101,110,116,32,109,117,115,116,32,98,101,32,97,32,115,116,114,105,110,103), code: String.fromCharCode(73,78,86,65,76,73,68,95,73,78,80,85,84) });
+    }
+
+    const userCtx = await resolveUserContext(req);
+    const userId = userCtx.userId;
+    const email = userCtx.email;
+    const plan = userCtx.plan;
+
+    // IDOR check: if caller specifies recording or project context, verify unified resource access
+    const candidateRecId = context?.recordingId || context?.selected_recording_id;
+    const candidateProjId = context?.projectId || context?.current_project_id;
+    if (candidateRecId || candidateProjId) {
+      const accessCheck = await verifyAiResourceAccess(req.user, {
+        recordingId: candidateRecId,
+        projectId: candidateProjId,
+        operationType: 'read'
+      });
+      if (!accessCheck.allowed) {
+        return res.status(accessCheck.status).json({
+          error: accessCheck.message || String.fromCharCode(70,111,114,98,105,100,100,101,110),
+          code: accessCheck.status === 404 ? String.fromCharCode(78,79,84,95,70,79,85,78,68) : String.fromCharCode(65,67,67,69,83,83,95,68,69,78,73,69,68)
+        });
+      }
+    }
+
+    try {
+      // Record feedback in Firestore
+      const feedbackRef = db.collection('assistantFeedback').doc();
+      await feedbackRef.set({
+        id: feedbackRef.id,
+        userId,
+        userEmail: email,
+        rating,
+        outcome: typeof outcome === 'string' ? outcome : undefined,
+        comment: typeof comment === 'string' ? comment.trim().slice(0, 500) : undefined,
+        messageExcerpt: typeof message === 'string' ? message.trim().slice(0, 280) : '',
+        recordingId: candidateRecId || undefined,
+        projectId: candidateProjId || undefined,
+        createdAt: FieldValue.serverTimestamp()
+      });
+
+      // If user provided explicit negative feedback, evaluate escalation
+      if (rating === 'unhelpful') {
+        // Asynchronous non-blocking evaluation
+        triggerAssistantEscalationIfEligible(db, {
+          reason: 'explicit_negative_feedback',
+          question: message,
+          userId,
+          userEmail: email,
+          userPlan: plan,
+          errorCode: typeof outcome === 'string' ? outcome : 'UNHELPFUL_FEEDBACK',
+          feedbackComment: typeof comment === 'string' ? comment.trim() : undefined,
+          errorMessage: typeof responseReply === 'string' ? responseReply.slice(0, 200) : undefined,
+          contextSummary: {
+            recordingId: candidateRecId,
+            projectId: candidateProjId,
+            page: context?.current_page
+          }
+        }).catch(err => {
+          console.warn('[Assistant Feedback] Escalation trigger error:', err);
+        });
+      }
+
+      return res.json({ success: true, feedbackId: feedbackRef.id });
+    } catch (err: any) {
+      console.error('[Assistant Feedback] Failed saving feedback:', err);
+      return res.status(500).json({ error: "Failed to record feedback", code: "FEEDBACK_ERROR" });
     }
   });
 

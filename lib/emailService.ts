@@ -982,6 +982,31 @@ export const emailService = {
 
     const html = wrapInBaseTemplate({ title, preheaderText, bodyContentHtml });
     return sendEmail({ to, subject: `[EchoNote Action Required] Blocker: ${options.taskTitle}`, html });
+  },
+
+  /**
+   * 11. Send Assistant Escalation Email
+   */
+  async sendAssistantEscalation(options: {
+    to: string;
+    subject: string;
+    html: string;
+    text?: string;
+  }): Promise<EmailSendResult> {
+    const title = options.subject;
+    const preheaderText = "EchoNote Assistant Escalation: An inquiry or repeated technical error requires support attention.";
+    const wrappedHtml = wrapInBaseTemplate({
+      title,
+      preheaderText,
+      bodyContentHtml: options.html
+    });
+
+    return sendEmail({
+      to: options.to,
+      subject: options.subject,
+      html: wrappedHtml,
+      text: options.text
+    });
   }
 };
 
