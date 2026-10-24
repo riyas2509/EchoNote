@@ -34,3 +34,5 @@ dist-ssr
 *.tmp
 /tmp*
 tmp/
+
+!.github/workflows/container-validation.yml

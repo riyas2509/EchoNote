@@ -9989,9 +9989,25 @@ Intents: "summarize", "analyze thinking", "decisions", "add to project", "usage 
     });
   });
 
-  app.listen(PORT, "0.0.0.0", () => {
+  const server = app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
   });
+
+  // Graceful shutdown handling for container runtimes (Cloud Run / Docker)
+  const shutdown = (signal: string) => {
+    console.log(`Received ${signal}. Gracefully shutting down HTTP server...`);
+    server.close(() => {
+      console.log("HTTP server closed cleanly. Exiting process.");
+      process.exit(0);
+    });
+    setTimeout(() => {
+      console.warn("Forced shutdown after timeout.");
+      process.exit(1);
+    }, 10000).unref();
+  };
+
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+  process.on("SIGINT", () => shutdown("SIGINT"));
 }
 
 startServer().catch((error) => {
