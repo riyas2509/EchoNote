@@ -1,4 +1,4 @@
-﻿/**
+/**
  * AH.192 — Docker / Container Configuration and Static Architecture Verification
  *
  * Verifies:
@@ -90,12 +90,10 @@ async function runTestSuite() {
   console.log("\n--- 3. Production Server Entry Point & Bundle Integrity ---");
 
   const serverBundlePath = path.join(cwd, "dist", "server.cjs");
-  if (fs.existsSync(serverBundlePath)) {
-    const serverStat = fs.statSync(serverBundlePath);
-    assert(serverStat.size > 200000, `Server bundle is substantial (${Math.round(serverStat.size / 1024)} KB)`);
-  } else {
-    console.log("ℹ️ Server bundle dist/server.cjs not yet built (will be built during npm run build).");
-  }
+  assert(fs.existsSync(serverBundlePath), "Compiled server bundle dist/server.cjs exists");
+
+  const serverStat = fs.statSync(serverBundlePath);
+  assert(serverStat.size > 500000, `Server bundle is substantial (${Math.round(serverStat.size / 1024)} KB)`);
 
   const serverSourcePath = path.join(cwd, "server.ts");
   const serverSource = fs.readFileSync(serverSourcePath, 'utf8');

@@ -31,6 +31,18 @@ export const LandingNavbar: React.FC<LandingNavbarProps> = ({
     return () => window.removeEventListener('scroll', handleScroll);
   }, []);
 
+  // Accessibility: Escape key dismisses mobile menu
+  useEffect(() => {
+    if (!isMobileMenuOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setIsMobileMenuOpen(false);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isMobileMenuOpen]);
+
   const navLinks = [
     { name: 'Features', path: '/features' },
     { name: 'Solutions', path: '/solutions' },

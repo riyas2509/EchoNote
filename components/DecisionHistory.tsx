@@ -12,6 +12,7 @@ import { DecisionHistoryItem, UserProfile, ProductEventName } from '../types';
 import { db, collection, query, where, orderBy, limit, getDocs, deleteDoc, doc, OperationType, handleFirestoreError } from '../firebase';
 import { PLAN_FEATURES } from '../config/planConfig';
 import { trackProductEvent, trackDecisionRetrieved } from '../services/productAnalyticsService';
+import { useDemoWorkspace, isDemoIdentifier } from '../lib/demoStateManager';
 
 interface DecisionHistoryProps {
   userProfile: UserProfile;
@@ -68,7 +69,16 @@ const DecisionHistory: React.FC<DecisionHistoryProps> = ({
     };
   }, [searchTerm, userProfile?.uid]);
 
+  const demoContext = useDemoWorkspace();
+  const isDemo = demoContext?.isDemoMode;
+
   useEffect(() => {
+    if (isDemo) {
+      setHistory(demoContext?.demoDecisions || []);
+      setLoading(false);
+      return;
+    }
+
     if (!userProfile) return;
 
     const fetchHistory = async () => {
@@ -101,7 +111,7 @@ const DecisionHistory: React.FC<DecisionHistoryProps> = ({
     };
 
     fetchHistory();
-  }, [userProfile, sortOrder]);
+  }, [userProfile, sortOrder, isDemo, demoContext?.demoDecisions]);
 
   const handleToggleExpand = (item: DecisionHistoryItem) => {
     const isExpanding = expandedId !== item.id;
@@ -141,6 +151,14 @@ const DecisionHistory: React.FC<DecisionHistoryProps> = ({
 
   const handleDelete = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
+    if (isDemo || isDemoIdentifier(id)) {
+      addNotification({
+        title: 'Demo Mode',
+        message: 'Sample decision cannot be deleted in demo mode.',
+        type: 'info'
+      });
+      return;
+    }
     if (!window.confirm('Are you sure you want to delete this decision insight?')) return;
 
     try {
@@ -182,7 +200,7 @@ Decision Clarity: ${item.output.decisionClarity}
   }
 
   return (
-    <div className="max-w-5xl mx-auto py-8 px-6 space-y-8 animate-in fade-in duration-500 pb-40">
+    <div className="w-full space-y-8 animate-in fade-in duration-500 pb-20">
       {/* Header */}
       <div className="space-y-2">
         <div className="flex items-center space-x-3">
@@ -249,18 +267,24 @@ Decision Clarity: ${item.output.decisionClarity}
             </div>
           </div>
         ) : (
-          filteredHistory.map((item) => (
-            <div 
-              key={item.id}
-              className={`bg-white rounded-2xl border transition-all overflow-hidden ${
-                expandedId === item.id ? 'border-brand-primary shadow-lg' : 'border-slate-200 hover:border-brand-primary/50 shadow-sm'
-              }`}
-            >
-              {/* Card Header */}
+          filteredHistory.map((item) => {
+            const isMigrationDecision = item.id === 'demo-decision-legacy-v1' || item.title.includes('Deprecate Legacy v1');
+            return (
               <div 
-                onClick={() => handleToggleExpand(item)}
-                className="p-6 cursor-pointer flex items-start justify-between group"
+                key={item.id}
+                data-decision-id={item.id}
+                data-tour={isMigrationDecision ? "decision-history-card-migration" : undefined}
+                data-tour-decision={isMigrationDecision ? "decision-migration-item" : undefined}
+                className={`bg-white rounded-2xl border transition-all overflow-hidden ${
+                  expandedId === item.id ? 'border-brand-primary shadow-lg' : 'border-slate-200 hover:border-brand-primary/50 shadow-sm'
+                }`}
               >
+                {/* Card Header */}
+                <div 
+                  onClick={() => handleToggleExpand(item)}
+                  data-tour={isMigrationDecision ? "decision-history-header-migration" : undefined}
+                  className="p-6 cursor-pointer flex items-start justify-between group"
+                >
                 <div className="space-y-3 flex-1">
                   <div className="flex items-center space-x-3">
                     <span className={`px-2 py-0.5 rounded-md text-[10px] font-black uppercase tracking-widest ${
@@ -390,8 +414,9 @@ Decision Clarity: ${item.output.decisionClarity}
                   </motion.div>
                 )}
               </AnimatePresence>
-            </div>
-          ))
+              </div>
+            );
+          })
         )}
       </div>
     </div>

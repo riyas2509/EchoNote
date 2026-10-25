@@ -35,4 +35,5 @@ dist-ssr
 /tmp*
 tmp/
 
-!.github/workflows/container-validation.yml
+.vercel
+.env*

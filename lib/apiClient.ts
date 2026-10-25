@@ -40,6 +40,21 @@ export function getApiBaseUrl(): string {
   return '';
 }
 
+export interface MfaPolicyChallengeDetail {
+  code: 'MFA_ENROLLMENT_REQUIRED' | 'MFA_REQUIRED';
+  message: string;
+  mfaRequirement: 'MFA_REQUIRED_ADMINS' | 'MFA_ENFORCED_ALL' | string;
+  mfaEnrolled?: boolean;
+  organizationId?: string;
+  role?: string;
+}
+
+export function isMfaPolicyError(err: any): boolean {
+  if (!err) return false;
+  const code = err.code || err.data?.code;
+  return code === 'MFA_ENROLLMENT_REQUIRED' || code === 'MFA_REQUIRED';
+}
+
 export interface ApiResponse<T = any> {
   ok: boolean;
   status: number;
@@ -293,11 +308,27 @@ if (typeof window !== 'undefined') {
   (window as any).__ECHONOTE_DIAGNOSTICS__ = getFrontendDiagnostic;
 }
 
+// In-memory single-use MFA Recovery Ticket for active recovery session (TTL 10 min)
+let activeRecoveryTicket: string | null = null;
+
+export function setRecoveryTicket(ticket: string | null): void {
+  activeRecoveryTicket = ticket;
+}
+
+export function getRecoveryTicket(): string | null {
+  return activeRecoveryTicket;
+}
+
+export function clearRecoveryTicket(): void {
+  activeRecoveryTicket = null;
+}
+
 /**
  * Wrapper around standard fetch that:
  * 1. Automatically resolves relative endpoints via getApiUrl()
  * 2. Automatically attaches the Firebase ID token in Authorization header
- * 3. Provides clean error wrapping on network failure without leaking secrets
+ * 3. Recovery tickets are strictly NEVER attached automatically to general API requests (dedicated recovery calls only)
+ * 4. Provides clean error wrapping on network failure without leaking secrets
  */
 export async function apiFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
   let finalInput = input;
@@ -322,10 +353,35 @@ export async function apiFetch(input: RequestInfo | URL, init: RequestInit = {})
   }
 
   try {
-    return await fetch(finalInput, {
+    const res = await fetch(finalInput, {
       ...init,
       headers,
     });
+
+    if (res.status === 403) {
+      try {
+        const clone = res.clone();
+        const json = await clone.json();
+        if (json && (json.code === 'MFA_ENROLLMENT_REQUIRED' || json.code === 'MFA_REQUIRED')) {
+          if (typeof window !== 'undefined') {
+            window.dispatchEvent(new CustomEvent('echonote:mfa-policy-challenge', {
+              detail: {
+                code: json.code,
+                message: json.message || 'Two-factor authentication required by organization policy.',
+                mfaRequirement: json.mfaRequirement || 'MFA_REQUIRED',
+                mfaEnrolled: Boolean(json.mfaEnrolled),
+                organizationId: json.organizationId,
+                role: json.role
+              }
+            }));
+          }
+        }
+      } catch {
+        // Safe ignore non-JSON error bodies
+      }
+    }
+
+    return res;
   } catch (err: any) {
     // If the browser threw TypeError: Failed to fetch, wrap it in a descriptive ApiNetworkError
     console.error(`[apiClient] Network request failed for ${targetUrlStr}:`, err?.message || err);
@@ -705,5 +761,513 @@ export async function acceptOrgInvite(inviteId: string): Promise<{
   return safeApiJson(res);
 }
 
+/* ==========================================================================
+   MFA RECOVERY CODES API METHODS (Step 3B.4.2)
+   ========================================================================== */
+
+export interface RecoveryCodesStatus {
+  configured: boolean;
+  remainingCodes: number;
+  totalCodes: number;
+  createdAt: string | null;
+}
+
+export interface GeneratedRecoveryCodesResponse {
+  success: boolean;
+  codes: string[];
+  totalCodes: number;
+  message: string;
+}
+
+export interface RedeemRecoveryCodeResponse {
+  success: boolean;
+  message: string;
+  recoveryTicket: string;
+  remainingCodes: number;
+}
+
+/**
+ * Fetches status of user's MFA recovery codes (count and whether configured).
+ * Does not leak codes or verifiers.
+ */
+export async function getRecoveryCodesStatus(): Promise<RecoveryCodesStatus> {
+  const res = await apiFetch('/api/auth/mfa/recovery-codes/status', {
+    method: 'GET'
+  });
+  return safeApiJson<RecoveryCodesStatus>(res);
+}
+
+/**
+ * Generates or regenerates a fresh set of 10 single-use recovery codes.
+ * Requires recent reauthentication. Codes are only shown once.
+ */
+export async function generateRecoveryCodes(): Promise<GeneratedRecoveryCodesResponse> {
+  const res = await apiFetch('/api/auth/mfa/recovery-codes/generate', {
+    method: 'POST'
+  });
+  return safeApiJson<GeneratedRecoveryCodesResponse>(res);
+}
+
+/**
+ * Atomically redeems a single-use recovery code and sets active recovery ticket.
+ */
+export async function redeemRecoveryCode(code: string): Promise<RedeemRecoveryCodeResponse> {
+  const res = await apiFetch('/api/auth/mfa/recovery/redeem', {
+    method: 'POST',
+    body: JSON.stringify({ code })
+  });
+  const data = await safeApiJson<RedeemRecoveryCodeResponse>(res);
+  if (data?.recoveryTicket) {
+    setRecoveryTicket(data.recoveryTicket);
+  }
+  return data;
+}
+
+/**
+ * Explicitly sends the recovery ticket to the dedicated recovery reset endpoint.
+ * This is the ONLY endpoint permitted to consume the recovery ticket.
+ */
+export async function resetLostFactorWithRecovery(recoveryTicket?: string): Promise<{ success: boolean; message: string }> {
+  const ticket = recoveryTicket || getRecoveryTicket();
+  if (!ticket) {
+    throw new Error("No recovery ticket available. Please redeem a recovery code first.");
+  }
+
+  const res = await apiFetch('/api/auth/mfa/recovery/reset-factors', {
+    method: 'POST',
+    headers: {
+      'X-MFA-Recovery-Ticket': ticket
+    }
+  });
+
+  const data = await safeApiJson<{ success: boolean; message: string }>(res);
+  // Clear the ticket in-memory immediately after successful single-use factor reset
+  clearRecoveryTicket();
+  return data;
+}
+
+// =========================================================================
+// TASK DEADLINE PROPAGATION CLIENT (AH.181)
+// =========================================================================
+
+export interface AffectedTaskPreviewItem {
+  taskId: string;
+  title: string;
+  status: string;
+  currentStartDate: string | null;
+  currentDueDate: string | null;
+  proposedStartDate: string | null;
+  proposedDueDate: string | null;
+  shiftDays: number | null;
+  durationDays: number | null;
+  isDirectTarget: boolean;
+  isCompleted: boolean;
+  warnings?: string[];
+}
+
+export interface PropagationPreviewResultData {
+  targetTaskId: string;
+  scheduleVersionToken?: string;
+  hasConflicts: boolean;
+  hasWarnings: boolean;
+  conflicts: string[];
+  warnings: string[];
+  affectedTasks: AffectedTaskPreviewItem[];
+  unaffectedCount: number;
+  totalProjectTasks: number;
+  affectedCompletedTasks: Array<{ taskId: string; title: string }>;
+  unresolvedTasks: Array<{ taskId: string; title: string; reason: string }>;
+}
+
+export interface PropagationPreviewResponse {
+  success: boolean;
+  preview: PropagationPreviewResultData;
+  error?: string;
+  message?: string;
+}
+
+export interface PropagationExecuteRequest {
+  newStartDate?: string | null;
+  newDueDate?: string | null;
+  scheduleVersionToken: string;
+}
+
+export interface PropagationExecuteResponse {
+  success: boolean;
+  message: string;
+  targetTaskId: string;
+  updatedTaskCount: number;
+  updatedTasks: Array<{
+    taskId: string;
+    title: string;
+    startDate?: string | null;
+    dueDate?: string | null;
+    shiftDays?: number | null;
+  }>;
+  notificationsCreated: number;
+  error?: string;
+  code?: string;
+}
+
+/**
+ * Requests a deterministic, non-mutating preview of deadline propagation
+ * for a target task in a project.
+ */
+export async function previewDeadlinePropagation(
+  projectId: string,
+  taskId: string,
+  proposed: { newStartDate?: string | null; newDueDate?: string | null }
+): Promise<PropagationPreviewResponse> {
+  const endpoint = `/api/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/propagate/preview`;
+  const res = await apiFetch(endpoint, {
+    method: 'POST',
+    body: JSON.stringify(proposed)
+  });
+  return safeApiJson<PropagationPreviewResponse>(res);
+}
+
+/**
+ * Atomically executes deadline propagation across dependent tasks in a project
+ * using optimistic concurrency control with scheduleVersionToken.
+ */
+export async function executeDeadlinePropagation(
+  projectId: string,
+  taskId: string,
+  payload: PropagationExecuteRequest
+): Promise<PropagationExecuteResponse> {
+  const endpoint = `/api/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/propagate`;
+  const res = await apiFetch(endpoint, {
+    method: 'POST',
+    body: JSON.stringify(payload)
+  });
+  return safeApiJson<PropagationExecuteResponse>(res);
+}
+
+// ============================================================================
+// AH.183: MULTI-PROJECT RECORDING ASSOCIATION CLIENT METHODS
+// ============================================================================
+
+import type {
+  RecordingProjectsResponse,
+  AddRecordingProjectResponse,
+  RemoveRecordingProjectResponse
+} from '../types';
+
+export type {
+  RecordingProjectsResponse,
+  AddRecordingProjectResponse,
+  RemoveRecordingProjectResponse
+};
+
+/**
+ * Retrieves the projects associated with a canonical recording.
+ */
+export async function getRecordingProjects(recordingId: string): Promise<ApiResponse<RecordingProjectsResponse>> {
+  const endpoint = `/api/recordings/${encodeURIComponent(recordingId)}/projects`;
+  const res = await apiFetch(endpoint, {
+    method: 'GET'
+  });
+  return parseApiResponse<RecordingProjectsResponse>(res);
+}
+
+/**
+ * Associates an existing canonical recording with an additional project.
+ */
+export async function addRecordingToProject(
+  recordingId: string,
+  projectId: string
+): Promise<ApiResponse<AddRecordingProjectResponse>> {
+  const endpoint = `/api/recordings/${encodeURIComponent(recordingId)}/projects`;
+  const res = await apiFetch(endpoint, {
+    method: 'POST',
+    body: JSON.stringify({ projectId })
+  });
+  return parseApiResponse<AddRecordingProjectResponse>(res);
+}
+
+/**
+ * Removes a project association from a canonical recording.
+ * Note: This never deletes the canonical recording itself.
+ */
+export async function removeRecordingFromProject(
+  recordingId: string,
+  projectId: string
+): Promise<ApiResponse<RemoveRecordingProjectResponse>> {
+  const endpoint = `/api/recordings/${encodeURIComponent(recordingId)}/projects/${encodeURIComponent(projectId)}`;
+  const res = await apiFetch(endpoint, {
+    method: 'DELETE'
+  });
+  return parseApiResponse<RemoveRecordingProjectResponse>(res);
+}
+
+// ============================================================================
+// AH.184: REPORT GENERATION CLIENT METHODS
+// ============================================================================
+
+import type { GenerateReportRequest } from '../types';
+
+export type { GenerateReportRequest };
+
+/**
+ * Generates and triggers download of a PowerPoint or Excel report.
+ * Receives the raw blob from POST /api/reports/generate, parses Content-Disposition
+ * filename, and triggers native browser file download.
+ */
+export async function downloadReport(request: GenerateReportRequest): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const res = await apiFetch('/api/reports/generate', {
+      method: 'POST',
+      body: JSON.stringify(request)
+    });
+
+    if (!res.ok) {
+      const errJson = await res.json().catch(() => ({}));
+      return { ok: false, error: errJson.message || `Report generation failed (HTTP ${res.status})` };
+    }
+
+    const disposition = res.headers.get('Content-Disposition') || '';
+    let filename = `EchoNote_Report.${request.format}`;
+    const filenameMatch = disposition.match(/filename="?([^";]+)"?/i);
+    if (filenameMatch && filenameMatch[1]) {
+      filename = filenameMatch[1].trim();
+    }
+
+    const blob = await res.blob();
+    const downloadUrl = window.URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = downloadUrl;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    setTimeout(() => window.URL.revokeObjectURL(downloadUrl), 1000);
+
+    return { ok: true };
+  } catch (err: any) {
+    return { ok: false, error: err?.message || 'Report download network error' };
+  }
+}
+
+// ============================================================================
+// AH.185: UNIFIED PROJECT SEARCH & SEARCH HISTORY CLIENT METHODS
+// ============================================================================
+
+import type {
+  ProjectSearchResponse,
+  ProjectSearchResultType,
+  SearchHistoryEntry,
+  SearchHistoryListResponse,
+  SearchHistoryFilters
+} from '../types';
+
+export interface ProjectSearchParams {
+  q?: string;
+  type?: ProjectSearchResultType[];
+  startDate?: string | null;
+  endDate?: string | null;
+  page?: number;
+  limit?: number;
+}
+
+/**
+ * Searches across meetings, transcripts, decisions, tasks, and unresolved topics within an authorized project.
+ */
+export async function searchProject(
+  projectId: string,
+  params: ProjectSearchParams = {},
+  signal?: AbortSignal
+): Promise<ApiResponse<ProjectSearchResponse>> {
+  const query = new URLSearchParams();
+  if (params.q) query.set('q', params.q);
+  if (params.type && params.type.length > 0) query.set('type', params.type.join(','));
+  if (params.startDate) query.set('startDate', params.startDate);
+  if (params.endDate) query.set('endDate', params.endDate);
+  if (params.page) query.set('page', params.page.toString());
+  if (params.limit) query.set('limit', params.limit.toString());
+
+  const queryString = query.toString();
+  const endpoint = `/api/projects/${encodeURIComponent(projectId)}/search${queryString ? `?${queryString}` : ''}`;
+  const res = await apiFetch(endpoint, { method: 'GET', signal });
+  return parseApiResponse<ProjectSearchResponse>(res);
+}
+
+/**
+ * Retrieves the authenticated user's search history entries.
+ */
+export async function getSearchHistory(options?: {
+  scope?: 'global' | 'project';
+  projectId?: string;
+  limit?: number;
+}): Promise<ApiResponse<SearchHistoryListResponse>> {
+  const query = new URLSearchParams();
+  if (options?.scope) query.set('scope', options.scope);
+  if (options?.projectId) query.set('projectId', options.projectId);
+  if (options?.limit) query.set('limit', options.limit.toString());
+
+  const queryString = query.toString();
+  const endpoint = `/api/search-history${queryString ? `?${queryString}` : ''}`;
+  const res = await apiFetch(endpoint, { method: 'GET' });
+  return parseApiResponse<SearchHistoryListResponse>(res);
+}
+
+/**
+ * Records a search query into the authenticated user's search history.
+ */
+export async function recordSearchHistory(payload: {
+  query: string;
+  scope?: 'global' | 'project';
+  projectId?: string | null;
+  filters?: SearchHistoryFilters;
+}): Promise<ApiResponse<{ success: boolean; entry: SearchHistoryEntry; isDuplicate: boolean }>> {
+  const res = await apiFetch('/api/search-history', {
+    method: 'POST',
+    body: JSON.stringify(payload)
+  });
+  return parseApiResponse<{ success: boolean; entry: SearchHistoryEntry; isDuplicate: boolean }>(res);
+}
+
+/**
+ * Deletes a single search history entry owned by the authenticated caller.
+ */
+export async function deleteSearchHistoryEntry(historyId: string): Promise<ApiResponse<{ success: boolean; message: string }>> {
+  const res = await apiFetch(`/api/search-history/${encodeURIComponent(historyId)}`, {
+    method: 'DELETE'
+  });
+  return parseApiResponse<{ success: boolean; message: string }>(res);
+}
+
+/**
+ * Clears search history for the authenticated caller, optionally scoped to a project.
+ */
+export async function clearSearchHistory(options?: {
+  scope?: 'global' | 'project';
+  projectId?: string;
+}): Promise<ApiResponse<{ success: boolean; message: string; clearedCount?: number }>> {
+  const query = new URLSearchParams();
+  if (options?.scope) query.set('scope', options.scope);
+  if (options?.projectId) query.set('projectId', options.projectId);
+
+  const queryString = query.toString();
+  const endpoint = `/api/search-history${queryString ? `?${queryString}` : ''}`;
+  const res = await apiFetch(endpoint, { method: 'DELETE' });
+  return parseApiResponse<{ success: boolean; message: string; clearedCount?: number }>(res);
+}
+
+// ============================================================================
+// AH.186: PROJECT TEMPLATES & END-TO-END PROJECT WORKFLOW CLIENT METHODS
+// ============================================================================
+
+/**
+ * Lists available project templates (starters, custom, organization).
+ */
+export async function getTemplates(options?: {
+  scope?: 'starter' | 'custom' | 'organization' | 'public';
+  organizationId?: string;
+}): Promise<ApiResponse<{ success: boolean; count: number; templates: any[] }>> {
+  const query = new URLSearchParams();
+  if (options?.scope) query.set('scope', options.scope);
+  if (options?.organizationId) query.set('organizationId', options.organizationId);
+
+  const queryString = query.toString();
+  const endpoint = `/api/templates${queryString ? `?${queryString}` : ''}`;
+  const res = await apiFetch(endpoint, { method: 'GET' });
+  return parseApiResponse<{ success: boolean; count: number; templates: any[] }>(res);
+}
+
+/**
+ * Retrieves a single project template by ID.
+ */
+export async function getTemplateDetail(templateId: string): Promise<ApiResponse<{ success: boolean; template: any }>> {
+  const res = await apiFetch(`/api/templates/${encodeURIComponent(templateId)}`, { method: 'GET' });
+  return parseApiResponse<{ success: boolean; template: any }>(res);
+}
+
+/**
+ * Creates a custom project template.
+ */
+export async function createTemplate(payload: {
+  name: string;
+  description?: string;
+  category?: string;
+  scope?: 'project' | 'organization' | 'public';
+  visibility?: 'private' | 'organization' | 'public';
+  organizationId?: string | null;
+  projectId?: string | null;
+  tasks: any[];
+}): Promise<ApiResponse<{ success: boolean; message: string; template: any }>> {
+  const res = await apiFetch('/api/templates', {
+    method: 'POST',
+    body: JSON.stringify(payload)
+  });
+  return parseApiResponse<{ success: boolean; message: string; template: any }>(res);
+}
+
+/**
+ * Updates an existing custom template.
+ */
+export async function updateTemplate(templateId: string, updates: {
+  name?: string;
+  description?: string;
+  tasks?: any[];
+}): Promise<ApiResponse<{ success: boolean; message: string; template: any }>> {
+  const res = await apiFetch(`/api/templates/${encodeURIComponent(templateId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(updates)
+  });
+  return parseApiResponse<{ success: boolean; message: string; template: any }>(res);
+}
+
+/**
+ * Duplicates an existing template (starter or custom) into a new custom template.
+ */
+export async function duplicateTemplate(templateId: string, newName?: string): Promise<ApiResponse<{ success: boolean; message: string; template: any }>> {
+  const res = await apiFetch(`/api/templates/${encodeURIComponent(templateId)}/duplicate`, {
+    method: 'POST',
+    body: JSON.stringify({ newName })
+  });
+  return parseApiResponse<{ success: boolean; message: string; template: any }>(res);
+}
+
+/**
+ * Deletes a custom template.
+ */
+export async function deleteTemplate(templateId: string): Promise<ApiResponse<{ success: boolean; message: string; templateId: string }>> {
+  const res = await apiFetch(`/api/templates/${encodeURIComponent(templateId)}`, {
+    method: 'DELETE'
+  });
+  return parseApiResponse<{ success: boolean; message: string; templateId: string }>(res);
+}
+
+/**
+ * Creates a new project and instantiates its tasks atomically from a template.
+ */
+export async function createProjectFromTemplate(templateId: string, payload: {
+  projectName: string;
+  projectDescription?: string;
+  anchorDate?: string;
+  organizationId?: string | null;
+  roleMappings?: Record<string, { email: string; name?: string; userId?: string }>;
+}): Promise<ApiResponse<{
+  success: boolean;
+  message: string;
+  project: {
+    id: string;
+    name: string;
+    description?: string;
+    organizationId?: string | null;
+    templateId: string;
+    templateName: string;
+    createdAt: string;
+  };
+  createdTasksCount: number;
+  createdTaskIds: string[];
+  tasks: any[];
+}>> {
+  const res = await apiFetch(`/api/templates/${encodeURIComponent(templateId)}/create-project`, {
+    method: 'POST',
+    body: JSON.stringify(payload)
+  });
+  return parseApiResponse(res);
+}
 
 

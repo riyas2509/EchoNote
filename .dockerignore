@@ -1,4 +1,4 @@
-﻿node_modules
+node_modules
 dist
 .git
 .github
@@ -20,3 +20,4 @@ docs/
 *.patch
 *.sha256
 .vercel
+

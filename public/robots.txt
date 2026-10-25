@@ -1,0 +1,19 @@
+User-agent: *
+Allow: /
+Allow: /features
+Allow: /solutions
+Allow: /pricing
+Allow: /security
+Allow: /contact
+Allow: /demo
+Allow: /privacy
+Allow: /terms
+
+# Disallow authenticated application shell, project workspaces, and internal search
+Disallow: /app
+Disallow: /auth
+Disallow: /join
+Disallow: /invite
+Disallow: /api/
+
+Sitemap: https://echonote-25.vercel.app/sitemap.xml

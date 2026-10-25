@@ -209,12 +209,17 @@ export const SummaryStatsWidget: React.FC<SummaryStatsWidgetProps> = ({
         {/* Completed Decisions Card */}
         <div 
           id="stat-card-completed-decisions"
+          data-tour="meeting-decision-panel"
+          data-tour-decision="decision-card-v1"
           className="relative bg-white/90 backdrop-blur-xs rounded-xl p-5 border border-brand-primary/25 shadow-sm flex flex-col justify-between hover:bg-white transition-all duration-200"
         >
           <div className="flex items-start justify-between gap-4">
             <div className="space-y-1">
               <div className="flex items-center gap-2">
-                <span className="text-xs font-extrabold uppercase tracking-wider text-slate-600">
+                <span 
+                  data-tour="decision-intelligence-badge"
+                  className="text-xs font-extrabold uppercase tracking-wider text-slate-600"
+                >
                   Completed Decisions
                 </span>
 

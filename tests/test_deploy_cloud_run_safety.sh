@@ -19,7 +19,31 @@ FAILED_COUNT=0
 
 # Create sandbox test directory for mock binaries
 TEST_SANDBOX="$(mktemp -d)"
-trap 'rm -rf "$TEST_SANDBOX"' EXIT
+
+# Start lightweight mock candidate server for candidate health checks on port 4099
+node -e "
+const http = require('http');
+const server = http.createServer((req, res) => {
+  if (req.url === '/api/health') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ status: 'ok' }));
+  }
+  if (req.url === '/api/webhooks/zoom') {
+    res.writeHead(401, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ error: 'Unauthorized' }));
+  }
+  res.writeHead(404);
+  res.end();
+});
+server.listen(4099, '127.0.0.1');
+" &
+MOCK_SERVER_PID=$!
+
+cleanup() {
+  kill "$MOCK_SERVER_PID" 2>/dev/null || true
+  rm -rf "$TEST_SANDBOX"
+}
+trap cleanup EXIT
 
 MOCK_BIN="$TEST_SANDBOX/bin"
 mkdir -p "$MOCK_BIN"
@@ -146,6 +170,10 @@ if [ "\$1" = "run" ] && [ "\$2" = "services" ] && [ "\$3" = "update" ]; then
 fi
 
 if [ "\$1" = "run" ] && [ "\$2" = "services" ] && [ "\$3" = "describe" ]; then
+  if [[ "\$*" == *"status.traffic[].tag,status.traffic[].url"* ]]; then
+    echo "echonote-candidate,http://127.0.0.1:4099"
+    exit 0
+  fi
   echo "$mock_revision"
   exit 0
 fi
@@ -153,6 +181,10 @@ fi
 if [ "\$1" = "run" ] && [ "\$2" = "revisions" ] && [ "\$3" = "describe" ]; then
   if [[ "\$*" == *"--format=value(spec.containers[0].image)"* ]]; then
     echo "$mock_image"
+    exit 0
+  fi
+  if [[ "\$*" == *"--format=value(status.url)"* ]]; then
+    echo "http://127.0.0.1:4099"
     exit 0
   fi
   echo "$mock_ready"
@@ -416,6 +448,12 @@ assert_test "Test J6: Deploy maps PLAYBACK_SECRET to echonote-playback-secret:la
 assert_test "Test J7: Deploy maps CRON_SECRET to echonote-cron-secret:latest" \
   "0" "CRON_SECRET=echonote-cron-secret:latest" "$EXIT_CODE" "$OUT"
 
+assert_test "Test J7b: Deploy maps INTEGRATION_ENCRYPTION_KEY to echonote-integration-encryption-key:latest" \
+  "0" "INTEGRATION_ENCRYPTION_KEY=echonote-integration-encryption-key:latest" "$EXIT_CODE" "$OUT"
+
+assert_test "Test J7c: Deploy maps ZOOM_WEBHOOK_SECRET to echonote-zoom-webhook-secret:latest" \
+  "0" "ZOOM_WEBHOOK_SECRET=echonote-zoom-webhook-secret:latest" "$EXIT_CODE" "$OUT"
+
 assert_test "Test J8: Deploy specifies clean --set-env-vars flag" \
   "0" "--set-env-vars=" "$EXIT_CODE" "$OUT"
 
@@ -442,6 +480,10 @@ assert_absent "Test J15: PLAYBACK_SECRET is strictly absent from --set-env-vars"
   "PLAYBACK_SECRET" "$SET_ENV_PART"
 assert_absent "Test J16: CRON_SECRET is strictly absent from --set-env-vars" \
   "CRON_SECRET" "$SET_ENV_PART"
+assert_absent "Test J16b: INTEGRATION_ENCRYPTION_KEY is strictly absent from --set-env-vars" \
+  "INTEGRATION_ENCRYPTION_KEY" "$SET_ENV_PART"
+assert_absent "Test J16c: ZOOM_WEBHOOK_SECRET is strictly absent from --set-env-vars" \
+  "ZOOM_WEBHOOK_SECRET" "$SET_ENV_PART"
 
 assert_test "Test J17: Deploy preserves NODE_ENV=production in --set-env-vars" \
   "0" "NODE_ENV=production" "$EXIT_CODE" "$SET_ENV_PART"
@@ -505,8 +547,8 @@ assert_test "Test K1: Update-env succeeds and invokes services update" \
 assert_test "Test K2: Update-env specifies --set-secrets flag" \
   "0" "--set-secrets=" "$EXIT_CODE_UPDATE" "$OUT_UPDATE"
 
-assert_test "Test K3: Update-env contains all 6 Secret Manager mappings" \
-  "0" "GEMINI_API_KEY=echonote-gemini-api-key:latest,RAZORPAY_KEY_SECRET=echonote-razorpay-key-secret:latest,RAZORPAY_WEBHOOK_SECRET=echonote-razorpay-webhook-secret:latest,RESEND_API_KEY=echonote-resend-api-key:latest,PLAYBACK_SECRET=echonote-playback-secret:latest,CRON_SECRET=echonote-cron-secret:latest" \
+assert_test "Test K3: Update-env contains all 8 Secret Manager mappings" \
+  "0" "GEMINI_API_KEY=echonote-gemini-api-key:latest,RAZORPAY_KEY_SECRET=echonote-razorpay-key-secret:latest,RAZORPAY_WEBHOOK_SECRET=echonote-razorpay-webhook-secret:latest,RESEND_API_KEY=echonote-resend-api-key:latest,PLAYBACK_SECRET=echonote-playback-secret:latest,CRON_SECRET=echonote-cron-secret:latest,INTEGRATION_ENCRYPTION_KEY=echonote-integration-encryption-key:latest,ZOOM_WEBHOOK_SECRET=echonote-zoom-webhook-secret:latest" \
   "$EXIT_CODE_UPDATE" "$OUT_UPDATE"
 
 assert_test "Test K4: Update-env uses --set-env-vars for clean ordinary environment replacement" \
@@ -533,6 +575,10 @@ assert_absent "Test K10: Update-env does NOT place PLAYBACK_SECRET in --set-env-
   "PLAYBACK_SECRET" "$SET_ENV_PART_K"
 assert_absent "Test K11: Update-env does NOT place CRON_SECRET in --set-env-vars" \
   "CRON_SECRET" "$SET_ENV_PART_K"
+assert_absent "Test K11b: Update-env does NOT place INTEGRATION_ENCRYPTION_KEY in --set-env-vars" \
+  "INTEGRATION_ENCRYPTION_KEY" "$SET_ENV_PART_K"
+assert_absent "Test K11c: Update-env does NOT place ZOOM_WEBHOOK_SECRET in --set-env-vars" \
+  "ZOOM_WEBHOOK_SECRET" "$SET_ENV_PART_K"
 
 assert_test "Test K13: Update-env preserves canonical APP_URL" \
   "0" "APP_URL=https://echonote-25.ai.studio" "$EXIT_CODE_UPDATE" "$SET_ENV_PART_K"
@@ -568,13 +614,19 @@ fi
 # Test L: Static Security & Hardening Invariants
 # ----------------------------------------------------------------------------
 assert_test "Test L1: Summary displays Secret Manager References header" \
-  "0" "Secret Manager References (6 production secrets):" "$EXIT_CODE" "$OUT"
+  "0" "Secret Manager References (8 production secrets):" "$EXIT_CODE" "$OUT"
 
 assert_test "Test L2: Summary lists GEMINI_API_KEY mapping" \
   "0" "GEMINI_API_KEY -> echonote-gemini-api-key:latest" "$EXIT_CODE" "$OUT"
 
 assert_test "Test L3: Summary lists RAZORPAY_KEY_SECRET mapping" \
   "0" "RAZORPAY_KEY_SECRET -> echonote-razorpay-key-secret:latest" "$EXIT_CODE" "$OUT"
+
+assert_test "Test L3b: Summary lists INTEGRATION_ENCRYPTION_KEY mapping" \
+  "0" "INTEGRATION_ENCRYPTION_KEY -> echonote-integration-encryption-key:latest" "$EXIT_CODE" "$OUT"
+
+assert_test "Test L3c: Summary lists ZOOM_WEBHOOK_SECRET mapping" \
+  "0" "ZOOM_WEBHOOK_SECRET -> echonote-zoom-webhook-secret:latest" "$EXIT_CODE" "$OUT"
 
 assert_pattern_absent "Test L4: No Razorpay live/test secret-like values in deploy script" \
   "(rzp_(live|test)_[A-Za-z0-9]{10,}|RAZORPAY_KEY_SECRET=[A-Za-z0-9]{16,})" "$DEPLOY_SCRIPT" "Razorpay key/secret format"
@@ -583,7 +635,7 @@ assert_pattern_absent "Test L5: No Gemini API-key-like values in deploy script" 
   "AIza[0-9A-Za-z_-]{30,}" "$DEPLOY_SCRIPT" "Gemini/Google API key format"
 
 assert_pattern_absent "Test L6: No Resend API-key-like values in deploy script" \
-  "re_[A-Za-z0-9_]{16,}" "$DEPLOY_SCRIPT" "Resend API key format"
+  "\<re_[A-Za-z0-9_]{16,}\>" "$DEPLOY_SCRIPT" "Resend API key format"
 
 assert_pattern_absent "Test L7: No raw 64-character hex secret tokens in deploy script" \
   "[0-9a-fA-F]{64}" "$DEPLOY_SCRIPT" "Raw 64-character hex secret format"
@@ -651,21 +703,49 @@ assert_test "Fix B.1A Inv 8: Mutable 'latest' tag is strictly rejected" \
   "nonzero" "ERROR: Mutable 'latest' tag is strictly forbidden" "$EXIT_LATEST" "$OUT_LATEST"
 
 # Invariant 9: Secret Manager references remain configured
-assert_test "Fix B.1A Inv 9: All 6 Secret Manager references remain configured in deploy" \
-  "0" "--set-secrets=GEMINI_API_KEY=echonote-gemini-api-key:latest,RAZORPAY_KEY_SECRET=echonote-razorpay-key-secret:latest,RAZORPAY_WEBHOOK_SECRET=echonote-razorpay-webhook-secret:latest,RESEND_API_KEY=echonote-resend-api-key:latest,PLAYBACK_SECRET=echonote-playback-secret:latest,CRON_SECRET=echonote-cron-secret:latest" \
+assert_test "Fix B.1A Inv 9: All 8 Secret Manager references remain configured in deploy" \
+  "0" "--set-secrets=GEMINI_API_KEY=echonote-gemini-api-key:latest,RAZORPAY_KEY_SECRET=echonote-razorpay-key-secret:latest,RAZORPAY_WEBHOOK_SECRET=echonote-razorpay-webhook-secret:latest,RESEND_API_KEY=echonote-resend-api-key:latest,PLAYBACK_SECRET=echonote-playback-secret:latest,CRON_SECRET=echonote-cron-secret:latest,INTEGRATION_ENCRYPTION_KEY=echonote-integration-encryption-key:latest,ZOOM_WEBHOOK_SECRET=echonote-zoom-webhook-secret:latest" \
   "$EXIT_CODE" "$OUT"
 
-# Invariant 9b: All 6 secret names are strictly absent from ordinary env vars in deploy
+# Invariant 9b: All 8 secret names are strictly absent from ordinary env vars in deploy
 assert_absent "Fix B.1A Inv 9b1: GEMINI_API_KEY is absent from ordinary env vars" "GEMINI_API_KEY" "$SET_ENV_PART"
 assert_absent "Fix B.1A Inv 9b2: RAZORPAY_KEY_SECRET is absent from ordinary env vars" "RAZORPAY_KEY_SECRET" "$SET_ENV_PART"
 assert_absent "Fix B.1A Inv 9b3: RAZORPAY_WEBHOOK_SECRET is absent from ordinary env vars" "RAZORPAY_WEBHOOK_SECRET" "$SET_ENV_PART"
 assert_absent "Fix B.1A Inv 9b4: RESEND_API_KEY is absent from ordinary env vars" "RESEND_API_KEY" "$SET_ENV_PART"
 assert_absent "Fix B.1A Inv 9b5: PLAYBACK_SECRET is absent from ordinary env vars" "PLAYBACK_SECRET" "$SET_ENV_PART"
 assert_absent "Fix B.1A Inv 9b6: CRON_SECRET is absent from ordinary env vars" "CRON_SECRET" "$SET_ENV_PART"
+assert_absent "Fix B.1A Inv 9b7: INTEGRATION_ENCRYPTION_KEY is absent from ordinary env vars" "INTEGRATION_ENCRYPTION_KEY" "$SET_ENV_PART"
+assert_absent "Fix B.1A Inv 9b8: ZOOM_WEBHOOK_SECRET is absent from ordinary env vars" "ZOOM_WEBHOOK_SECRET" "$SET_ENV_PART"
 
 # Invariant 9c: No contradictory migration flags in deploy invocation
 assert_absent "Fix B.1A Inv 9c: Deploy command does NOT contain --remove-env-vars" "--remove-env-vars" "$OUT"
 assert_absent "Fix B.1A Inv 9d: Deploy command does NOT contain --update-env-vars" "--update-env-vars" "$OUT"
+
+# Invariant 9e: Dynamic Rollback Baseline Safety
+assert_test "Fix B.1A Inv 9e: Rollback baseline is captured dynamically from live serving revision" \
+  "0" "Previous baseline serving revision was: echonote-00010-abc" "$EXIT_CODE" "$OUT"
+
+# Invariant 9f: Aborts if live baseline is undetermined/unknown
+cat <<EOF > "$MOCK_BIN/gcloud"
+#!/usr/bin/env bash
+if [ "\$1" = "config" ] && [ "\$2" = "get-value" ] && [ "\$3" = "project" ]; then
+  echo "echonote-2509"
+  exit 0
+fi
+if [ "\$1" = "run" ] && [ "\$2" = "services" ] && [ "\$3" = "describe" ]; then
+  # Simulate undetermined live state
+  exit 1
+fi
+exit 0
+EOF
+chmod +x "$MOCK_BIN/gcloud"
+OUT_NO_BASELINE=$(PATH="$MOCK_BIN:$PATH" "$DEPLOY_SCRIPT" deploy 2>&1)
+EXIT_NO_BASELINE=$?
+assert_test "Fix B.1A Inv 9f: Aborts safely if live serving baseline cannot be determined" \
+  "nonzero" "ERROR: Unable to safely determine live serving revision baseline" "$EXIT_NO_BASELINE" "$OUT_NO_BASELINE"
+
+# Reset mock gcloud
+setup_mock_gcloud "echonote-2509"
 
 # Invariant 10: Docker build is required
 setup_mock_docker 1 0
