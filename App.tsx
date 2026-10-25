@@ -1,4 +1,3 @@
-
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { Routes, Route, useNavigate, useLocation, Navigate, Link } from 'react-router-dom';
 import Navigation from './components/Navigation';
@@ -30,6 +29,12 @@ import Solutions from './pages/Solutions';
 import SubscriptionModal from './components/SubscriptionModal';
 import { CollaborationDashboard } from './components/CollaborationDashboard';
 import { OrganizationDashboard } from './components/OrganizationDashboard';
+import { MfaPolicyEnforcementModal } from './components/MfaPolicyEnforcementModal';
+import { MfaWorkspaceGuard } from './components/MfaWorkspaceGuard';
+import { OnboardingModal } from './components/OnboardingModal';
+import { InteractiveDemoModal } from './components/InteractiveDemoModal';
+import { useDemoWorkspace, DEMO_PROJECT_NAME } from './lib/demoStateManager';
+import { MfaPolicyChallengeDetail } from './lib/apiClient';
 import { AppWorkflow, AudioToTextRecord, TextToAudioRecord, AuthStatus, UserProfile, PlaybackMetadata, PlaybackStatus, AppNotification, UsageStats, SubscriptionTier, Project, ProjectMember, CollaborationRole, MainView, ProjectActivity, OrgRole, OrgMember, Team, normalizeOrgRole } from './types';
 import { PLAN_FEATURES } from './config/planConfig';
 import { useFirebase } from './components/FirebaseProvider';
@@ -39,6 +44,7 @@ import { summarizeTranscript, analyzeDecisionIntelligence, analyzeStrategically 
 import { getMinutesUsage, getThinkingUsage, formatRefreshDate } from './lib/usageUtils';
 import { logAction } from './services/auditService';
 import { apiFetch, safeApiJson } from './lib/apiClient';
+import { useDocumentSeo } from './components/public/SeoManager';
 
 const ScrollToTop = () => {
   const { pathname } = useLocation();
@@ -49,6 +55,7 @@ const ScrollToTop = () => {
 };
 
 const App: React.FC = () => {
+  useDocumentSeo();
   const navigate = useNavigate();
   const location = useLocation();
   const { user, profile, customClaims, isAuthReady } = useFirebase();
@@ -107,14 +114,14 @@ const App: React.FC = () => {
       if (user && profile) {
         setAuthStatus(AuthStatus.LOGGED_IN);
         setUserProfile(profile);
-        
+
         const rememberMe = localStorage.getItem('echonote_remember_me') === 'true';
         if (rememberMe) {
           localStorage.setItem('remembered_user', JSON.stringify(profile));
         } else {
           localStorage.removeItem('remembered_user');
         }
-        
+
         // Handle redirect after login (e.g. from invitation) - check sessionStorage first to avoid persisting token
         const redirectPath = sessionStorage.getItem('redirectAfterLogin') || localStorage.getItem('redirectAfterLogin');
         if (redirectPath) {
@@ -129,7 +136,7 @@ const App: React.FC = () => {
           navigate('/app');
         }
       } else {
-        // If we have a remembered user but Firebase says we're not logged in, 
+        // If we have a remembered user but Firebase says we're not logged in,
         // we should probably wait for Firebase to be sure, or clear it if it's definitely null.
         // However, if user is null and isAuthReady is true, we are definitely not logged in.
         if (!user) {
@@ -145,8 +152,74 @@ const App: React.FC = () => {
   const [selectedGroupFilter, setSelectedGroupFilter] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [showUpgradeModal, setShowUpgradeModal] = useState(false);
+  const [isOnboardingOpen, setIsOnboardingOpen] = useState(false);
+  const [isDemoOpen, setIsDemoOpen] = useState(false);
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [toasts, setToasts] = useState<{id: string, title: string, message: string, type: 'info' | 'error' | 'success'}[]>([]);
+  const [targetTaskId, setTargetTaskId] = useState<string | null>(null);
+
+  // Automatically trigger onboarding for newly logged-in users who haven't completed onboarding
+  useEffect(() => {
+    if (authStatus === AuthStatus.LOGGED_IN && userProfile && userProfile.onboardingCompleted !== true) {
+      // Check if user has dismissed it this session to avoid annoyance
+      const sessionDismissed = sessionStorage.getItem(`echonote_onboarding_dismissed_${userProfile.uid || user?.uid}`);
+      if (!sessionDismissed) {
+        setIsOnboardingOpen(true);
+      }
+    }
+  }, [authStatus, userProfile, user]);
+
+  const handleCompleteOnboarding = async () => {
+    if (!userProfile) {
+      setIsOnboardingOpen(false);
+      return;
+    }
+
+    // Call server authoritative endpoint to persist onboarding completion
+    const res = await apiFetch('/api/onboarding/complete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId: userProfile.uid || user?.uid })
+    });
+
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}));
+      throw new Error(errData?.message || 'Failed to save onboarding completion state on the server. Please try again.');
+    }
+
+    // Update local profile state on verified persistence
+    const updatedProfile: UserProfile = {
+      ...userProfile,
+      onboardingCompleted: true,
+      onboardingCompletedAt: new Date().toISOString()
+    };
+    setUserProfile(updatedProfile);
+    setIsOnboardingOpen(false);
+    addToast('Onboarding Completed', 'Welcome to your EchoNote workspace!', 'success');
+  };
+
+  const demoContext = useDemoWorkspace();
+
+  const handleStartInteractiveDemo = () => {
+    // 1. Initialize and reset in-memory demo state & activate explicit demo mode
+    if (demoContext) {
+      demoContext.resetDemoState();
+      demoContext.enterDemo();
+      demoContext.setTourStepIndex(0);
+    }
+    // 2. Open actual workspace UI with Enterprise API Migration project selected
+    setSelectedGroupFilter(DEMO_PROJECT_NAME);
+    setCurrentTab(AppWorkflow.COLLABORATION_DASHBOARD);
+    setIsOnboardingOpen(false);
+    navigate('/app');
+  };
+
+  const handleDismissOnboarding = () => {
+    setIsOnboardingOpen(false);
+    if (userProfile?.uid || user?.uid) {
+      sessionStorage.setItem(`echonote_onboarding_dismissed_${userProfile?.uid || user?.uid}`, 'true');
+    }
+  };
 
   const addToast = (title: string, message: string, type: 'info' | 'error' | 'success' = 'info') => {
     const id = Math.random().toString(36).substr(2, 9);
@@ -164,12 +237,12 @@ const App: React.FC = () => {
       isRead: false
     };
     setNotifications(prev => [newNotif, ...prev]);
-    
+
     // Map notification types to toast types
     let toastType: 'info' | 'success' | 'error' = 'info';
     if (notif.type === 'error') toastType = 'error';
     if (notif.type === 'success') toastType = 'success';
-    
+
     addToast(notif.title, notif.message, toastType);
   }, []);
 
@@ -190,10 +263,10 @@ const App: React.FC = () => {
     if (userProfile) {
       const tier = userProfile.plan || 'free';
       const features = PLAN_FEATURES[tier];
-      
+
       const mUsage = getMinutesUsage(userProfile);
       const tUsage = getThinkingUsage(userProfile);
-      
+
       setUsageStats({
         usedMinutes: mUsage.used,
         totalMinutes: mUsage.limit,
@@ -249,7 +322,7 @@ const App: React.FC = () => {
   const incrementThinkingUsage = useCallback(async () => {
     if (authStatus === AuthStatus.LOGGED_IN && user && userProfile) {
       const userRef = doc(db, 'users', user.uid);
-      
+
       try {
         const tier = userProfile.plan || 'free';
         const limit = userProfile.monthlyThinkingLimit ?? PLAN_FEATURES[tier].thinkingLimit;
@@ -257,23 +330,23 @@ const App: React.FC = () => {
         const topupBalance = userProfile.thinkingTopupBalance ?? 0;
 
         if (limit === 'unlimited') {
-          await updateDoc(userRef, { 
+          await updateDoc(userRef, {
             monthlyThinkingUsed: increment(1),
             thinkingUsed: increment(1)
           });
         } else if (currentUsage < (limit as number)) {
-          await updateDoc(userRef, { 
+          await updateDoc(userRef, {
             monthlyThinkingUsed: increment(1),
             thinkingUsed: increment(1)
           });
         } else if (topupBalance > 0) {
-          await updateDoc(userRef, { 
+          await updateDoc(userRef, {
             thinkingTopupBalance: increment(-1)
           });
         } else {
           throw new Error("❌ Thinking limit exceeded");
         }
-        
+
         console.log("✅ Thinking usage incremented");
       } catch (error) {
         console.error("❌ Failed to increment thinking usage:", error);
@@ -289,7 +362,7 @@ const App: React.FC = () => {
   const incrementTranscriptionUsage = useCallback(async (minutes: number) => {
     if (authStatus === AuthStatus.LOGGED_IN && user && userProfile) {
       const userRef = doc(db, 'users', user.uid);
-      
+
       try {
         const tier = userProfile.plan || 'free';
         const monthlyLimit = userProfile.monthlyMinuteLimit ?? PLAN_FEATURES[tier].totalMinutesLimit;
@@ -314,7 +387,7 @@ const App: React.FC = () => {
           minuteTopupBalance: newTopupBalance,
           extraMinutes: newTopupBalance
         });
-        
+
         console.log("✅ Transcription usage incremented by:", minutes);
       } catch (error) {
         console.error("❌ Failed to increment transcription usage:", error);
@@ -364,7 +437,7 @@ const App: React.FC = () => {
       }));
     }
   }, [authStatus, user, userProfile]);
-  
+
   const [audioHistory, setAudioHistory] = useState<AudioToTextRecord[]>([]);
   const [loadingArchive, setLoadingArchive] = useState(false);
   const [textHistory, setTextHistory] = useState<TextToAudioRecord[]>([]);
@@ -376,6 +449,69 @@ const App: React.FC = () => {
   const [orgTeams, setOrgTeams] = useState<Team[]>([]);
   const [userOrgRole, setUserOrgRole] = useState<OrgRole>('viewer');
 
+  // MFA Enforcement States (Step 3B.2)
+  const [sessionMfaActive, setSessionMfaActive] = useState<boolean>(false);
+  const [userMfaEnrolled, setUserMfaEnrolled] = useState<boolean>(false);
+  const [showMfaPolicyModal, setShowMfaPolicyModal] = useState<boolean>(false);
+  const [mfaChallengeDetail, setMfaChallengeDetail] = useState<MfaPolicyChallengeDetail | null>(null);
+
+  // Authoritatively inspect session MFA state
+  const refreshMfaSessionState = useCallback(async () => {
+    if (!auth?.currentUser) {
+      setSessionMfaActive(false);
+      setUserMfaEnrolled(false);
+      return;
+    }
+    try {
+      const res = await apiFetch('/api/auth/mfa/status');
+      if (res.ok) {
+        const data = await res.json();
+        setUserMfaEnrolled(Boolean(data.mfaEnabled));
+        setSessionMfaActive(Boolean(data.currentSessionSecondFactor));
+      } else {
+        const tokenRes = await auth.currentUser.getIdTokenResult();
+        const factor = (tokenRes.claims as any)?.firebase?.sign_in_second_factor;
+        setSessionMfaActive(Boolean(factor));
+      }
+    } catch {
+      // Safe fallback
+    }
+  }, []);
+
+  useEffect(() => {
+    if (authStatus === AuthStatus.LOGGED_IN && user) {
+      refreshMfaSessionState();
+    }
+  }, [authStatus, user, refreshMfaSessionState]);
+
+  // Global listener for API 403 MFA policy challenges
+  useEffect(() => {
+    const handlePolicyChallenge = (evt: Event) => {
+      const customEvt = evt as CustomEvent<MfaPolicyChallengeDetail>;
+      if (customEvt.detail) {
+        setMfaChallengeDetail(customEvt.detail);
+        setShowMfaPolicyModal(true);
+      }
+    };
+
+    window.addEventListener('echonote:mfa-policy-challenge', handlePolicyChallenge);
+    return () => {
+      window.removeEventListener('echonote:mfa-policy-challenge', handlePolicyChallenge);
+    };
+  }, []);
+
+  // Compute if current organization workspace is gated by organization MFA policy
+  const orgMfaRequirement = currentOrg?.securitySettings?.mfaRequirement || 'MFA_OPTIONAL';
+  const isOrgAdminRole = userOrgRole === 'owner' || userOrgRole === 'org_admin';
+  const isMfaMandatoryForOrg = Boolean(
+    currentOrg && (
+      orgMfaRequirement === 'MFA_ENFORCED_ALL' ||
+      orgMfaRequirement === 'MFA_REQUIRED_ALL' ||
+      (orgMfaRequirement === 'MFA_REQUIRED_ADMINS' && isOrgAdminRole)
+    )
+  );
+  const isMfaWorkspaceBlocked = isMfaMandatoryForOrg && !sessionMfaActive;
+
   const [manualAnalyticsTrigger, setManualAnalyticsTrigger] = useState(0);
 
   const handleAnalyticsUpdate = useCallback(() => {
@@ -385,13 +521,13 @@ const App: React.FC = () => {
   useEffect(() => {
     if (authStatus === AuthStatus.LOGGED_IN && user) {
       setLoadingArchive(true);
-      
+
       const audioQuery = query(
         collection(db, 'recordings'),
         where('userId', '==', user.uid),
         orderBy('createdAt', 'desc')
       );
-      
+
       const unsubscribeAudio = onSnapshot(audioQuery, (snapshot) => {
         const audioRecords = snapshot.docs.map(doc => doc.data() as AudioToTextRecord);
         setAudioHistory(audioRecords);
@@ -406,7 +542,7 @@ const App: React.FC = () => {
         where('userId', '==', user.uid),
         orderBy('createdAt', 'desc')
       );
-      
+
       const unsubscribeText = onSnapshot(textQuery, (snapshot) => {
         const textRecords = snapshot.docs.map(doc => doc.data() as TextToAudioRecord);
         setTextHistory(textRecords);
@@ -418,7 +554,7 @@ const App: React.FC = () => {
       const allProjectsQuery = isPlatformAdmin
         ? query(collection(db, 'projects'))
         : query(collection(db, 'projects'), where('userId', '==', user.uid));
-      
+
       // Fetch projects the user IS A MEMBER OF
       const sharedProjectsQuery = query(
         collection(db, 'projectMembers'),
@@ -439,15 +575,15 @@ const App: React.FC = () => {
 
           if (userOrgRole === 'owner' || userOrgRole === 'org_admin') {
             // Org Owners and Admins see all projects belonging to the org
-            visibleProjects = allProjectsList.filter(p => 
-              p.userId === user.uid || 
-              p.ownerEmail === orgOwnerEmail || 
+            visibleProjects = allProjectsList.filter(p =>
+              p.userId === user.uid ||
+              p.ownerEmail === orgOwnerEmail ||
               orgTeamProjIds.has(p.id)
             );
           } else if (userOrgRole === 'team_manager') {
             // Team Managers see assigned projects, plus owned or shared projects
-            visibleProjects = allProjectsList.filter(p => 
-              p.userId === user.uid || 
+            visibleProjects = allProjectsList.filter(p =>
+              p.userId === user.uid ||
               orgTeamProjIds.has(p.id) ||
               sharedProjectMemberships.some(m => m.projectId === p.id)
             );
@@ -456,17 +592,17 @@ const App: React.FC = () => {
             const userTeamId = currentOrgMember?.teamId;
             const userTeams = userTeamId ? orgTeams.filter(t => t.id === userTeamId) : orgTeams;
             const teamProjIds = new Set(userTeams.flatMap(t => t.projectIds || []));
-            
-            visibleProjects = allProjectsList.filter(p => 
-              p.userId === user.uid || 
+
+            visibleProjects = allProjectsList.filter(p =>
+              p.userId === user.uid ||
               teamProjIds.has(p.id) ||
               sharedProjectMemberships.some(m => m.projectId === p.id)
             );
           }
         } else {
           // Personal scope: owned + shared
-          visibleProjects = allProjectsList.filter(p => 
-            p.userId === user.uid || 
+          visibleProjects = allProjectsList.filter(p =>
+            p.userId === user.uid ||
             sharedProjectMemberships.some(m => m.projectId === p.id)
           );
         }
@@ -532,7 +668,11 @@ const App: React.FC = () => {
             message: data.message || '',
             timestamp,
             isRead: Boolean(data.isRead),
-            type: data.type || 'info',
+            type: (data.type === 'PREREQUISITE_COMPLETED' || data.type === 'TASK_OVERDUE' || data.type === 'DEADLINE_PROPAGATED') ? 'info' : (data.type || 'info'),
+            notificationCategory: data.type,
+            projectId: data.projectId,
+            taskId: data.taskId,
+            metadata: data.metadata,
             link: data.link,
             recordId: data.recordId || data.recordingId
           };
@@ -597,7 +737,7 @@ const App: React.FC = () => {
         const orgDoc = snapshot.docs[0].data();
         setCurrentOrg(orgDoc);
         activeOrgId = orgDoc.id;
-        
+
         // Authoritative organization role for organization owner is always 'owner'
         setUserOrgRole('owner');
       }
@@ -610,7 +750,7 @@ const App: React.FC = () => {
       if (!snapshot.empty) {
         const memberDoc = snapshot.docs[0].data() as OrgMember;
         setCurrentOrgMember(memberDoc);
-        
+
         if (!activeOrgId) {
           activeOrgId = memberDoc.orgId;
           const orgRef = doc(db, 'organizations', memberDoc.orgId);
@@ -701,7 +841,7 @@ const App: React.FC = () => {
   const initAudio = () => {
     if (audioRef.current) return audioRef.current;
     const audio = new Audio();
-    
+
     const updateTime = () => setCurrentTime(audio.currentTime);
     const updateDuration = () => setDuration(audio.duration);
     const handleEnded = () => setPlaybackStatus('stopped');
@@ -754,10 +894,10 @@ const App: React.FC = () => {
       console.warn("Skipping play: No audio element or invalid metadata URL", metadata);
       return;
     }
-    
+
     const isSameSource = playbackMetadata?.url === metadata.url || (metadata.id && playbackMetadata?.id === metadata.id);
     const isSameSegment = metadata.segmentIndex === playbackMetadata?.segmentIndex;
-    
+
     if (isSameSource && playbackStatus === 'paused' && isSameSegment) {
       audio.play().catch(console.error);
       setPlaybackStatus('playing');
@@ -804,10 +944,10 @@ const App: React.FC = () => {
         console.warn("Could not acquire authorized playback token, attempting direct playback:", tokenErr);
       }
     }
-    
+
     audio.src = playUrl;
     audio.currentTime = startTime;
-    
+
     setPlaybackMetadata({ ...metadata, url: playUrl });
     setPlaybackStatus('playing');
 
@@ -851,7 +991,7 @@ const App: React.FC = () => {
     setAuthStatus(status);
     setUserProfile(profile);
     setCurrentTab(AppWorkflow.HOME);
-    
+
     if (status === AuthStatus.GUEST) {
       localStorage.setItem('guest', 'true');
       setUsageStats({
@@ -902,7 +1042,7 @@ const App: React.FC = () => {
   const sanitize = (obj: any): any => {
     if (obj === null || typeof obj !== 'object') return obj;
     if (Array.isArray(obj)) return obj.map(sanitize);
-    
+
     const newObj: any = {};
     Object.keys(obj).forEach(key => {
       if (obj[key] !== undefined) {
@@ -913,8 +1053,8 @@ const App: React.FC = () => {
   };
 
   const logProjectActivity = useCallback(async (
-    projectId: string, 
-    actionType: ProjectActivity['actionType'], 
+    projectId: string,
+    actionType: ProjectActivity['actionType'],
     description: string,
     metadata?: any
   ) => {
@@ -938,7 +1078,7 @@ const App: React.FC = () => {
 
   const saveAudioRecord = useCallback(async (record: AudioToTextRecord) => {
     console.log("💾 Saving audio record to archive...", record.id);
-    
+
     // GUEST MODE: Do not save to Firestore
     if (authStatus === AuthStatus.GUEST || localStorage.getItem('guest') === 'true') {
       setAudioHistory(prev => [record, ...prev]);
@@ -949,14 +1089,14 @@ const App: React.FC = () => {
     if (authStatus === AuthStatus.LOGGED_IN && user) {
       const groupName = record.group || 'General';
       const project = projects.find(p => p.name.toLowerCase() === groupName.toLowerCase());
-      
+
       // Extract transcript text and speakers for easier access in archive
       const transcriptText = record.transcript.map(s => s.text).join(' ');
       const speakers = Array.from(new Set(record.transcript.map(s => s.speaker)));
 
       // Filter out AI fields if they weren't selected
-      const recordWithUid = sanitize({ 
-        ...record, 
+      const recordWithUid = sanitize({
+        ...record,
         userId: user.uid,
         group: groupName,
         projectId: project?.id || null,
@@ -1006,8 +1146,8 @@ const App: React.FC = () => {
     if (authStatus === AuthStatus.LOGGED_IN && user) {
       const groupName = record.group || 'General';
       const project = projects.find(p => p.name.toLowerCase() === groupName.toLowerCase());
-      const recordWithUid = sanitize({ 
-        ...record, 
+      const recordWithUid = sanitize({
+        ...record,
         userId: user.uid,
         group: groupName,
         projectId: project?.id || null,
@@ -1192,7 +1332,7 @@ const App: React.FC = () => {
     if (!notif) return;
 
     setNotifications(prev => prev.map(n => n.id === id ? { ...n, isRead: true } : n));
-    
+
     if (authStatus === AuthStatus.LOGGED_IN && user) {
       try {
         await updateDoc(doc(db, 'notifications', id), { isRead: true });
@@ -1203,6 +1343,21 @@ const App: React.FC = () => {
 
     if (notif.link) {
       navigate(notif.link);
+    } else if (notif.projectId || notif.taskId) {
+      // Find matching project in user's authorized projects list (do not trust metadata blindly)
+      const targetProject = projects.find(p => p.id === notif.projectId || p.name === notif.projectId);
+      if (targetProject) {
+        setSelectedGroupFilter(targetProject.name);
+        if (notif.taskId) {
+          setTargetTaskId(notif.taskId);
+        } else {
+          setTargetTaskId(null);
+        }
+      } else {
+        // If unauthorized or unknown project, do not expose task from another project
+        setTargetTaskId(null);
+      }
+      setCurrentTab(AppWorkflow.COLLABORATION_DASHBOARD);
     } else if (notif.recordId) {
       setSelectedRecordId(notif.recordId);
       setCurrentTab(AppWorkflow.HISTORY);
@@ -1251,7 +1406,7 @@ const App: React.FC = () => {
         members: [],
         createdAt: new Date().toISOString()
       };
-      
+
       if (authStatus === AuthStatus.LOGGED_IN && user) {
         try {
           await setDoc(doc(db, 'projects', id), newProject);
@@ -1296,7 +1451,7 @@ const App: React.FC = () => {
 
   const renameGroup = async (oldName: string, newName: string) => {
     const project = projects.find(p => p.name === oldName);
-    if (project?.isDefault) return; 
+    if (project?.isDefault) return;
     if (project && authStatus === AuthStatus.LOGGED_IN) {
       try {
         await updateDoc(doc(db, 'projects', project.id), { name: newName });
@@ -1304,14 +1459,14 @@ const App: React.FC = () => {
         handleFirestoreError(error, OperationType.UPDATE, `projects/${project.id}`);
       }
     }
-    
+
     if (selectedGroupFilter === oldName) setSelectedGroupFilter(newName);
   };
 
   const deleteGroup = async (name: string, deleteAssets: boolean = false) => {
     const project = projects.find(p => p.name === name);
     if (project?.isDefault) return;
-    
+
     if (project && authStatus === AuthStatus.LOGGED_IN && user) {
       try {
         const idToken = await user.getIdToken();
@@ -1343,7 +1498,7 @@ const App: React.FC = () => {
         return;
       }
     }
-    
+
     if (selectedGroupFilter === name) setSelectedGroupFilter(null);
   };
 
@@ -1380,14 +1535,14 @@ const App: React.FC = () => {
         })
       });
 
-      const inviteResult = await safeApiJson<{ 
-        success: boolean; 
-        inviteToken: string; 
-        emailSent?: boolean; 
-        emailError?: string; 
-        emailErrorCode?: string; 
-        message?: string; 
-        warning?: string; 
+      const inviteResult = await safeApiJson<{
+        success: boolean;
+        inviteToken: string;
+        emailSent?: boolean;
+        emailError?: string;
+        emailErrorCode?: string;
+        message?: string;
+        warning?: string;
       }>(response);
 
       // Best-effort client-side Firestore record for offline caching/immediate UI reflection
@@ -1407,14 +1562,14 @@ const App: React.FC = () => {
       } catch (clientWriteErr) {
         console.warn("ℹ️ Client-side invite sync skipped (server authoritative):", clientWriteErr);
       }
-      
+
       const failureDetail = inviteResult.emailError || inviteResult.warning || 'email delivery failed';
       if (inviteResult.emailSent === false) {
         addToast('Invite Created (Email Undelivered)', `Invitation record created for ${email}, but the email could not be delivered: ${failureDetail}. You can copy and share the invitation link directly.`, 'info');
       } else {
         addToast('Success', `Invitation sent to ${email}`, 'success');
       }
-      
+
       addNotification({
         title: inviteResult.emailSent === false ? 'Invite Created (Email Undelivered)' : 'Invite Sent',
         message: inviteResult.emailSent === false
@@ -1466,15 +1621,15 @@ const App: React.FC = () => {
       // In this app, it seems record.transcript is a string (the full text)
       // But geminiService.summarizeTranscript expects TranscriptSegment[]
       // Let's check the type of transcript in AudioToTextRecord
-      
+
       // If it's a string, we might need a different summarizer or convert it.
       // Looking at geminiService.ts, transcribeAudio returns { transcript: TranscriptSegment[], ... }
       // And AudioToTextRecord has transcript: string; (from types.ts)
-      
+
       // Wait, let's check types.ts
       const summary = await summarizeTranscript([{ speaker: 'Speaker', text: record.transcript, startTime: 0, endTime: 0 }], userProfile.plan);
       await incrementThinkingUsage();
-      
+
       await updateAudioRecord({ ...record, summary });
       addToast('AI Action', 'Summary updated successfully!', 'success');
     } catch (error) {
@@ -1511,14 +1666,14 @@ const App: React.FC = () => {
         return <HomeView setTab={setCurrentTab} authStatus={authStatus} userProfile={userProfile} onSignInClick={handleLogout} onAddGroup={addGroup} usageStats={usageStats} />;
       case AppWorkflow.AUDIO_TO_TEXT:
         return (
-          <AudioToTextView 
-            onSave={saveAudioRecord} 
-            groups={groups} 
+          <AudioToTextView
+            onSave={saveAudioRecord}
+            groups={groups}
             projects={projects}
-            onAddGroup={addGroup} 
+            onAddGroup={addGroup}
             onInviteToProject={inviteToProject}
-            authStatus={authStatus} 
-            userProfile={userProfile} 
+            authStatus={authStatus}
+            userProfile={userProfile}
             onNewProject={() => setIsCreateProjectModalOpen(true)}
             lastCreatedProjectId={lastCreatedProjectId}
             activePlaybackId={playbackMetadata?.id}
@@ -1542,11 +1697,11 @@ const App: React.FC = () => {
         );
       case AppWorkflow.TEXT_TO_AUDIO:
         return (
-          <TextToAudioView 
-            onSave={saveTextRecord} 
-            groups={groups} 
+          <TextToAudioView
+            onSave={saveTextRecord}
+            groups={groups}
             projects={projects}
-            onAddGroup={addGroup} 
+            onAddGroup={addGroup}
             authStatus={authStatus}
             userProfile={userProfile}
             onNewProject={() => setIsCreateProjectModalOpen(true)}
@@ -1561,7 +1716,7 @@ const App: React.FC = () => {
         );
       case AppWorkflow.DECISION_INTELLIGENCE:
         return (
-          <DecisionIntelligence 
+          <DecisionIntelligence
             audioHistory={audioHistory}
             authStatus={authStatus}
             userProfile={userProfile}
@@ -1592,7 +1747,7 @@ const App: React.FC = () => {
           );
         }
         return (
-          <DecisionHistory 
+          <DecisionHistory
             userProfile={userProfile!}
             addNotification={addNotification}
             onReuse={handleReuseDecision}
@@ -1600,17 +1755,17 @@ const App: React.FC = () => {
         );
       case AppWorkflow.HISTORY:
         return (
-          <HistoryDashboard 
-            audioHistory={audioHistory} 
-            textHistory={textHistory} 
+          <HistoryDashboard
+            audioHistory={audioHistory}
+            textHistory={textHistory}
             groups={groups}
             filterGroup={selectedGroupFilter}
             authStatus={authStatus}
             userProfile={userProfile}
             onClearFilter={() => setSelectedGroupFilter(null)}
-            onUpdateAudio={updateAudioRecord} 
+            onUpdateAudio={updateAudioRecord}
             onUpdateText={updateTextRecord}
-            onDeleteAudio={deleteAudioRecord} 
+            onDeleteAudio={deleteAudioRecord}
             onDeleteText={deleteTextRecord}
             onPermanentlyDeleteAudio={permanentlyDeleteAudioRecord}
             onPermanentlyDeleteText={permanentlyDeleteTextRecord}
@@ -1671,8 +1826,32 @@ const App: React.FC = () => {
         }
         return <ProductAnalyticsView userProfile={userProfile} onBack={() => setCurrentTab(AppWorkflow.HOME)} />;
       case AppWorkflow.COLLABORATION_DASHBOARD:
+        if (isMfaWorkspaceBlocked) {
+          return (
+            <MfaWorkspaceGuard
+              orgName={currentOrg?.name || 'Your Organization'}
+              requirement={orgMfaRequirement}
+              userRole={userOrgRole}
+              isEnrolled={userMfaEnrolled}
+              onOpenMfaModal={() => {
+                setMfaChallengeDetail({
+                  code: userMfaEnrolled ? 'MFA_REQUIRED' : 'MFA_ENROLLMENT_REQUIRED',
+                  message: userMfaEnrolled
+                    ? 'Session second-factor challenge required.'
+                    : 'Two-factor authentication enrollment required by organization security policy.',
+                  mfaRequirement: orgMfaRequirement,
+                  mfaEnrolled: userMfaEnrolled,
+                  organizationId: currentOrg?.id,
+                  role: userOrgRole
+                });
+                setShowMfaPolicyModal(true);
+              }}
+              onLogout={handleLogout}
+            />
+          );
+        }
         return (
-          <CollaborationDashboard 
+          <CollaborationDashboard
             projects={projects}
             selectedProjectName={selectedGroupFilter}
             onSelectProjectName={setSelectedGroupFilter}
@@ -1684,11 +1863,37 @@ const App: React.FC = () => {
             onInviteToProject={inviteToProject}
             userOrgRole={userOrgRole}
             onUpdateAudio={updateAudioRecord}
+            targetTaskId={targetTaskId}
+            onClearTargetTaskId={() => setTargetTaskId(null)}
           />
         );
       case AppWorkflow.ORGANIZATION_DASHBOARD:
+        if (isMfaWorkspaceBlocked) {
+          return (
+            <MfaWorkspaceGuard
+              orgName={currentOrg?.name || 'Your Organization'}
+              requirement={orgMfaRequirement}
+              userRole={userOrgRole}
+              isEnrolled={userMfaEnrolled}
+              onOpenMfaModal={() => {
+                setMfaChallengeDetail({
+                  code: userMfaEnrolled ? 'MFA_REQUIRED' : 'MFA_ENROLLMENT_REQUIRED',
+                  message: userMfaEnrolled
+                    ? 'Session second-factor challenge required.'
+                    : 'Two-factor authentication enrollment required by organization security policy.',
+                  mfaRequirement: orgMfaRequirement,
+                  mfaEnrolled: userMfaEnrolled,
+                  organizationId: currentOrg?.id,
+                  role: userOrgRole
+                });
+                setShowMfaPolicyModal(true);
+              }}
+              onLogout={handleLogout}
+            />
+          );
+        }
         return (
-          <OrganizationDashboard 
+          <OrganizationDashboard
             projects={projects}
             userProfile={userProfile}
             addNotification={addNotification}
@@ -1706,7 +1911,21 @@ const App: React.FC = () => {
         {showSettings && (
           <AuthView onAuth={handleAuth} isSettingsMode onCloseSettings={() => setShowSettings(false)} onLogout={handleLogout} userProfile={userProfile} onBackToHome={handleBackToHome} />
         )}
-        
+
+        {/* MFA Policy Enforcement Modal */}
+        <MfaPolicyEnforcementModal
+          isOpen={showMfaPolicyModal}
+          onClose={() => setShowMfaPolicyModal(false)}
+          onSuccess={async () => {
+            setShowMfaPolicyModal(false);
+            await refreshMfaSessionState();
+          }}
+          onLogout={handleLogout}
+          challengeDetail={mfaChallengeDetail}
+          orgName={currentOrg?.name}
+          isMandatoryBlock={isMfaWorkspaceBlocked}
+        />
+
         {/* Project Creation Modal */}
         {isCreateProjectModalOpen && (
           <div className="fixed inset-0 bg-brand-primary/60 backdrop-blur-sm z-[300] flex items-center justify-center p-6">
@@ -1715,7 +1934,7 @@ const App: React.FC = () => {
                 <h2 className="text-brand-primary text-2xl font-semibold">Create New Project</h2>
                 <p className="text-slate-500 text-sm">Organize your assets into a new workspace.</p>
               </div>
-              
+
               <div className="space-y-4">
                 <div>
                   <label className="block text-xs font-medium text-slate-500 uppercase tracking-widest mb-2">Project Name</label>
@@ -1765,11 +1984,31 @@ const App: React.FC = () => {
           </div>
         )}
 
-        <Navigation 
-          currentTab={currentTab} 
-          setTab={(tab) => { 
-            setCurrentTab(tab); 
-            setSelectedGroupFilter(null); 
+        {/* Guided First-Login Onboarding */}
+        <OnboardingModal
+          isOpen={isOnboardingOpen}
+          userProfile={userProfile}
+          projects={projects}
+          onCreateProject={addGroup}
+          onSelectProject={(projectName) => {
+            setSelectedGroupFilter(projectName);
+          }}
+          onComplete={handleCompleteOnboarding}
+          onClose={handleDismissOnboarding}
+          onLaunchDemo={handleStartInteractiveDemo}
+        />
+
+        {/* Interactive Product Demo (Modal Fallback) */}
+        <InteractiveDemoModal
+          isOpen={isDemoOpen}
+          onClose={() => setIsDemoOpen(false)}
+        />
+
+        <Navigation
+          currentTab={currentTab}
+          setTab={(tab) => {
+            setCurrentTab(tab);
+            setSelectedGroupFilter(null);
           }}
           groups={groups}
           projects={projects}
@@ -1778,7 +2017,7 @@ const App: React.FC = () => {
           onDeleteGroup={deleteGroup}
           onInviteToProject={inviteToProject}
           selectedGroupFilter={selectedGroupFilter}
-          authStatus={authStatus} 
+          authStatus={authStatus}
           userProfile={userProfile}
           onSignInClick={handleLogin}
           onAddGroup={() => setIsCreateProjectModalOpen(true)}
@@ -1794,12 +2033,12 @@ const App: React.FC = () => {
           setIsOpen={setIsSidebarOpen}
           userOrgRole={userOrgRole}
         />
-        
+
         <main className={`flex-1 min-h-0 min-w-0 overflow-y-auto custom-scrollbar bg-brand-background relative transition-all duration-300 ${isCollapsed ? 'lg:ml-20' : 'lg:ml-64 xl:ml-72'}`}>
-          <Topbar 
-            usageStats={usageStats} 
-            userProfile={userProfile} 
-            authStatus={authStatus} 
+          <Topbar
+            usageStats={usageStats}
+            userProfile={userProfile}
+            authStatus={authStatus}
             onLogout={handleLogout}
             onOpenSettings={() => setShowSettings(true)}
             onOpenUpgrade={() => setShowUpgradeModal(true)}
@@ -1807,17 +2046,22 @@ const App: React.FC = () => {
             onSearchChange={setSearchQuery}
             showSearch={currentTab === AppWorkflow.HISTORY}
             selectedProjectName={selectedGroupFilter}
+            onSelectProjectName={setSelectedGroupFilter}
+            currentWorkflow={currentTab}
+            onNavigateWorkflow={setCurrentTab}
+            onOpenOnboarding={() => setIsOnboardingOpen(true)}
+            onOpenDemo={handleStartInteractiveDemo}
             onToggleSidebar={() => setIsSidebarOpen(!isSidebarOpen)}
             notifications={notifications}
             onMarkNotificationRead={markNotificationRead}
             onClearNotifications={clearNotifications}
           />
-          
-          <div className="w-full max-w-screen-xl mx-auto px-4 py-6 md:px-8 md:py-12 lg:px-16 lg:py-20 pb-48">
+
+          <div className="w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 md:py-10 pb-32">
             {renderContent()}
           </div>
-          
-          <GlobalPlayer 
+
+          <GlobalPlayer
             metadata={playbackMetadata}
             status={playbackStatus}
             currentTime={currentTime}
@@ -1831,20 +2075,46 @@ const App: React.FC = () => {
           />
         </main>
 
-        <div className="md:hidden fixed bottom-0 left-0 right-0 bg-white text-brand-primary flex justify-around p-4 shadow-2xl border-t border-brand-divider/20 z-30">
-          <button onClick={() => { setCurrentTab(AppWorkflow.HOME); setSelectedGroupFilter(null); }} className={`flex flex-col items-center space-y-1 ${currentTab === AppWorkflow.HOME ? 'text-brand-accent' : 'text-slate-400'}`}>
-            <i className="fa-solid fa-house"></i>
-            <span className="text-[11px] font-medium">Home</span>
+        <nav aria-label="Mobile Bottom Navigation" className="md:hidden fixed bottom-0 left-0 right-0 bg-white text-brand-primary flex justify-around p-3 shadow-2xl border-t border-brand-divider/20 z-30">
+          <button
+            type="button"
+            onClick={() => { setCurrentTab(AppWorkflow.HOME); setSelectedGroupFilter(null); }}
+            aria-current={currentTab === AppWorkflow.HOME && selectedGroupFilter === null ? 'page' : undefined}
+            className={`flex flex-col items-center space-y-1 ${currentTab === AppWorkflow.HOME && selectedGroupFilter === null ? 'text-indigo-600 font-bold' : 'text-slate-400'}`}
+          >
+            <i className="fa-solid fa-house text-base"></i>
+            <span className="text-[11px]">Home</span>
           </button>
-          <button onClick={() => { setCurrentTab(AppWorkflow.AUDIO_TO_TEXT); setSelectedGroupFilter(null); }} className={`flex flex-col items-center space-y-1 ${currentTab === AppWorkflow.AUDIO_TO_TEXT ? 'text-brand-accent' : 'text-slate-400'}`}>
-            <i className="fa-solid fa-microphone"></i>
-            <span className="text-[11px] font-medium">Transcribe</span>
+          {authStatus === AuthStatus.LOGGED_IN && (
+            <button
+              type="button"
+              onClick={() => { setCurrentTab(AppWorkflow.COLLABORATION_DASHBOARD); }}
+              aria-current={currentTab === AppWorkflow.COLLABORATION_DASHBOARD ? 'page' : undefined}
+              className={`flex flex-col items-center space-y-1 ${currentTab === AppWorkflow.COLLABORATION_DASHBOARD ? 'text-indigo-600 font-bold' : 'text-slate-400'}`}
+            >
+              <i className="fa-solid fa-folder-tree text-base"></i>
+              <span className="text-[11px]">Projects</span>
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => { setCurrentTab(AppWorkflow.AUDIO_TO_TEXT); setSelectedGroupFilter(null); }}
+            aria-current={currentTab === AppWorkflow.AUDIO_TO_TEXT ? 'page' : undefined}
+            className={`flex flex-col items-center space-y-1 ${currentTab === AppWorkflow.AUDIO_TO_TEXT ? 'text-indigo-600 font-bold' : 'text-slate-400'}`}
+          >
+            <i className="fa-solid fa-microphone text-base"></i>
+            <span className="text-[11px]">Transcribe</span>
           </button>
-          <button onClick={() => { setCurrentTab(AppWorkflow.HISTORY); setSelectedGroupFilter(null); }} className={`flex flex-col items-center space-y-1 ${currentTab === AppWorkflow.HISTORY ? 'text-brand-accent' : 'text-slate-400'}`}>
-            <i className="fa-solid fa-box-archive"></i>
-            <span className="text-[11px] font-medium">Archive</span>
+          <button
+            type="button"
+            onClick={() => { setCurrentTab(AppWorkflow.HISTORY); setSelectedGroupFilter(null); }}
+            aria-current={currentTab === AppWorkflow.HISTORY ? 'page' : undefined}
+            className={`flex flex-col items-center space-y-1 ${currentTab === AppWorkflow.HISTORY ? 'text-indigo-600 font-bold' : 'text-slate-400'}`}
+          >
+            <i className="fa-solid fa-box-archive text-base"></i>
+            <span className="text-[11px]">Archive</span>
           </button>
-        </div>
+        </nav>
       </div>
     );
   };
@@ -1852,8 +2122,8 @@ const App: React.FC = () => {
   const renderPublicPage = (content: React.ReactNode) => {
     return (
       <div className="min-h-screen flex flex-col bg-brand-background">
-        <LandingNavbar 
-          onLogin={handleLogin} 
+        <LandingNavbar
+          onLogin={handleLogin}
           onStartFree={handleStartFree}
           onGoToDashboard={handleGoToDashboard}
           authStatus={authStatus}
@@ -1871,10 +2141,10 @@ const App: React.FC = () => {
       <div className="min-h-screen bg-brand-background flex items-center justify-center">
         <div className="flex flex-col items-center space-y-6">
           <div className="w-16 h-16 bg-brand-primary rounded-2xl flex items-center justify-center text-white shadow-2xl animate-pulse overflow-hidden backdrop-blur-sm border border-white/10">
-            <img 
-              src="/Logo-2.png" 
-              alt="EchoNote" 
-              className="h-10 w-10 object-contain" 
+            <img
+              src="/Logo-2.png"
+              alt="EchoNote"
+              className="h-10 w-10 object-contain"
             />
           </div>
           <div className="flex flex-col items-center space-y-2">
@@ -1890,10 +2160,10 @@ const App: React.FC = () => {
     <>
       <ScrollToTop />
       <Toaster position="top-center" richColors />
-      
-      <SubscriptionModal 
-        isOpen={showUpgradeModal} 
-        onClose={() => setShowUpgradeModal(false)} 
+
+      <SubscriptionModal
+        isOpen={showUpgradeModal}
+        onClose={() => setShowUpgradeModal(false)}
         userProfile={userProfile}
       />
 
@@ -1908,24 +2178,24 @@ const App: React.FC = () => {
         <Route path="/privacy" element={renderPublicPage(<PrivacyPolicy />)} />
         <Route path="/terms" element={renderPublicPage(<TermsOfService />)} />
         <Route path="/security" element={renderPublicPage(<SecurityPage />)} />
-        
+
         {/* Project Invitation Route */}
         <Route path="/join" element={<JoinPage />} />
 
         {/* Organization Invitation Deep-Link Acceptance Route (Phase 1B) */}
         <Route path="/invite/accept" element={<OrgInviteAcceptPage />} />
-        
+
         {/* Auth Route */}
         <Route path="/auth" element={
           <div className="min-h-screen bg-brand-background">
             <nav className="px-6 py-4">
-              <div 
+              <div
                 className="flex items-center gap-3 cursor-pointer group w-fit"
                 onClick={handleBackToHome}
               >
-                <img 
-                  src="/Logo-2.png" 
-                  alt="EchoNote" 
+                <img
+                  src="/Logo-2.png"
+                  alt="EchoNote"
                   className="h-10 w-auto object-contain"
                 />
                 <span className="text-xl font-bold text-[#1B2A4E] tracking-tight">
@@ -1939,45 +2209,45 @@ const App: React.FC = () => {
 
         {/* App Route */}
         <Route path="/app" element={
-          authStatus === AuthStatus.LOGGED_IN || authStatus === AuthStatus.GUEST 
+          authStatus === AuthStatus.LOGGED_IN || authStatus === AuthStatus.GUEST
             ? (
               <>
                 {renderDashboard()}
                 {/* Toast Container */}
                 <div className="fixed bottom-24 right-6 z-50 flex flex-col gap-3 pointer-events-none">
                   {toasts.map(toast => (
-                    <div 
+                    <div
                       key={toast.id}
                       className={`pointer-events-auto min-w-[300px] max-w-md p-4 rounded-xl shadow-2xl border flex items-start gap-4 animate-in slide-in-from-right duration-300 ${
-                        toast.type === 'error' ? 'bg-red-50 border-red-100' : 
-                        toast.type === 'success' ? 'bg-emerald-50 border-emerald-100' : 
+                        toast.type === 'error' ? 'bg-red-50 border-red-100' :
+                        toast.type === 'success' ? 'bg-emerald-50 border-emerald-100' :
                         'bg-white border-brand-divider/20'
                       }`}
                     >
                       <div className={`mt-1 ${
-                        toast.type === 'error' ? 'text-red-500' : 
-                        toast.type === 'success' ? 'text-emerald-500' : 
+                        toast.type === 'error' ? 'text-red-500' :
+                        toast.type === 'success' ? 'text-emerald-500' :
                         'text-brand-primary'
                       }`}>
                         <i className={`fa-solid ${
-                          toast.type === 'error' ? 'fa-circle-exclamation' : 
-                          toast.type === 'success' ? 'fa-circle-check' : 
+                          toast.type === 'error' ? 'fa-circle-exclamation' :
+                          toast.type === 'success' ? 'fa-circle-check' :
                           'fa-circle-info'
                         }`}></i>
                       </div>
                       <div className="flex-1">
                         <p className={`text-[13px] font-bold ${
-                          toast.type === 'error' ? 'text-red-900' : 
-                          toast.type === 'success' ? 'text-emerald-900' : 
+                          toast.type === 'error' ? 'text-red-900' :
+                          toast.type === 'success' ? 'text-emerald-900' :
                           'text-brand-primary'
                         }`}>{toast.title}</p>
                         <p className={`text-[11px] mt-0.5 ${
-                          toast.type === 'error' ? 'text-red-700' : 
-                          toast.type === 'success' ? 'text-emerald-700' : 
+                          toast.type === 'error' ? 'text-red-700' :
+                          toast.type === 'success' ? 'text-emerald-700' :
                           'text-slate-500'
                         }`}>{toast.message}</p>
                       </div>
-                      <button 
+                      <button
                         onClick={() => setToasts(prev => prev.filter(t => t.id !== toast.id))}
                         className="text-slate-400 hover:text-slate-600 transition-colors"
                       >
@@ -1994,7 +2264,7 @@ const App: React.FC = () => {
         {/* Fallback */}
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
-      <EchoNoteAssistant 
+      <EchoNoteAssistant
         context={{
           current_page: currentTab,
           current_project: selectedGroupFilter || 'All Projects',
