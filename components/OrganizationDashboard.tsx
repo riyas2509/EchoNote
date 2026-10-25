@@ -1502,7 +1502,7 @@ export const OrganizationDashboard: React.FC<OrganizationDashboardProps> = ({
   const paginatedMembers = filteredMembers.slice((memberPage - 1) * itemsPerPage, memberPage * itemsPerPage);
 
   return (
-    <div className="p-6 max-w-7xl mx-auto space-y-8 bg-brand-background text-brand-primary min-h-screen">
+    <div className="w-full space-y-8 bg-brand-background text-brand-primary min-h-screen">
       <Toaster position="bottom-right" theme="light" />
 
       {/* Corporate Dashboard Header */}

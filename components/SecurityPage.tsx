@@ -27,6 +27,7 @@ export const SecurityPage: React.FC = () => {
     "@graph": [
       {
         "@type": "WebPage",
+        "@id": "https://echonote-25.vercel.app/security#webpage",
         "name": "EchoNote Security & Data Governance Architecture",
         "description": "Comprehensive security architecture, role-based access control, zero-training AI policy, and encryption standards for EchoNote."
       },

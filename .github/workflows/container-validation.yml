@@ -1,0 +1,126 @@
+﻿name: EchoNote Container Build and Runtime Validation
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-container:
+    name: Build & Validate Linux Container Runtime
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js LTS
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: TypeScript Type Checking
+        run: npx tsc --noEmit
+
+      - name: Application Production Build
+        run: npm run build
+
+      - name: Run Focused Container Architecture & Startup Audit Tests
+        run: |
+          npx tsx tests/test_ah192_container_validation.ts
+          npx tsx tests/test_ah193_container_ci_readiness.ts
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker Container Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          tags: echonote-backend:ci-test
+          load: true
+
+      - name: Start Test Container with Synthetic Config
+        run: |
+          docker run -d \
+            --name echonote-test-instance \
+            -p 3000:3000 \
+            -e NODE_ENV=production \
+            -e PORT=3000 \
+            -e GOOGLE_CLOUD_PROJECT=echonote-synthetic \
+            -e FIRESTORE_DATABASE_ID=echonote-synthetic-db \
+            -e FIREBASE_PROJECT_ID=echonote-synthetic \
+            -e VITE_TEST_MODE=true \
+            -e K_SERVICE=echonote-ci \
+            echonote-backend:ci-test
+
+      - name: Bounded Health Check Polling
+        run: |
+          echo "Waiting for container HTTP service to become healthy..."
+          ATTEMPTS=0
+          MAX_ATTEMPTS=30
+          HEALTHY=0
+
+          until [ $ATTEMPTS -ge $MAX_ATTEMPTS ]; do
+            STATUS_CODE=$(curl -s -o /tmp/health_out.json -w "%{http_code}" http://localhost:3000/api/health || true)
+            if [ "$STATUS_CODE" -eq 200 ]; then
+              echo "✅ Health check passed with HTTP 200 OK!"
+              cat /tmp/health_out.json
+              echo ""
+              HEALTHY=1
+              break
+            fi
+            echo "Attempt $((ATTEMPTS+1))/$MAX_ATTEMPTS: HTTP $STATUS_CODE. Retrying in 2s..."
+            ATTEMPTS=$((ATTEMPTS+1))
+            sleep 2
+          done
+
+          if [ $HEALTHY -ne 1 ]; then
+            echo "❌ Container failed to reach healthy state within timeout!"
+            echo "--- Container Status ---"
+            docker ps -a
+            echo "--- Container Logs ---"
+            docker logs echonote-test-instance
+            exit 1
+          fi
+
+      - name: Verify Health Check Payload Assertions
+        run: |
+          STATUS=$(node -e "const fs = require('fs'); const d = JSON.parse(fs.readFileSync('/tmp/health_out.json', 'utf8')); console.log(d.status);")
+          if [ "$STATUS" != "ok" ]; then
+            echo "❌ Expected status: 'ok', received: '$STATUS'"
+            exit 1
+          fi
+          echo "✅ Payload status verified as 'ok'."
+
+      - name: Verify Negative Health Check on Non-Existent Endpoint
+        run: |
+          HTTP_404=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/api/nonexistent-route || true)
+          echo "Non-existent route returned HTTP $HTTP_404"
+          if [ "$HTTP_404" -ne 404 ]; then
+            echo "❌ Expected HTTP 404 for missing endpoint, received $HTTP_404"
+            exit 1
+          fi
+          echo "✅ Negative path verified (returned HTTP 404)."
+
+      - name: Verify Graceful Shutdown & Cleanup
+        if: always()
+        run: |
+          echo "Stopping test container with SIGTERM..."
+          docker stop -t 5 echonote-test-instance || true
+          echo "--- Clean Shutdown Container Logs ---"
+          docker logs echonote-test-instance | tail -n 20 || true
+          echo "Removing test container..."
+          docker rm -f echonote-test-instance || true

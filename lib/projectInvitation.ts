@@ -346,21 +346,36 @@ export async function acceptProjectInvitation(
       ownerId: initialInviteData.ownerId || null,
       projectName: initialInviteData.projectName || "EchoNote Workspace",
       role: initialInviteData.role || "viewer",
+      status: "active",
       joinedAt: FieldValue.serverTimestamp()
     };
 
     // 7. Atomic transaction: create member record & transition invite to accepted
+    let isAlreadyAcceptedBySameUser = false;
     if (targetInviteRef) {
       try {
         await db.runTransaction(async (transaction) => {
           const freshInviteSnap = await transaction.get(targetInviteRef!);
+          const freshMemberSnap = await transaction.get(memberDocRef);
+
           if (!freshInviteSnap.exists) {
             throw new Error("INVITE_NOT_FOUND");
           }
           const freshInvite = freshInviteSnap.data() || {};
           const freshStatus = String(freshInvite.status || "pending").toLowerCase();
           if (freshStatus !== "pending") {
-            if (freshStatus === "accepted") throw new Error("ALREADY_ACCEPTED");
+            if (freshStatus === "accepted") {
+              const isSameRecipient = (freshInvite.acceptedBy && freshInvite.acceptedBy === userId) ||
+                (freshInvite.email && freshInvite.email.toLowerCase().trim() === userEmail.toLowerCase().trim()) ||
+                (freshInvite.acceptedUserEmail && freshInvite.acceptedUserEmail.toLowerCase().trim() === userEmail.toLowerCase().trim());
+              if (isSameRecipient) {
+                // Concurrent or repeated acceptance by same user: ensure member record is active
+                transaction.set(memberDocRef, memberRecord, { merge: true });
+                isAlreadyAcceptedBySameUser = true;
+                return;
+              }
+              throw new Error("ALREADY_ACCEPTED");
+            }
             if (freshStatus === "cancelled" || freshStatus === "revoked" || freshStatus === "rejected") throw new Error("CANCELLED");
             if (freshStatus === "expired") throw new Error("EXPIRED");
             throw new Error("INVALID_STATUS");
@@ -377,6 +392,20 @@ export async function acceptProjectInvitation(
             acceptedUserEmail: userEmail
           });
         });
+
+        if (isAlreadyAcceptedBySameUser) {
+          return {
+            status: 200,
+            body: {
+              success: true,
+              alreadyMember: true,
+              message: "You have already joined this project.",
+              projectId: initialInviteData.projectId,
+              projectName: initialInviteData.projectName || "EchoNote Workspace",
+              role: initialInviteData.role || "viewer"
+            }
+          };
+        }
       } catch (txErr: any) {
         if (txErr.message === "ALREADY_ACCEPTED") {
           return { status: 400, body: { error: "Invalid invitation", message: "This invitation has already been accepted.", status: "accepted" } };
@@ -457,7 +486,7 @@ export async function acceptProjectInvitation(
       } catch (auditErr) {}
     }
 
-    if (appUrl) {
+    if (appUrl && !isAlreadyAcceptedBySameUser) {
       try {
         await emailService.sendWelcome(userEmail, {
           name: effectiveDisplayName,

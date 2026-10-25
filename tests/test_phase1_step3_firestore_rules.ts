@@ -256,13 +256,10 @@ export class FirestoreRulesEngine {
       return { allowed: false, reason: "Default Deny: Unlisted collection" };
     }
 
-    // Unauthenticated global check (except public healthcheck or token validation endpoints)
+    // Unauthenticated global check (except public healthcheck or telemetry endpoints)
     if (!isAuth) {
       if (collection === 'healthcheck' || collection === 'test') {
         if (operation === 'get' || operation === 'list') return { allowed: true, reason: "Public read" };
-      }
-      if (collection === 'invites' && operation === 'get') {
-        return { allowed: true, reason: "Public invite token lookup" };
       }
       if (collection === 'productEvents' && operation === 'create') {
         return { allowed: true, reason: "Anonymous telemetry allowed" };
@@ -518,9 +515,18 @@ export class FirestoreRulesEngine {
     // ==========================================
     if (collection === 'invites') {
       const projectId = incomingData?.projectId || existingData?.projectId;
-      if (operation === 'get') return { allowed: true, reason: "Public invite lookup" };
+      if (operation === 'get') {
+        const isVerifiedRecipient = Boolean(
+          context.auth?.token?.email_verified === true &&
+          context.auth?.token?.email &&
+          existingData?.email &&
+          context.auth.token.email.toLowerCase().trim() === existingData.email.toLowerCase().trim()
+        );
+        const allowed = isAdmin || (projectId && this.evalIsProjectAdmin(context, projectId)) || isVerifiedRecipient;
+        return { allowed: Boolean(allowed), reason: allowed ? "Invite read allowed" : "Denied" };
+      }
       if (operation === 'list') {
-        const allowed = isAdmin || (projectId && this.evalCanViewProject(context, projectId));
+        const allowed = isAdmin || (projectId && this.evalIsProjectAdmin(context, projectId));
         return { allowed: Boolean(allowed), reason: allowed ? "Invite list allowed" : "Denied" };
       }
       if (operation === 'create') {

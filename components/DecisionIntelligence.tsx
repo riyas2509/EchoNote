@@ -182,7 +182,7 @@ const DecisionIntelligence: React.FC<DecisionIntelligenceProps> = ({
   };
 
   return (
-    <div className="max-w-5xl mx-auto py-8 px-6 space-y-10 animate-in fade-in duration-500 pb-40">
+    <div className="w-full space-y-8 animate-in fade-in duration-500 pb-20">
       {/* Header */}
       <div className="space-y-2">
         <div className="flex items-center space-x-3">

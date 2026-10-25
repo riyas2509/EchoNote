@@ -137,7 +137,8 @@ export async function initiateEnterpriseSignIn(
 export async function validateEnterpriseAuthSession(
   user: User,
   discovery?: AuthDiscoveryResult | null,
-  apiUrlBase?: string
+  apiUrlBase?: string,
+  extraEvidence?: { idToken?: string; credentialToken?: string }
 ): Promise<EnterpriseValidationResult> {
   const endpoint = apiUrlBase 
     ? `${apiUrlBase.replace(/\/+$/, '')}/api/auth/sso/validate`
@@ -146,6 +147,8 @@ export async function validateEnterpriseAuthSession(
   const response = await apiFetch(endpoint, {
     method: "POST",
     body: JSON.stringify({
+      idToken: extraEvidence?.idToken,
+      credentialToken: extraEvidence?.credentialToken,
       orgId: discovery?.orgId,
       providerId: discovery ? resolveProviderId(discovery) : undefined,
       protocol: discovery?.ssoProtocol,

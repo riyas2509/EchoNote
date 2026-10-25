@@ -24,8 +24,9 @@ import {
   Shield,
   FileText
 } from 'lucide-react';
-import { db, auth, collection, doc, setDoc, getDocs, onSnapshot, updateDoc, deleteDoc } from '../firebase';
+import { auth } from '../firebase';
 import { logAction } from '../services/auditService';
+import { getApiBaseUrl, getAuthHeaders, parseApiResponse } from '../lib/apiClient';
 import { Toaster, toast } from 'sonner';
 
 interface IntegrationsViewProps {
@@ -173,10 +174,11 @@ export const IntegrationsView: React.FC<IntegrationsViewProps> = ({ organization
     }
   ];
 
-  // Load Configurations and state in real-time from Firestore
+  // Load Configurations and state securely via authenticated server endpoints
   useEffect(() => {
     if (!organization?.id) return;
 
+    let isMounted = true;
     setLoading(true);
 
     if (!auth?.currentUser) {
@@ -193,42 +195,58 @@ export const IntegrationsView: React.FC<IntegrationsViewProps> = ({ organization
       setOauthClients([]);
       setLoading(false);
 
-      return () => {};
+      return () => { isMounted = false; };
     }
 
-    // Listen to integrations subcollection
-    const unsub = onSnapshot(collection(db, 'organizations', organization.id, 'integrations'), (snap) => {
-      const states: Record<string, any> = {};
-      
-      // Seed default disconnected state first
-      availableIntegrations.forEach(item => {
-        states[item.id] = { enabled: false, status: 'disconnected', config: {} };
-      });
+    const fetchIntegrations = async () => {
+      try {
+        const baseUrl = getApiBaseUrl();
+        const headers = await getAuthHeaders();
+        const res = await fetch(`${baseUrl}/api/organizations/${organization.id}/integrations`, {
+          headers
+        });
+        const parsed = await parseApiResponse(res);
 
-      // Overlay database configurations
-      snap.docs.forEach(doc => {
-        states[doc.id] = doc.data();
-      });
+        if (parsed.ok && parsed.data && parsed.data.integrations) {
+          if (!isMounted) return;
+          const serverIntegrations = parsed.data.integrations;
+          const states: Record<string, any> = {};
 
-      setIntegrationStates(states);
+          availableIntegrations.forEach(item => {
+            states[item.id] = serverIntegrations[item.id] || { enabled: false, status: 'disconnected', config: {} };
+          });
 
-      // Extract specific configurations for the lists
-      const webhooksConfig = states['webhooks']?.config?.endpoints || [];
-      setWebhooks(webhooksConfig);
+          setIntegrationStates(states);
 
-      const restKeysConfig = states['rest-api']?.config?.keys || [];
-      setApiKeys(restKeysConfig);
+          const webhooksConfig = states['webhooks']?.config?.endpoints || [];
+          setWebhooks(webhooksConfig);
 
-      const oauthClientsConfig = states['oauth-clients']?.config?.clients || [];
-      setOauthClients(oauthClientsConfig);
+          const restKeysConfig = states['rest-api']?.config?.keys || [];
+          setApiKeys(restKeysConfig);
 
-      setLoading(false);
-    }, (err) => {
-      console.error("Error reading integrations:", err);
-      setLoading(false);
-    });
+          const oauthClientsConfig = states['oauth-clients']?.config?.clients || [];
+          setOauthClients(oauthClientsConfig);
+        } else {
+          // If server returns error, populate defaults cleanly
+          if (!isMounted) return;
+          const states: Record<string, any> = {};
+          availableIntegrations.forEach(item => {
+            states[item.id] = { enabled: false, status: 'disconnected', config: {} };
+          });
+          setIntegrationStates(states);
+        }
+      } catch (err: any) {
+        console.error("Error reading sanitized integrations from server:", err);
+      } finally {
+        if (isMounted) setLoading(false);
+      }
+    };
 
-    return () => unsub();
+    fetchIntegrations();
+
+    return () => {
+      isMounted = false;
+    };
   }, [organization?.id]);
 
   const toggleSecret = (id: string) => {
@@ -258,13 +276,31 @@ export const IntegrationsView: React.FC<IntegrationsViewProps> = ({ organization
         return;
       }
 
-      await setDoc(doc(db, 'organizations', organization.id, 'integrations', id), {
-        id,
-        enabled: nextEnabled,
-        status: nextStatus,
-        config: existingConfig,
-        updatedAt: new Date().toISOString()
-      }, { merge: true });
+      const baseUrl = getApiBaseUrl();
+      const headers = await getAuthHeaders();
+      const res = await fetch(`${baseUrl}/api/organizations/${organization.id}/integrations/${id}`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          enabled: nextEnabled,
+          status: nextStatus,
+          config: existingConfig
+        })
+      });
+
+      const parsed = await parseApiResponse(res);
+      if (!parsed.ok) {
+        throw new Error(parsed.error || "Failed to toggle integration");
+      }
+
+      setIntegrationStates(prev => ({
+        ...prev,
+        [id]: {
+          ...prev[id],
+          enabled: nextEnabled,
+          status: nextStatus
+        }
+      }));
 
       await logAction(organization.id, {
         action: nextEnabled ? 'Integration Enabled' : 'Integration Disabled',
@@ -308,13 +344,37 @@ export const IntegrationsView: React.FC<IntegrationsViewProps> = ({ organization
         return;
       }
 
-      await setDoc(doc(db, 'organizations', organization.id, 'integrations', configuringId), {
-        id: configuringId,
-        enabled: true,
-        status: 'connected',
-        config: formData,
-        updatedAt: new Date().toISOString()
-      }, { merge: true });
+      const baseUrl = getApiBaseUrl();
+      const headers = await getAuthHeaders();
+      const res = await fetch(`${baseUrl}/api/organizations/${organization.id}/integrations/${configuringId}`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          enabled: true,
+          status: 'connected',
+          config: formData
+        })
+      });
+
+      const parsed = await parseApiResponse(res);
+      if (!parsed.ok) {
+        if (parsed.status === 422 && parsed.data?.error === "ENCRYPTION_KEY_REQUIRED") {
+          toast.error("Server Encryption Key Required: Secret cannot be stored until INTEGRATION_ENCRYPTION_KEY is configured.");
+          return;
+        }
+        throw new Error(parsed.error || "Failed to save configuration");
+      }
+
+      const returnedIntegration = parsed.data?.integration;
+      setIntegrationStates(prev => ({
+        ...prev,
+        [configuringId]: {
+          ...prev[configuringId],
+          enabled: true,
+          status: 'connected',
+          config: returnedIntegration?.config || formData
+        }
+      }));
 
       await logAction(organization.id, {
         action: 'Integration Configured',
@@ -366,13 +426,33 @@ export const IntegrationsView: React.FC<IntegrationsViewProps> = ({ organization
         return;
       }
 
-      await setDoc(doc(db, 'organizations', organization.id, 'integrations', 'webhooks'), {
-        id: 'webhooks',
-        enabled: true,
-        status: 'connected',
-        config: { endpoints: updatedWebhooks },
-        updatedAt: new Date().toISOString()
-      }, { merge: true });
+      const baseUrl = getApiBaseUrl();
+      const headers = await getAuthHeaders();
+      const res = await fetch(`${baseUrl}/api/organizations/${organization.id}/integrations/webhooks`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          enabled: true,
+          status: 'connected',
+          config: { endpoints: updatedWebhooks }
+        })
+      });
+
+      const parsed = await parseApiResponse(res);
+      if (!parsed.ok) {
+        throw new Error(parsed.error || "Failed to add webhook");
+      }
+
+      setWebhooks(updatedWebhooks);
+      setIntegrationStates(prev => ({
+        ...prev,
+        webhooks: {
+          ...prev.webhooks,
+          enabled: true,
+          status: 'connected',
+          config: { endpoints: updatedWebhooks }
+        }
+      }));
 
       await logAction(organization.id, {
         action: 'Webhook Added',
@@ -408,11 +488,31 @@ export const IntegrationsView: React.FC<IntegrationsViewProps> = ({ organization
         return;
       }
 
-      await setDoc(doc(db, 'organizations', organization.id, 'integrations', 'webhooks'), {
-        id: 'webhooks',
-        config: { endpoints: updatedWebhooks },
-        updatedAt: new Date().toISOString()
-      }, { merge: true });
+      const baseUrl = getApiBaseUrl();
+      const headers = await getAuthHeaders();
+      const res = await fetch(`${baseUrl}/api/organizations/${organization.id}/integrations/webhooks`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          enabled: updatedWebhooks.length > 0,
+          status: updatedWebhooks.length > 0 ? 'connected' : 'disconnected',
+          config: { endpoints: updatedWebhooks }
+        })
+      });
+
+      const parsed = await parseApiResponse(res);
+      if (!parsed.ok) {
+        throw new Error(parsed.error || "Deletion failed");
+      }
+
+      setWebhooks(updatedWebhooks);
+      setIntegrationStates(prev => ({
+        ...prev,
+        webhooks: {
+          ...prev.webhooks,
+          config: { endpoints: updatedWebhooks }
+        }
+      }));
 
       await logAction(organization.id, {
         action: 'Webhook Deleted',
@@ -466,13 +566,33 @@ export const IntegrationsView: React.FC<IntegrationsViewProps> = ({ organization
         return;
       }
 
-      await setDoc(doc(db, 'organizations', organization.id, 'integrations', 'rest-api'), {
-        id: 'rest-api',
-        enabled: true,
-        status: 'connected',
-        config: { keys: updatedKeys },
-        updatedAt: new Date().toISOString()
-      }, { merge: true });
+      const baseUrl = getApiBaseUrl();
+      const headers = await getAuthHeaders();
+      const res = await fetch(`${baseUrl}/api/organizations/${organization.id}/integrations/rest-api`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          enabled: true,
+          status: 'connected',
+          config: { keys: updatedKeys }
+        })
+      });
+
+      const parsed = await parseApiResponse(res);
+      if (!parsed.ok) {
+        throw new Error(parsed.error || "Failed to generate API key");
+      }
+
+      setApiKeys(updatedKeys);
+      setIntegrationStates(prev => ({
+        ...prev,
+        'rest-api': {
+          ...prev['rest-api'],
+          enabled: true,
+          status: 'connected',
+          config: { keys: updatedKeys }
+        }
+      }));
 
       await logAction(organization.id, {
         action: 'API Key Generated',
@@ -508,11 +628,31 @@ export const IntegrationsView: React.FC<IntegrationsViewProps> = ({ organization
         return;
       }
 
-      await setDoc(doc(db, 'organizations', organization.id, 'integrations', 'rest-api'), {
-        id: 'rest-api',
-        config: { keys: updatedKeys },
-        updatedAt: new Date().toISOString()
-      }, { merge: true });
+      const baseUrl = getApiBaseUrl();
+      const headers = await getAuthHeaders();
+      const res = await fetch(`${baseUrl}/api/organizations/${organization.id}/integrations/rest-api`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          enabled: updatedKeys.length > 0,
+          status: updatedKeys.length > 0 ? 'connected' : 'disconnected',
+          config: { keys: updatedKeys }
+        })
+      });
+
+      const parsed = await parseApiResponse(res);
+      if (!parsed.ok) {
+        throw new Error(parsed.error || "Revocation failed");
+      }
+
+      setApiKeys(updatedKeys);
+      setIntegrationStates(prev => ({
+        ...prev,
+        'rest-api': {
+          ...prev['rest-api'],
+          config: { keys: updatedKeys }
+        }
+      }));
 
       await logAction(organization.id, {
         action: 'API Key Revoked',
@@ -567,13 +707,33 @@ export const IntegrationsView: React.FC<IntegrationsViewProps> = ({ organization
         return;
       }
 
-      await setDoc(doc(db, 'organizations', organization.id, 'integrations', 'oauth-clients'), {
-        id: 'oauth-clients',
-        enabled: true,
-        status: 'connected',
-        config: { clients: updatedClients },
-        updatedAt: new Date().toISOString()
-      }, { merge: true });
+      const baseUrl = getApiBaseUrl();
+      const headers = await getAuthHeaders();
+      const res = await fetch(`${baseUrl}/api/organizations/${organization.id}/integrations/oauth-clients`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          enabled: true,
+          status: 'connected',
+          config: { clients: updatedClients }
+        })
+      });
+
+      const parsed = await parseApiResponse(res);
+      if (!parsed.ok) {
+        throw new Error(parsed.error || "Failed to create OAuth client");
+      }
+
+      setOauthClients(updatedClients);
+      setIntegrationStates(prev => ({
+        ...prev,
+        'oauth-clients': {
+          ...prev['oauth-clients'],
+          enabled: true,
+          status: 'connected',
+          config: { clients: updatedClients }
+        }
+      }));
 
       await logAction(organization.id, {
         action: 'OAuth Client Created',
@@ -610,11 +770,31 @@ export const IntegrationsView: React.FC<IntegrationsViewProps> = ({ organization
         return;
       }
 
-      await setDoc(doc(db, 'organizations', organization.id, 'integrations', 'oauth-clients'), {
-        id: 'oauth-clients',
-        config: { clients: updatedClients },
-        updatedAt: new Date().toISOString()
-      }, { merge: true });
+      const baseUrl = getApiBaseUrl();
+      const headers = await getAuthHeaders();
+      const res = await fetch(`${baseUrl}/api/organizations/${organization.id}/integrations/oauth-clients`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          enabled: updatedClients.length > 0,
+          status: updatedClients.length > 0 ? 'connected' : 'disconnected',
+          config: { clients: updatedClients }
+        })
+      });
+
+      const parsed = await parseApiResponse(res);
+      if (!parsed.ok) {
+        throw new Error(parsed.error || "Failed to revoke OAuth client");
+      }
+
+      setOauthClients(updatedClients);
+      setIntegrationStates(prev => ({
+        ...prev,
+        'oauth-clients': {
+          ...prev['oauth-clients'],
+          config: { clients: updatedClients }
+        }
+      }));
 
       await logAction(organization.id, {
         action: 'OAuth Client Revoked',

@@ -169,8 +169,8 @@ runTest('Container image is pinned to exact immutable digest URI', () => {
   assert.strictEqual(result.imageUri, expectedImage);
 });
 
-// Test 5: Literal-to-secret type conversion for all 6 sensitive variables
-runTest('Converts all 6 sensitive variables to Secret Manager references (valueFrom.secretKeyRef)', () => {
+// Test 5: Literal-to-secret type conversion for all 8 sensitive variables
+runTest('Converts all 8 sensitive variables to Secret Manager references (valueFrom.secretKeyRef)', () => {
   const result = transformServiceManifest({
     inputYamlContent: SAMPLE_EXPORTED_YAML,
     imageDigest: TARGET_DIGEST,
@@ -213,8 +213,8 @@ runTest('All 9 ordinary variables are present with correct literal values', () =
   assert.strictEqual(envList.find(e => e.name === 'RAZORPAY_TEAM_YEARLY_PLAN_ID')?.value, 'plan_TameI4cjPUzRpn');
 });
 
-// Test 7: Total variable count is exactly 15, no duplicates, zero overlap
-runTest('Total environment variable count is 15 with zero duplicates and zero overlap', () => {
+// Test 7: Total variable count is exactly 17, no duplicates, zero overlap
+runTest('Total environment variable count is 17 with zero duplicates and zero overlap', () => {
   const result = transformServiceManifest({
     inputYamlContent: SAMPLE_EXPORTED_YAML,
     imageDigest: TARGET_DIGEST,
@@ -226,10 +226,10 @@ runTest('Total environment variable count is 15 with zero duplicates and zero ov
   const parsed = YAML.parse(result.yaml);
   const envList: any[] = parsed.spec.template.spec.containers[0].env;
 
-  assert.strictEqual(envList.length, 15);
+  assert.strictEqual(envList.length, 17);
   const names = envList.map(e => e.name);
   const uniqueNames = new Set(names);
-  assert.strictEqual(uniqueNames.size, 15, 'Duplicate environment variable names detected');
+  assert.strictEqual(uniqueNames.size, 17, 'Duplicate environment variable names detected');
 });
 
 // Test 8: Traffic is 100% pinned strictly to serving revision (0% to new revision)
@@ -616,8 +616,8 @@ runTest('Strips stale run.googleapis.com/sources annotations from metadata and t
   assert.strictEqual(doc.spec.template.metadata.annotations['run.googleapis.com/execution-environment'], 'gen2', 'Other template annotations preserved');
 });
 
-// Test 31: echonote-prod preserves all 15 environment entries and 6 secret mappings
-runTest('echonote-prod preserves all 15 environment entries and 6 secret mappings', () => {
+// Test 31: echonote-prod preserves all 17 environment entries and 8 secret mappings
+runTest('echonote-prod preserves all 17 environment entries and 8 secret mappings', () => {
   const prodYaml = SAMPLE_EXPORTED_YAML.replace('name: echonote', 'name: echonote-prod');
   const result = transformServiceManifest({
     inputYamlContent: prodYaml,
@@ -628,12 +628,12 @@ runTest('echonote-prod preserves all 15 environment entries and 6 secret mapping
   });
 
   assert.strictEqual(result.ordinaryVarCount, 9);
-  assert.strictEqual(result.secretVarCount, 6);
+  assert.strictEqual(result.secretVarCount, 8);
   const doc = YAML.parse(result.yaml);
   const env = doc.spec.template.spec.containers[0].env;
-  assert.strictEqual(env.length, 15);
+  assert.strictEqual(env.length, 17);
   const secretEntries = env.filter((e: any) => e.valueFrom?.secretKeyRef);
-  assert.strictEqual(secretEntries.length, 6);
+  assert.strictEqual(secretEntries.length, 8);
   const ordinaryEntries = env.filter((e: any) => e.value !== undefined);
   assert.strictEqual(ordinaryEntries.length, 9);
 });

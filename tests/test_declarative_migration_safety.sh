@@ -75,11 +75,19 @@ if [ "\$1" = "run" ] && [ "\$2" = "services" ] && [ "\$3" = "describe" ]; then
     exit 0
   fi
   if [[ "\$*" == *"status.traffic[0].revisionName"* ]]; then
-    echo "${mock_serving_traffic%% *}"
+    if [ -f "$MOCK_BIN/.post_replace_traffic" ]; then
+      cat "$MOCK_BIN/.post_replace_traffic" | awk '{print \$1}'
+    else
+      echo "${mock_serving_traffic%% *}"
+    fi
     exit 0
   fi
   if [[ "\$*" == *"status.traffic[0].percent"* ]]; then
-    echo "${mock_serving_traffic##* }"
+    if [ -f "$MOCK_BIN/.post_replace_traffic" ]; then
+      cat "$MOCK_BIN/.post_replace_traffic" | awk '{print \$2}'
+    else
+      echo "${mock_serving_traffic##* }"
+    fi
     exit 0
   fi
   if [[ "\$*" == *"status.latestCreatedRevisionName"* ]]; then
@@ -92,6 +100,9 @@ fi
 
 if [ "\$1" = "run" ] && [ "\$2" = "services" ] && [ "\$3" = "replace" ]; then
   echo "MOCK_GCLOUD_SERVICES_REPLACE_INVOKED: \$*"
+  if [ -f "$MOCK_BIN/.simulate_replace_traffic_shift" ]; then
+    cp "$MOCK_BIN/.simulate_replace_traffic_shift" "$MOCK_BIN/.post_replace_traffic"
+  fi
   exit 0
 fi
 
@@ -338,10 +349,12 @@ assert_test "Migrate Inv 17: Aborts if new revision container image digest misma
 assert_absent "Migrate Inv 17b: No traffic shift on image digest mismatch" \
   "MOCK_GCLOUD_SERVICES_UPDATE_TRAFFIC_INVOKED" "$OUT_MISMATCH"
 
-# Premature traffic shift detection
-setup_mock_gcloud "echonote-2509" "echonote-00010-xyz 100" "echonote-00010-xyz" "True"
+# Premature traffic shift detection (service replace accidentally shifted traffic to new revision)
+setup_mock_gcloud "echonote-2509" "echonote-00009-w5m 100" "echonote-00010-xyz" "True"
+echo "echonote-00010-xyz 100" > "$MOCK_BIN/.simulate_replace_traffic_shift"
 OUT_TRAFFIC_ERR=$(PATH="$MOCK_BIN:$PATH" "$MIGRATE_SCRIPT" prepare --digest="$VALID_TEST_DIGEST" 2>&1)
 EXIT_TRAFFIC_ERR=$?
+rm -f "$MOCK_BIN/.simulate_replace_traffic_shift" "$MOCK_BIN/.post_replace_traffic"
 assert_test "Migrate Inv 18: Alerts and aborts if traffic shifted prematurely" \
   "nonzero" "CRITICAL SAFETY ALERT: Traffic allocation mismatch" "$EXIT_TRAFFIC_ERR" "$OUT_TRAFFIC_ERR"
 

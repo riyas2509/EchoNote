@@ -524,7 +524,7 @@ export const AdminTrackerView: React.FC<AdminTrackerViewProps> = ({ userProfile,
   };
 
   return (
-    <div className="space-y-8 animate-in fade-in duration-500 max-w-7xl mx-auto px-4 py-6">
+    <div className="w-full space-y-8 animate-in fade-in duration-500">
       {/* Admin Title Block */}
       <div className="flex flex-col md:flex-row md:items-center justify-between pb-6 border-b border-slate-200 gap-4">
         <div>

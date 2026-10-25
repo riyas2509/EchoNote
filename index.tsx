@@ -4,6 +4,7 @@ import ReactDOM from 'react-dom/client';
 import { BrowserRouter } from 'react-router-dom';
 import App from './App';
 import { FirebaseProvider } from './components/FirebaseProvider';
+import { DemoWorkspaceProvider } from './lib/demoStateManager';
 
 interface ErrorProps {
   children: ReactNode;
@@ -24,17 +25,20 @@ class AppErrorBoundary extends Component<any, any> {
   }
 
   public static getDerivedStateFromError(error: Error) {
-    return { hasError: true, error };
+    const errorId = Math.random().toString(36).substring(2, 8).toUpperCase();
+    return { hasError: true, error, errorId };
   }
 
   public componentDidCatch(error: Error, errorInfo: ErrorInfo) {
-    console.error('Uncaught error:', error, errorInfo);
+    const errorId = (this as any).state?.errorId || 'UNKNOWN';
+    console.error(`[AppErrorBoundary Error ID: ${errorId}]:`, error, errorInfo);
   }
 
   public render() {
     if ((this as any).state.hasError) {
       let errorMessage = "We've encountered an unexpected issue. Our team has been notified.";
       let isFirestoreError = false;
+      const errorId = (this as any).state.errorId || 'ERR';
 
       try {
         if ((this as any).state.error?.message) {
@@ -77,7 +81,7 @@ class AppErrorBoundary extends Component<any, any> {
             </div>
 
             <p className="text-[10px] text-slate-400 font-medium uppercase tracking-widest">
-              Error ID: {Math.random().toString(36).substring(7).toUpperCase()}
+              Error ID: {errorId}
             </p>
           </div>
         </div>
@@ -98,9 +102,11 @@ root.render(
   <React.StrictMode>
     <AppErrorBoundary>
       <FirebaseProvider>
-        <BrowserRouter>
-          <App />
-        </BrowserRouter>
+        <DemoWorkspaceProvider>
+          <BrowserRouter>
+            <App />
+          </BrowserRouter>
+        </DemoWorkspaceProvider>
       </FirebaseProvider>
     </AppErrorBoundary>
   </React.StrictMode>

@@ -14,3 +14,10 @@ yarn-error.log*
 *.tmp
 /tmp*
 tmp/
+*.zip
+tests/
+docs/
+*.patch
+*.sha256
+.vercel
+

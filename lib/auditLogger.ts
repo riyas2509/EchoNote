@@ -25,6 +25,9 @@ export interface AuthAuditLogEvent {
     | 'PROJECT_INVITE_EXPIRED'
     | 'PROJECT_DELETED'
     | 'RECORDING_ACCESS_EVALUATION'
+    | 'RECORDING_TRIMMED'
+    | 'RECORDING_ASSOCIATION_REMOVED'
+    | 'RECORDING_ASSOCIATION_ADDED'
     | 'AI_RESOURCE_GATEWAY_CHECK';
   action: string;
   status: 'denied' | 'allowed' | 'warning';

@@ -127,7 +127,11 @@ export const SmartRecapModal: React.FC<SmartRecapModalProps> = ({
           ) : (
             <>
               {/* Executive 3-Bullet Section */}
-              <div className="space-y-3">
+              <div 
+                data-tour="smart-recap-section"
+                data-tour-transcript="meeting-transcript-section"
+                className="space-y-3"
+              >
                 <div className="flex items-center justify-between border-b border-slate-100 pb-2">
                   <div className="flex items-center gap-2">
                     <Target className="w-4 h-4 text-indigo-600" />
@@ -169,8 +173,12 @@ export const SmartRecapModal: React.FC<SmartRecapModalProps> = ({
                 </div>
               </div>
 
-              {/* Tagged Team Members Section */}
-              <div className="space-y-3 pt-2">
+              {/* Tagged Team Members & Action Items Section */}
+              <div 
+                data-tour="meeting-action-items"
+                data-tour-action-items="meeting-action-items"
+                className="space-y-3 pt-2"
+              >
                 <div className="flex items-center justify-between border-b border-slate-100 pb-2">
                   <div className="flex items-center gap-2">
                     <Users className="w-4 h-4 text-purple-600" />

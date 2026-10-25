@@ -1,6 +1,6 @@
 
 import React, { useState, useMemo, useEffect, useRef } from 'react';
-import { Sparkles, GripVertical, Folder, FolderInput, FolderPlus, ArrowRight } from 'lucide-react';
+import { Sparkles, GripVertical, Folder, FolderInput, FolderPlus, ArrowRight, Scissors, Layers, FileText } from 'lucide-react';
 import { AudioToTextRecord, TextToAudioRecord, TranscriptSegment, ReadStatus, CollaborationRole, PlaybackMetadata, PlaybackStatus, Bookmark, AuthStatus, UserProfile, Project, UsageStats, StrategicAnalysis, UnifiedMeetingIntelligence, ExecutionTracker, OrgRole, ProductEventName } from '../types';
 import { executeDownload, generateTranscriptBlob } from '../services/downloadService';
 import { analyzeStrategically, processUnifiedMeetingIntelligence, generateSmartRecap } from '../services/geminiService';
@@ -12,6 +12,9 @@ import ExecutionTrackerView from './ExecutionTrackerView';
 import SmartReminderView from './SmartReminderView';
 import UnresolvedTopicsDetector from './UnresolvedTopicsDetector';
 import { SmartRecapModal } from './SmartRecapModal';
+import { AudioTrimmerModal } from './AudioTrimmerModal';
+import { ReportExportModal } from './ReportExportModal';
+import { getRecordingProjects, addRecordingToProject, removeRecordingFromProject } from '../lib/apiClient';
 
 interface HistoryDashboardProps {
   audioHistory: AudioToTextRecord[];
@@ -105,6 +108,186 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
   const [smartRecapRecord, setSmartRecapRecord] = useState<AudioToTextRecord | null>(null);
   const [isSmartRecapOpen, setIsSmartRecapOpen] = useState(false);
   const [isGeneratingRecap, setIsGeneratingRecap] = useState(false);
+
+  // Audio Trimming Modal State
+  const [trimmerRecord, setTrimmerRecord] = useState<AudioToTextRecord | null>(null);
+
+  // AH.184: Report Export Modal State
+  const [reportRecord, setReportRecord] = useState<AudioToTextRecord | null>(null);
+  const [isReportModalOpen, setIsReportModalOpen] = useState<boolean>(false);
+
+  // AH.183: Multi-Project Recording Association State
+  const [assocRecord, setAssocRecord] = useState<AudioToTextRecord | null>(null);
+  const [assocProjects, setAssocProjects] = useState<any[]>([]);
+  const [isAssocLoading, setIsAssocLoading] = useState<boolean>(false);
+  const [assocActionPending, setAssocActionPending] = useState<boolean>(false);
+  const [assocSelectedNewProjId, setAssocSelectedNewProjId] = useState<string>('');
+  const [assocErrorMessage, setAssocErrorMessage] = useState<string | null>(null);
+
+  const openMultiProjectModal = async (record: AudioToTextRecord) => {
+    setAssocRecord(record);
+    setAssocProjects([]);
+    setAssocSelectedNewProjId('');
+    setAssocErrorMessage(null);
+    setIsAssocLoading(true);
+
+    try {
+      const res = await getRecordingProjects(record.id);
+      if (res.ok && res.data) {
+        setAssocProjects(res.data.projects || []);
+      } else {
+        setAssocErrorMessage(res.error || 'Failed to fetch associated projects');
+      }
+    } catch (err: any) {
+      setAssocErrorMessage(err?.message || 'Failed to fetch associated projects');
+    } finally {
+      setIsAssocLoading(false);
+    }
+  };
+
+  const handleAddProjectAssociation = async () => {
+    if (!assocRecord || !assocSelectedNewProjId) return;
+    setAssocActionPending(true);
+    setAssocErrorMessage(null);
+
+    try {
+      const res = await addRecordingToProject(assocRecord.id, assocSelectedNewProjId);
+      if (res.ok && res.data) {
+        setAssocProjects(res.data.projects || []);
+        setAssocSelectedNewProjId('');
+        // Update local record
+        const updatedRec: AudioToTextRecord = {
+          ...assocRecord,
+          projectIds: res.data.projectIds,
+          projectId: res.data.primaryProjectId || assocRecord.projectId
+        };
+        setAssocRecord(updatedRec);
+        onUpdateAudio(updatedRec);
+        addNotification({
+          title: 'Project Associated',
+          message: res.data.message || 'Recording associated with project.',
+          type: 'success'
+        });
+      } else {
+        setAssocErrorMessage(res.error || 'Failed to associate project');
+      }
+    } catch (err: any) {
+      setAssocErrorMessage(err?.message || 'Failed to associate project');
+    } finally {
+      setAssocActionPending(false);
+    }
+  };
+
+  const handleRemoveProjectAssociation = async (targetProjectId: string) => {
+    if (!assocRecord || !targetProjectId) return;
+    setAssocActionPending(true);
+    setAssocErrorMessage(null);
+
+    try {
+      const res = await removeRecordingFromProject(assocRecord.id, targetProjectId);
+      if (res.ok && res.data) {
+        setAssocProjects(res.data.projects || []);
+        const updatedRec: AudioToTextRecord = {
+          ...assocRecord,
+          projectIds: res.data.projectIds,
+          projectId: res.data.primaryProjectId || undefined
+        };
+        setAssocRecord(updatedRec);
+        onUpdateAudio(updatedRec);
+        addNotification({
+          title: 'Association Removed',
+          message: res.data.message || 'Project association removed.',
+          type: 'info'
+        });
+      } else {
+        setAssocErrorMessage(res.error || 'Failed to remove project association');
+      }
+    } catch (err: any) {
+      setAssocErrorMessage(err?.message || 'Failed to remove project association');
+    } finally {
+      setAssocActionPending(false);
+    }
+  };
+
+  // Task Conversion State
+  const [convertingTaskId, setConvertingTaskId] = useState<string | null>(null);
+
+  const handleConvertToTask = async (
+    record: AudioToTextRecord,
+    title: string,
+    sourceType: 'meeting_action_item' | 'meeting_decision',
+    sourceRef: string
+  ) => {
+    const project = (projects as Project[]).find(p => p.name === record.group || p.id === record.projectId);
+    if (!project) {
+      addNotification({
+        title: 'Project Required',
+        message: 'This meeting must be associated with a project before converting to a project task.',
+        type: 'warning'
+      });
+      return;
+    }
+
+    const itemKey = `${record.id}_${sourceRef}`;
+    setConvertingTaskId(itemKey);
+    try {
+      const payload: any = {
+        title,
+        description: `Generated from meeting "${record.fileName || 'Meeting'}" (${sourceType === 'meeting_action_item' ? 'Action Item' : 'Decision'})`,
+        priority: 'medium',
+        status: 'pending',
+        sourceType,
+        sourceMeetingSessionId: record.id,
+        sourceRecordingId: record.id,
+        isAiSuggested: true,
+        createdBy: userProfile?.email || 'user'
+      };
+
+      if (sourceType === 'meeting_decision') {
+        payload.sourceDecisionId = sourceRef;
+      } else {
+        payload.sourceActionItem = sourceRef;
+      }
+
+      const token = await userProfile?.getIdToken?.();
+      const res = await fetch(`/api/projects/${project.id}/tasks`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {})
+        },
+        body: JSON.stringify(payload)
+      });
+
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.message || data.error || 'Failed to convert item to task');
+      }
+
+      if (data.reused) {
+        addNotification({
+          title: 'Existing Task Linked',
+          message: `Reused existing task "${data.task.title}" (Status: ${data.task.status})`,
+          type: 'info'
+        });
+      } else {
+        addNotification({
+          title: 'Task Created',
+          message: `Converted "${title.slice(0, 35)}..." to a project task in ${project.name}.`,
+          type: 'success'
+        });
+      }
+    } catch (err: any) {
+      console.error('Task conversion error:', err);
+      addNotification({
+        title: 'Conversion Failed',
+        message: err.message || 'Unable to create project task from item.',
+        type: 'error'
+      });
+    } finally {
+      setConvertingTaskId(null);
+    }
+  };
 
   const handleTriggerSmartRecap = async (record: AudioToTextRecord) => {
     setSmartRecapRecord(record);
@@ -299,21 +482,41 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
       return true;
     };
 
-    const isMemberOfProject = (groupName: string) => {
+    const isMemberOfProject = (groupName: string, projId?: string, projIds?: string[]) => {
       if (groupName === 'General') return true;
-      const project = (projects as Project[]).find(p => p.name === groupName);
+      const project = (projects as Project[]).find(p => 
+        (projId && p.id === projId) || 
+        (projIds && projIds.includes(p.id)) || 
+        p.name === groupName
+      );
       if (!project) return true; // Default for legacy
       if (project.ownerEmail === userProfile?.email) return true;
       return project.members?.some(m => m.email === userProfile?.email);
     };
 
-    const matchesProject = (group: string | undefined) => {
-      const g = group || 'General';
-      const projectExists = (projects as Project[]).some(p => p.name === g);
+    const matchesProject = (item: any) => {
+      const g = item?.group || 'General';
+      const projId = item?.projectId;
+      const projIds: string[] = Array.isArray(item?.projectIds) ? item.projectIds : [];
+      
+      const projectExists = (projects as Project[]).some(p => 
+        (projId && p.id === projId) || 
+        projIds.includes(p.id) || 
+        p.name === g
+      );
       const effectiveGroup = projectExists ? g : 'General';
       
-      if (!isMemberOfProject(effectiveGroup)) return false;
+      if (!isMemberOfProject(effectiveGroup, projId, projIds)) return false;
       if (projectFilter === 'all') return true;
+      
+      // Matches if filter equals effectiveGroup, primary projectId, or any associated projectId
+      const filterProj = (projects as Project[]).find(p => p.name === projectFilter || p.id === projectFilter);
+      if (filterProj) {
+        if (projId && projId === filterProj.id) return true;
+        if (projIds.includes(filterProj.id)) return true;
+        if (effectiveGroup === filterProj.name) return true;
+        return false;
+      }
       return effectiveGroup === projectFilter;
     };
 
@@ -342,8 +545,8 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
     };
 
     if (activeTab === 'trash') {
-      const deletedAudio = audioHistory.filter(h => h.deletedAt && matchesProject(h.group) && isWithinDateRange(h.date) && matchesSearch(h));
-      const deletedText = textHistory.filter(h => h.deletedAt && matchesProject(h.group) && isWithinDateRange(h.date) && matchesSearch(h));
+      const deletedAudio = audioHistory.filter(h => h.deletedAt && matchesProject(h) && isWithinDateRange(h.date) && matchesSearch(h));
+      const deletedText = textHistory.filter(h => h.deletedAt && matchesProject(h) && isWithinDateRange(h.date) && matchesSearch(h));
       return [...deletedAudio, ...deletedText];
     }
 
@@ -351,7 +554,7 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
       // Return all bookmarks from all audio records
       const allBookmarks: ExtendedBookmark[] = [];
       audioHistory.forEach(record => {
-        if (!record.deletedAt && matchesProject(record.group) && isWithinDateRange(record.date) && matchesSearch(record)) {
+        if (!record.deletedAt && matchesProject(record) && isWithinDateRange(record.date) && matchesSearch(record)) {
           record.bookmarks.forEach(b => {
             allBookmarks.push({
               ...b,
@@ -369,13 +572,13 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
     }
 
     if (activeTab === 'synthesis') {
-      return textHistory.filter(h => !h.deletedAt && matchesProject(h.group) && isWithinDateRange(h.date) && matchesSearch(h));
+      return textHistory.filter(h => !h.deletedAt && matchesProject(h) && isWithinDateRange(h.date) && matchesSearch(h));
     } else {
       const type = activeTab === 'live' ? 'live' : 'recorded';
       return audioHistory.filter(h => 
         !h.deletedAt &&
         h.sourceType === type && 
-        matchesProject(h.group) && 
+        matchesProject(h) && 
         isWithinDateRange(h.date) && 
         matchesStatus(h.readStatus) &&
         matchesSearch(h)
@@ -735,7 +938,13 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
     // Add other projects
     projects.forEach(p => {
       if (p.name.toLowerCase() !== 'general') {
-        const count = audioHistory.filter(h => !h.deletedAt && h.group?.toLowerCase() === p.name.toLowerCase()).length;
+        const count = audioHistory.filter(h => 
+          !h.deletedAt && (
+            h.projectId === p.id ||
+            (Array.isArray(h.projectIds) && h.projectIds.includes(p.id)) ||
+            h.group?.toLowerCase() === p.name.toLowerCase()
+          )
+        ).length;
         list.push({
           id: p.id,
           name: p.name,
@@ -1506,6 +1715,152 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
         </div>
       )}
 
+      {/* AH.183: Multi-Project Recording Association Modal */}
+      {assocRecord && (
+        <div className="fixed inset-0 bg-brand-primary/60 backdrop-blur-sm z-[280] flex items-center justify-center p-4 sm:p-6 text-left">
+          <div className="bg-white rounded-2xl p-6 sm:p-7 max-w-lg w-full space-y-6 shadow-2xl animate-in zoom-in-95 border border-brand-divider/20">
+            <div className="flex items-start justify-between border-b border-slate-100 pb-4">
+              <div className="space-y-1">
+                <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-brand-primary/10 text-brand-primary">
+                  <Layers className="w-3 h-3" />
+                  <span>Canonical Recording</span>
+                </div>
+                <h2 className="text-lg sm:text-xl font-bold text-slate-900 tracking-tight">
+                  Project Associations
+                </h2>
+                <p className="text-xs text-slate-500 font-medium truncate max-w-sm">
+                  {assocRecord.fileName}
+                </p>
+              </div>
+              <button 
+                onClick={() => setAssocRecord(null)}
+                className="text-slate-400 hover:text-slate-700 p-1.5 rounded-lg hover:bg-slate-100 transition-colors"
+                title="Close"
+              >
+                <i className="fa-solid fa-xmark text-lg"></i>
+              </button>
+            </div>
+
+            {/* Error Message */}
+            {assocErrorMessage && (
+              <div className="p-3 bg-red-50 border border-red-200 rounded-xl text-xs text-red-700 flex items-start gap-2">
+                <i className="fa-solid fa-circle-exclamation mt-0.5 text-red-500"></i>
+                <div className="flex-1">{assocErrorMessage}</div>
+              </div>
+            )}
+
+            {/* Current Associated Projects List */}
+            <div className="space-y-3">
+              <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">
+                Associated Projects ({assocProjects.length})
+              </label>
+              
+              {isAssocLoading ? (
+                <div className="py-8 text-center text-slate-400 text-xs flex items-center justify-center gap-2">
+                  <i className="fa-solid fa-circle-notch fa-spin text-brand-primary"></i>
+                  <span>Loading associations...</span>
+                </div>
+              ) : assocProjects.length === 0 ? (
+                <div className="p-4 bg-slate-50 border border-slate-100 rounded-xl text-center text-xs text-slate-500">
+                  This recording is in General and not currently associated with any specific project.
+                </div>
+              ) : (
+                <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
+                  {assocProjects.map((proj) => (
+                    <div 
+                      key={proj.id} 
+                      className="flex items-center justify-between p-3 bg-slate-50 hover:bg-slate-100/80 rounded-xl border border-slate-200/70 transition-all text-xs"
+                    >
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <Folder className="w-4 h-4 text-brand-primary shrink-0" />
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-1.5">
+                            <span className="font-bold text-slate-800 truncate">{proj.name}</span>
+                            {proj.isPrimary && (
+                              <span className="px-1.5 py-0.2 rounded text-[9px] font-bold bg-brand-primary text-white uppercase tracking-wider">
+                                Primary
+                              </span>
+                            )}
+                          </div>
+                          {proj.role && (
+                            <span className="text-[10px] text-slate-400 font-mono">Role: {proj.role}</span>
+                          )}
+                        </div>
+                      </div>
+
+                      {proj.canManage && (
+                        <button
+                          type="button"
+                          disabled={assocActionPending}
+                          onClick={() => handleRemoveProjectAssociation(proj.id)}
+                          className="px-2.5 py-1 text-[11px] font-semibold text-red-600 hover:bg-red-50 rounded-lg transition-colors border border-transparent hover:border-red-200 disabled:opacity-40"
+                          title="Remove association (recording audio & transcripts will not be deleted)"
+                        >
+                          Remove
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Associate with another project */}
+            <div className="space-y-3 pt-2 border-t border-slate-100">
+              <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">
+                Link to Another Project
+              </label>
+
+              <div className="flex flex-col sm:flex-row gap-2">
+                <select
+                  value={assocSelectedNewProjId}
+                  onChange={(e) => setAssocSelectedNewProjId(e.target.value)}
+                  disabled={assocActionPending || isAssocLoading}
+                  className="flex-1 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs font-semibold text-slate-700 outline-none focus:ring-2 focus:ring-brand-primary focus:border-brand-primary"
+                >
+                  <option value="">Select a project to link...</option>
+                  {(projects as Project[])
+                    .filter(p => p.name.toLowerCase() !== 'general' && !assocProjects.some(ap => ap.id === p.id))
+                    .map(p => (
+                      <option key={p.id} value={p.id}>
+                        {p.name}
+                      </option>
+                    ))}
+                </select>
+
+                <button
+                  type="button"
+                  disabled={!assocSelectedNewProjId || assocActionPending}
+                  onClick={handleAddProjectAssociation}
+                  className="px-4 py-2 bg-brand-primary hover:bg-brand-primary/90 text-white rounded-xl text-xs font-bold shadow disabled:opacity-40 transition-all flex items-center justify-center gap-1.5 shrink-0"
+                >
+                  {assocActionPending ? (
+                    <i className="fa-solid fa-circle-notch fa-spin"></i>
+                  ) : (
+                    <FolderPlus className="w-3.5 h-3.5" />
+                  )}
+                  <span>Add Association</span>
+                </button>
+              </div>
+
+              <p className="text-[11px] text-slate-400">
+                Associating links the canonical recording across project spaces without duplicating audio storage or transcripts.
+              </p>
+            </div>
+
+            <div className="flex justify-end pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setAssocRecord(null)}
+                className="px-5 py-2 text-xs font-bold text-slate-600 hover:text-slate-900 transition-colors"
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Page Header */}
       <header className="space-y-6 text-left border-b border-brand-divider/20 pb-8">
         <div className="space-y-2">
@@ -2065,6 +2420,23 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
                                   <span>{itemGroup}</span>
                                 </span>
                               )}
+
+                              {/* Multi-project badge trigger */}
+                              {isAudio && (
+                                <button
+                                  type="button"
+                                  onClick={() => openMultiProjectModal(item as AudioToTextRecord)}
+                                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[9px] font-bold bg-brand-primary/10 text-brand-primary hover:bg-brand-primary/20 border border-brand-primary/20 transition-colors select-none"
+                                  title="Manage Multi-Project Associations"
+                                >
+                                  <Layers className="w-3 h-3" />
+                                  <span>
+                                    {Array.isArray((item as AudioToTextRecord).projectIds) && ((item as AudioToTextRecord).projectIds?.length || 0) > 1
+                                      ? `${(item as AudioToTextRecord).projectIds?.length} Projects`
+                                      : 'Projects'}
+                                  </span>
+                                </button>
+                              )}
                             </div>
                             <div className="flex items-center space-x-2">
                                <div className={`px-2 py-1 rounded text-[9px] md:text-[11px] font-medium uppercase tracking-tighter ${item.status === 'completed' ? 'bg-emerald-50 text-emerald-600' : item.status === 'error' ? 'bg-red-50 text-red-600' : 'bg-brand-background text-brand-primary'}`}>
@@ -2136,6 +2508,15 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
                                 >
                                   {item.fileName}
                                 </h4>
+                                {item.isTrimmedVersion && (
+                                  <span 
+                                    className="px-2 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-indigo-100 text-indigo-700 border border-indigo-200 inline-flex items-center gap-1 shrink-0"
+                                    title={item.trimRange ? `Trimmed clip: ${item.trimRange.startTime}s - ${item.trimRange.endTime}s (Parent: ${item.parentRecordingId || 'Original'})` : 'Trimmed Clip'}
+                                  >
+                                    <Scissors className="w-2.5 h-2.5" />
+                                    <span>Trimmed Clip</span>
+                                  </span>
+                                )}
                               </div>
                             )}
                             <div className="flex items-center space-x-2">
@@ -2228,6 +2609,39 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
                                     >
                                       <Sparkles className="w-3 h-3 text-amber-300" />
                                       <span>AI Recap</span>
+                                    </button>
+
+                                    {/* AH.184 Executive Report Export Button */}
+                                    <button 
+                                      onClick={() => {
+                                        setReportRecord(item);
+                                        setIsReportModalOpen(true);
+                                      }}
+                                      className="px-3 py-3 rounded-lg bg-slate-900 hover:bg-slate-800 text-white font-black text-[9px] uppercase tracking-wider flex items-center gap-1.5 shadow-sm transition-all active:scale-95 border border-slate-700" 
+                                      title="Export PowerPoint (.pptx) or Excel (.xlsx) Report"
+                                    >
+                                      <FileText className="w-3 h-3 text-emerald-400" />
+                                      <span>Report</span>
+                                    </button>
+
+                                    {/* Audio Trim Button */}
+                                    <button 
+                                      onClick={() => {
+                                        if (usageStats.mode === 'guest') {
+                                          addNotification({
+                                            title: 'Feature Restricted',
+                                            message: 'Audio trimming requires an authenticated account. Please sign in.',
+                                            type: 'error'
+                                          });
+                                          return;
+                                        }
+                                        setTrimmerRecord(item);
+                                      }}
+                                      className="px-3.5 py-3.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-indigo-700 font-black text-[9px] uppercase tracking-wider flex items-center gap-1.5 shadow-sm transition-all active:scale-95 border border-slate-200"
+                                      title="Trim Audio: Create derived clip with aligned transcripts"
+                                    >
+                                      <Scissors className="w-3 h-3 text-indigo-600" />
+                                      <span>Trim</span>
                                     </button>
 
                                     <button 
@@ -2371,9 +2785,40 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
                                   </ul>
                                 </div>
                                 <div className="space-y-2">
-                                  <span className="text-[11px] font-medium text-slate-400 tracking-widest font-mono">Action items</span>
-                                  <ul className="space-y-1">
-                                    {(item.summary.actionItems || []).map((a, i) => <li key={i} className="text-xs font-normal text-slate-600 flex items-start gap-2"><span className="text-brand-secondary mt-1">•</span>{a}</li>)}
+                                  <div className="flex items-center justify-between">
+                                    <span className="text-[11px] font-medium text-slate-400 tracking-widest font-mono">Action items</span>
+                                    <span className="text-[10px] text-slate-400 font-mono">Click to convert</span>
+                                  </div>
+                                  <ul className="space-y-2">
+                                    {(item.summary.actionItems || []).map((a, i) => {
+                                      const itemKey = `${item.id}_ai_${i}`;
+                                      const isConverting = convertingTaskId === itemKey;
+                                      return (
+                                        <li key={i} className="text-xs font-normal text-slate-600 flex items-start justify-between gap-2 p-1.5 rounded-lg hover:bg-slate-50 transition-colors group">
+                                          <div className="flex items-start gap-2 flex-1">
+                                            <span className="text-brand-secondary mt-1">•</span>
+                                            <span>{a}</span>
+                                          </div>
+                                          <button
+                                            type="button"
+                                            disabled={isConverting}
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              handleConvertToTask(item, a, 'meeting_action_item', `ai_${i}`);
+                                            }}
+                                            title="Convert to project task"
+                                            className="opacity-0 group-hover:opacity-100 transition-opacity text-[10px] font-bold text-brand-primary bg-brand-primary/10 hover:bg-brand-primary hover:text-white px-2 py-0.5 rounded flex items-center gap-1 shrink-0"
+                                          >
+                                            {isConverting ? (
+                                              <i className="fa-solid fa-spinner fa-spin"></i>
+                                            ) : (
+                                              <i className="fa-solid fa-list-check"></i>
+                                            )}
+                                            <span>To Task</span>
+                                          </button>
+                                        </li>
+                                      );
+                                    })}
                                   </ul>
                                 </div>
                               </div>
@@ -3065,6 +3510,64 @@ const HistoryDashboard: React.FC<HistoryDashboardProps> = ({
         recordingTitle={smartRecapRecord?.fileName}
         isGenerating={isGeneratingRecap}
         onRegenerate={handleRegenerateRecap}
+      />
+
+      {/* Audio Trimmer Modal */}
+      {trimmerRecord && (
+        <AudioTrimmerModal
+          isOpen={!!trimmerRecord}
+          onClose={() => setTrimmerRecord(null)}
+          recordingId={trimmerRecord.id}
+          recordingTitle={trimmerRecord.fileName}
+          audioUrl={trimmerRecord.originalAudioUrl}
+          projectId={trimmerRecord.projectId}
+          getIdToken={() => userProfile?.getIdToken?.() || Promise.resolve(undefined)}
+          onTrimSuccess={(derived) => {
+            if (derived) {
+              const newRecord: AudioToTextRecord = {
+                id: derived.id,
+                userId: userProfile?.uid || 'user',
+                date: new Date().toISOString(),
+                fileName: derived.fileName,
+                sourceType: 'recorded',
+                originalAudioUrl: derived.storagePath ? `/api/recordings/${encodeURIComponent(derived.id)}/audio` : undefined,
+                transcript: [],
+                status: 'completed',
+                readStatus: 'not-read',
+                bookmarks: [],
+                ownerEmail: userProfile?.email || '',
+                speakerMap: {},
+                collaborators: [],
+                group: trimmerRecord.group || 'General',
+                projectId: derived.projectId || trimmerRecord.projectId,
+                storagePath: derived.storagePath,
+                meetingSessionId: derived.meetingSessionId || trimmerRecord.meetingSessionId,
+                externalMeetingId: trimmerRecord.externalMeetingId,
+                provider: trimmerRecord.provider,
+                provenanceManifestId: trimmerRecord.provenanceManifestId,
+                isTrimmedVersion: true,
+                parentRecordingId: trimmerRecord.id,
+                trimRange: derived.trimRange
+              };
+              onUpdateAudio(newRecord);
+            }
+          }}
+        />
+      )}
+
+      {/* AH.184 Executive Report Export Modal */}
+      <ReportExportModal
+        isOpen={isReportModalOpen}
+        onClose={() => {
+          setIsReportModalOpen(false);
+          setReportRecord(null);
+        }}
+        defaultType="meeting_summary"
+        meetingId={reportRecord?.id}
+        meetingTitle={reportRecord?.fileName}
+        projectId={reportRecord?.projectId}
+        availableProjects={projects}
+        availableMeetings={audioHistory}
       />
     </div>
   );

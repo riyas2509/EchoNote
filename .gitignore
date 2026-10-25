@@ -34,3 +34,6 @@ dist-ssr
 *.tmp
 /tmp*
 tmp/
+
+.vercel
+.env*
