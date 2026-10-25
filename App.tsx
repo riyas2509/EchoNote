@@ -45,6 +45,7 @@ import { getMinutesUsage, getThinkingUsage, formatRefreshDate } from './lib/usag
 import { logAction } from './services/auditService';
 import { apiFetch, safeApiJson } from './lib/apiClient';
 import { useDocumentSeo } from './components/public/SeoManager';
+import { Analytics } from '@vercel/analytics/react';
 
 const ScrollToTop = () => {
   const { pathname } = useLocation();
@@ -2315,6 +2316,7 @@ const App: React.FC = () => {
           }
         }}
       />
+      <Analytics />
     </>
   );
 };
