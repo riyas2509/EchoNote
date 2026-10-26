@@ -28,6 +28,11 @@ import {
 import { AudioTrimmerModal } from './AudioTrimmerModal';
 import { toast } from 'sonner';
 import { useDemoWorkspace, isDemoIdentifier } from '../lib/demoStateManager';
+import {
+  getProjectMeetings,
+  getUnassociatedMeetings,
+  associateMeeting
+} from '../lib/apiClient';
 
 interface ProjectMeetingsViewProps {
   project: Project;
@@ -75,22 +80,16 @@ export const ProjectMeetingsView: React.FC<ProjectMeetingsViewProps> = ({
     }
     setLoading(true);
     try {
-      const token = await userProfile?.getIdToken?.();
-      const res = await fetch(`/api/projects/${project.id}/meetings`, {
-        headers: {
-          'Authorization': token ? `Bearer ${token}` : ''
-        }
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setMeetings(data.meetings || []);
+      const res = await getProjectMeetings(project.id);
+      if (res.ok && res.data) {
+        setMeetings(res.data.meetings || []);
       } else {
-        const err = await res.json().catch(() => ({}));
-        toast.error(err.message || 'Failed to load project meetings');
+        toast.error(res.error || 'Failed to load project meetings');
       }
     } catch (err: any) {
       console.error('Error fetching project meetings:', err);
-      toast.error('Network error loading project meetings');
+      const errMsg = err?.safeMessage || err?.message || 'Failed to load project meetings';
+      toast.error(errMsg);
     } finally {
       setLoading(false);
     }
@@ -105,22 +104,16 @@ export const ProjectMeetingsView: React.FC<ProjectMeetingsViewProps> = ({
     }
     setLoadingUnassociated(true);
     try {
-      const token = await userProfile?.getIdToken?.();
-      const res = await fetch('/api/meetings/unassociated', {
-        headers: {
-          'Authorization': token ? `Bearer ${token}` : ''
-        }
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setUnassociatedMeetings(data.meetings || []);
+      const res = await getUnassociatedMeetings();
+      if (res.ok && res.data) {
+        setUnassociatedMeetings(res.data.meetings || []);
       } else {
-        const err = await res.json().catch(() => ({}));
-        toast.error(err.message || 'Failed to load unassociated meetings');
+        toast.error(res.error || 'Failed to load unassociated meetings');
       }
     } catch (err: any) {
       console.error('Error fetching unassociated meetings:', err);
-      toast.error('Network error loading unassociated meetings');
+      const errMsg = err?.safeMessage || err?.message || 'Failed to load unassociated meetings';
+      toast.error(errMsg);
     } finally {
       setLoadingUnassociated(false);
     }
@@ -152,28 +145,19 @@ export const ProjectMeetingsView: React.FC<ProjectMeetingsViewProps> = ({
     if (associatingId) return; // Prevent double click / concurrent request
     setAssociatingId(sessionId);
     try {
-      const token = await userProfile?.getIdToken?.();
-      const res = await fetch(`/api/meetings/${sessionId}/associate`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': token ? `Bearer ${token}` : ''
-        },
-        body: JSON.stringify({ projectId: project.id })
-      });
-
-      const data = await res.json();
-      if (res.ok && data.success) {
-        toast.success(data.message || 'Meeting successfully associated with project');
+      const res = await associateMeeting(sessionId, project.id);
+      if (res.ok && res.data?.success) {
+        toast.success(res.data.message || 'Meeting successfully associated with project');
         // Update local lists
         setUnassociatedMeetings(prev => prev.filter(m => m.id !== sessionId));
         fetchProjectMeetings();
       } else {
-        toast.error(data.message || 'Failed to associate meeting with project');
+        toast.error(res.error || res.data?.message || 'Failed to associate meeting with project');
       }
     } catch (err: any) {
       console.error('Error associating meeting:', err);
-      toast.error('Network error associating meeting');
+      const errMsg = err?.safeMessage || err?.message || 'Failed to associate meeting';
+      toast.error(errMsg);
     } finally {
       setAssociatingId(null);
     }
@@ -191,26 +175,17 @@ export const ProjectMeetingsView: React.FC<ProjectMeetingsViewProps> = ({
 
     setDisassociatingId(sessionId);
     try {
-      const token = await userProfile?.getIdToken?.();
-      const res = await fetch(`/api/meetings/${sessionId}/associate`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': token ? `Bearer ${token}` : ''
-        },
-        body: JSON.stringify({ projectId: null })
-      });
-
-      const data = await res.json();
-      if (res.ok && data.success) {
-        toast.success(data.message || 'Meeting association removed');
+      const res = await associateMeeting(sessionId, null);
+      if (res.ok && res.data?.success) {
+        toast.success(res.data.message || 'Meeting association removed');
         setMeetings(prev => prev.filter(m => m.id !== sessionId));
       } else {
-        toast.error(data.message || 'Failed to remove meeting association');
+        toast.error(res.error || res.data?.message || 'Failed to remove meeting association');
       }
     } catch (err: any) {
       console.error('Error disassociating meeting:', err);
-      toast.error('Network error removing meeting association');
+      const errMsg = err?.safeMessage || err?.message || 'Failed to remove meeting association';
+      toast.error(errMsg);
     } finally {
       setDisassociatingId(null);
     }

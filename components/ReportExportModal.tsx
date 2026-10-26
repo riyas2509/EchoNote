@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   FileText, 
   Presentation, 
@@ -48,6 +48,16 @@ export const ReportExportModal: React.FC<ReportExportModalProps> = ({
   const [isExporting, setIsExporting] = useState<boolean>(false);
   const [statusMessage, setStatusMessage] = useState<{ type: 'error' | 'success'; text: string } | null>(null);
 
+  // Sync state whenever modal is opened or target identifiers change
+  useEffect(() => {
+    if (isOpen) {
+      setReportType(defaultType);
+      setSelectedProjectId(initialProjectId || (availableProjects[0]?.id || ''));
+      setSelectedMeetingId(initialMeetingId || (availableMeetings[0]?.id || ''));
+      setStatusMessage(null);
+    }
+  }, [isOpen, defaultType, initialProjectId, initialMeetingId, availableProjects, availableMeetings]);
+
   if (!isOpen) return null;
 
   const handleExport = async () => {
@@ -79,7 +89,10 @@ export const ReportExportModal: React.FC<ReportExportModalProps> = ({
         }
       }
 
-      await downloadReport(payload);
+      const res = await downloadReport(payload);
+      if (!res.ok) {
+        throw new Error(res.error || `Failed to export ${format.toUpperCase()} report.`);
+      }
       setStatusMessage({
         type: 'success',
         text: `Report generated and downloaded successfully as .${format}!`

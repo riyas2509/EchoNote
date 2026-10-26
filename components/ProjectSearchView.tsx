@@ -192,7 +192,8 @@ export const ProjectSearchView: React.FC<ProjectSearchViewProps> = ({
     } catch (err: any) {
       if (err.name !== 'AbortError') {
         console.error('Project search error:', err);
-        toast.error('Network error during project search');
+        const errMsg = err?.safeMessage || err?.message || 'Error executing project search';
+        toast.error(errMsg);
       }
     } finally {
       if (abortControllerRef.current === controller) {
