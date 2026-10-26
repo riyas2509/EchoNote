@@ -248,7 +248,39 @@ export async function checkApiHealth(): Promise<{ ok: boolean; status?: string; 
  */
 export async function getAuthToken(): Promise<string | null> {
   try {
-    if (!auth || !auth.currentUser) return null;
+    if (!auth) return null;
+
+    // 1. If currentUser is already present, return token directly
+    if (auth.currentUser) {
+      return await auth.currentUser.getIdToken();
+    }
+
+    // 2. Wait for initial Firebase Auth state resolution if authStateReady is available
+    if (typeof (auth as any).authStateReady === 'function') {
+      try {
+        await (auth as any).authStateReady();
+      } catch (readyErr) {
+        console.warn("authStateReady error:", readyErr);
+      }
+    }
+
+    // 3. Fallback: If still null, wait briefly with onAuthStateChanged listener
+    if (!auth.currentUser && typeof (auth as any).onAuthStateChanged === 'function') {
+      await new Promise<void>((resolve) => {
+        const timeout = setTimeout(() => {
+          unsubscribe();
+          resolve();
+        }, 1500);
+
+        const unsubscribe = (auth as any).onAuthStateChanged(() => {
+          clearTimeout(timeout);
+          unsubscribe();
+          resolve();
+        });
+      });
+    }
+
+    if (!auth.currentUser) return null;
     return await auth.currentUser.getIdToken();
   } catch (error) {
     console.warn("⚠️ Failed to retrieve auth token:", error);
@@ -1027,20 +1059,39 @@ export async function downloadReport(request: GenerateReportRequest): Promise<{ 
 
     const disposition = res.headers.get('Content-Disposition') || '';
     let filename = `EchoNote_Report.${request.format}`;
-    const filenameMatch = disposition.match(/filename="?([^";]+)"?/i);
+    const filenameMatch = disposition.match(/filename\*?=['"]?(?:UTF-\d['"]*)?([^;\r\n"']+)['"]?/i);
     if (filenameMatch && filenameMatch[1]) {
-      filename = filenameMatch[1].trim();
+      try {
+        filename = decodeURIComponent(filenameMatch[1].trim().replace(/^['"]|['"]$/g, ''));
+      } catch {
+        filename = filenameMatch[1].trim().replace(/^['"]|['"]$/g, '');
+      }
     }
 
+    const contentType = res.headers.get('Content-Type') || (
+      request.format === 'xlsx'
+        ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        : 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+    );
+
     const blob = await res.blob();
-    const downloadUrl = window.URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = downloadUrl;
-    link.download = filename;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    setTimeout(() => window.URL.revokeObjectURL(downloadUrl), 1000);
+    const typedBlob = blob.type ? blob : new Blob([blob], { type: contentType });
+
+    if (typeof window !== 'undefined') {
+      const downloadUrl = window.URL.createObjectURL(typedBlob);
+      const link = document.createElement('a');
+      link.href = downloadUrl;
+      link.download = filename;
+      link.style.display = 'none';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      setTimeout(() => {
+        try {
+          window.URL.revokeObjectURL(downloadUrl);
+        } catch {}
+      }, 1500);
+    }
 
     return { ok: true };
   } catch (err: any) {
@@ -1271,3 +1322,57 @@ export async function createProjectFromTemplate(templateId: string, payload: {
 }
 
 
+
+// ============================================================================
+// PROJECT MEETINGS CLIENT METHODS
+// ============================================================================
+
+import type {
+  UnassociatedMeetingItem,
+  AssociateMeetingResponse
+} from '../types';
+
+export interface ProjectMeetingsResponse {
+  success: boolean;
+  projectId: string;
+  meetings: UnassociatedMeetingItem[];
+  count: number;
+}
+
+/**
+ * Retrieves all meeting sessions associated with the given project.
+ */
+export async function getProjectMeetings(
+  projectId: string
+): Promise<ApiResponse<ProjectMeetingsResponse>> {
+  const endpoint = `/api/projects/${encodeURIComponent(projectId)}/meetings`;
+  const res = await apiFetch(endpoint, { method: 'GET' });
+  return parseApiResponse<ProjectMeetingsResponse>(res);
+}
+
+/**
+ * Retrieves unassociated meetings available to the current user / organization.
+ */
+export async function getUnassociatedMeetings(): Promise<ApiResponse<{
+  success: boolean;
+  meetings: UnassociatedMeetingItem[];
+  count: number;
+}>> {
+  const res = await apiFetch('/api/meetings/unassociated', { method: 'GET' });
+  return parseApiResponse(res);
+}
+
+/**
+ * Associates or disassociates a meeting session with a project.
+ */
+export async function associateMeeting(
+  sessionId: string,
+  projectId: string | null
+): Promise<ApiResponse<AssociateMeetingResponse>> {
+  const endpoint = `/api/meetings/${encodeURIComponent(sessionId)}/associate`;
+  const res = await apiFetch(endpoint, {
+    method: 'POST',
+    body: JSON.stringify({ projectId })
+  });
+  return parseApiResponse<AssociateMeetingResponse>(res);
+}
