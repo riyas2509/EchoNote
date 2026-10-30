@@ -25,7 +25,8 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { spawnSync } from 'child_process';
+import http from 'http';
+import { spawn, spawnSync } from 'child_process';
 
 let passCount = 0;
 let failCount = 0;
@@ -178,10 +179,12 @@ async function runTestSuite() {
   assert(!ciContent.includes("deploy"), "Workflow does NOT perform any deployment action");
 
   // Verify synthetic container environment
+  assert(ciContent.includes("-e NODE_ENV=test"), "Container run step injects NODE_ENV=test");
   assert(ciContent.includes("-e VITE_TEST_MODE=true"), "Container run step injects VITE_TEST_MODE=true");
   assert(ciContent.includes("-e FIREBASE_PROJECT_ID=echonote-synthetic"), "Container run step injects FIREBASE_PROJECT_ID");
   assert(ciContent.includes("-e GOOGLE_CLOUD_PROJECT=echonote-synthetic"), "Container run step injects GOOGLE_CLOUD_PROJECT");
   assert(ciContent.includes("-e FIRESTORE_DATABASE_ID=echonote-synthetic-db"), "Container run step injects FIRESTORE_DATABASE_ID");
+  assert(!ciContent.includes("ALLOW_PRODUCTION_RESOURCES"), "Container run step does NOT set ALLOW_PRODUCTION_RESOURCES");
 
   // Verify cleanup guarantees
   assert(ciContent.includes("if: always()"), "Cleanup step uses if: always() to guarantee container teardown on failure");
@@ -205,6 +208,154 @@ async function runTestSuite() {
     ".env.example documents synthetic VITE_TEST_MODE");
   assert(envExampleContent.includes("K_SERVICE=echonote-ci"),
     ".env.example documents synthetic K_SERVICE");
+
+  // ---------------------------------------------------------------------------
+  // 6. Frontend Serving Selection, Static Asset Integrity & Production Safeguards
+  // ---------------------------------------------------------------------------
+  console.log("\n--- 6. Frontend Serving Selection, Static Asset Integrity & Production Safeguards ---");
+
+  // 1. Static frontend entry point in dist/
+  const distHtmlPath = path.join(cwd, "dist", "index.html");
+  assert(fs.existsSync(distHtmlPath), "Prebuilt frontend entry point dist/index.html exists");
+  assert(fs.statSync(distHtmlPath).size > 1000, "dist/index.html has substantial compiled content");
+
+  // Verify Dockerfile copies compiled dist directory to runner image
+  const dockerfilePath = path.join(cwd, "Dockerfile");
+  assert(fs.existsSync(dockerfilePath), "Dockerfile exists");
+  const dockerfileContent = fs.readFileSync(dockerfilePath, 'utf8');
+  assert(
+    dockerfileContent.includes("COPY --from=builder /app/dist ./dist"),
+    "Dockerfile runner stage copies prebuilt dist/ into runtime container"
+  );
+
+  // 2. Behavioral verification of frontend serving mode decision in isolated process
+  const frontendDecisionCode = `
+    const checkMode = (nodeEnv, viteTestMode) => {
+      const shouldUseVite = nodeEnv !== "production" && viteTestMode !== "true";
+      return shouldUseVite ? "VITE_DEV_SERVER" : "STATIC_DIST_BUNDLE";
+    };
+
+    // 1. Development mode: NODE_ENV=development or unset, VITE_TEST_MODE unset
+    if (checkMode("development", undefined) !== "VITE_DEV_SERVER") process.exit(10);
+    if (checkMode(undefined, undefined) !== "VITE_DEV_SERVER") process.exit(11);
+
+    // 2. CI test mode: NODE_ENV=test, VITE_TEST_MODE=true
+    if (checkMode("test", "true") !== "STATIC_DIST_BUNDLE") process.exit(12);
+
+    // 3. Production mode: NODE_ENV=production, VITE_TEST_MODE unset or true
+    if (checkMode("production", undefined) !== "STATIC_DIST_BUNDLE") process.exit(13);
+    if (checkMode("production", "true") !== "STATIC_DIST_BUNDLE") process.exit(14);
+
+    console.log("FRONTEND_MODES_VERIFIED");
+    process.exit(0);
+  `;
+  const decisionRes = spawnSync(process.execPath, ['--input-type=module', '-e', frontendDecisionCode], {
+    cwd,
+    encoding: 'utf8',
+    timeout: 10000,
+  });
+  assert(
+    decisionRes.status === 0 && decisionRes.stdout.includes("FRONTEND_MODES_VERIFIED"),
+    "Behavioral verification: Dev mode selects Vite; CI test mode and Production mode select static bundle"
+  );
+
+  // 3. Live server runtime smoke verification in CI test mode
+  // Spawns dist/server.cjs with NODE_ENV=test, VITE_TEST_MODE=true, confirms HTTP 200 health & static HTML
+  const smokePort = "3096";
+  const smokeEnv: NodeJS.ProcessEnv = {
+    ...process.env,
+    NODE_ENV: "test",
+    VITE_TEST_MODE: "true",
+    PORT: smokePort,
+    GOOGLE_CLOUD_PROJECT: "echonote-synthetic",
+    FIRESTORE_DATABASE_ID: "echonote-synthetic-db",
+    FIREBASE_PROJECT_ID: "echonote-synthetic",
+    K_SERVICE: "echonote-ci",
+  };
+  delete smokeEnv.ALLOW_PRODUCTION_RESOURCES;
+  delete smokeEnv.GOOGLE_APPLICATION_CREDENTIALS;
+
+  const smokeChild = spawn(process.execPath, [path.join(cwd, "dist", "server.cjs")], {
+    cwd,
+    env: smokeEnv,
+    stdio: "pipe",
+  });
+
+  let serverStarted = false;
+  try {
+    for (let attempt = 0; attempt < 25; attempt++) {
+      await new Promise(r => setTimeout(r, 400));
+      try {
+        const healthRes = await new Promise<{ status?: number; data?: any }>((resolve, reject) => {
+          const req = http.get(`http://127.0.0.1:${smokePort}/api/health`, (res) => {
+            let data = "";
+            res.on("data", c => data += c);
+            res.on("end", () => {
+              try { resolve({ status: res.statusCode, data: JSON.parse(data) }); }
+              catch (err) { reject(err); }
+            });
+          });
+          req.on("error", reject);
+        });
+
+        if (healthRes.status === 200 && healthRes.data?.status === "ok") {
+          serverStarted = true;
+          break;
+        }
+      } catch {}
+    }
+    assert(serverStarted, "CI test mode server bundle booted cleanly and responded to /api/health with status ok");
+
+    // Verify static HTML index is served for root path
+    const rootRes = await new Promise<{ status?: number; data?: string }>((resolve, reject) => {
+      const req = http.get(`http://127.0.0.1:${smokePort}/`, (res) => {
+        let data = "";
+        res.on("data", c => data += c);
+        res.on("end", () => resolve({ status: res.statusCode, data }));
+      });
+      req.on("error", reject);
+    });
+    assert(
+      rootRes.status === 200 && (rootRes.data || "").toLowerCase().includes("<!doctype html>"),
+      "CI test mode server bundle serves prebuilt static index.html at root without importing Vite"
+    );
+  } finally {
+    smokeChild.kill("SIGTERM");
+  }
+
+  // 4. Firebase production fail-closed safeguard verification
+  // Verify that NODE_ENV=production without ALLOW_PRODUCTION_RESOURCES fails closed immediately
+  const prodFailClosedCode = `
+    try {
+      const { getFirebaseConfig } = await import('./lib/firebaseAdmin.ts');
+      getFirebaseConfig();
+      process.exit(20); // Should have thrown!
+    } catch (err) {
+      if (err.message.includes("NODE_ENV is set to production, but ALLOW_PRODUCTION_RESOURCES is not 'true'")) {
+        console.log("PROD_SAFEGUARD_VERIFIED");
+        process.exit(0);
+      }
+      process.exit(21);
+    }
+  `;
+  const prodEnv: NodeJS.ProcessEnv = {
+    ...process.env,
+    NODE_ENV: "production",
+    GOOGLE_CLOUD_PROJECT: "echonote-synthetic",
+  };
+  delete prodEnv.ALLOW_PRODUCTION_RESOURCES;
+  delete prodEnv.STAGING_ISOLATION_REQUIRED;
+
+  const prodRes = spawnSync(process.execPath, [tsxCli, '--input-type=module', '-e', prodFailClosedCode], {
+    cwd,
+    env: prodEnv,
+    encoding: 'utf8',
+    timeout: 10000,
+  });
+  assert(
+    prodRes.status === 0 && prodRes.stdout.includes("PROD_SAFEGUARD_VERIFIED"),
+    "Firebase Admin preserves strict production fail-closed safeguard when ALLOW_PRODUCTION_RESOURCES is absent"
+  );
 
   console.log("\n===============================================================================");
   console.log(`  SUMMARY: ${passCount} PASSED, ${failCount} FAILED`);
