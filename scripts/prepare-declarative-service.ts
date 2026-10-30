@@ -23,12 +23,16 @@ export const SECRET_MAPPINGS: readonly SecretMapping[] = [
   { name: 'RESEND_API_KEY', secretName: 'echonote-resend-api-key', secretKey: 'latest' },
   { name: 'PLAYBACK_SECRET', secretName: 'echonote-playback-secret', secretKey: 'latest' },
   { name: 'CRON_SECRET', secretName: 'echonote-cron-secret', secretKey: 'latest' },
+  { name: 'INTEGRATION_ENCRYPTION_KEY', secretName: 'echonote-integration-encryption-key', secretKey: 'latest' },
+  { name: 'ZOOM_WEBHOOK_SECRET', secretName: 'echonote-zoom-webhook-secret', secretKey: 'latest' },
+  { name: 'REPORT_DOWNLOAD_SECRET', secretName: 'echonote-report-download-secret', secretKey: 'latest' },
 ] as const;
 
 export interface OrdinaryEnvVarConfig {
   RAZORPAY_MODE?: string;
   RAZORPAY_KEY_ID?: string;
   NODE_ENV?: string;
+  ALLOW_PRODUCTION_RESOURCES?: string;
   APP_URL?: string;
   RESEND_FROM_EMAIL?: string;
   RAZORPAY_PRO_MONTHLY_PLAN_ID?: string;
@@ -40,6 +44,7 @@ export interface OrdinaryEnvVarConfig {
 export const DEFAULT_ORDINARY_ENV_VARS: Readonly<Record<Exclude<keyof OrdinaryEnvVarConfig, 'RAZORPAY_KEY_ID'>, string>> = {
   RAZORPAY_MODE: 'live',
   NODE_ENV: 'production',
+  ALLOW_PRODUCTION_RESOURCES: 'true',
   APP_URL: 'https://echonote-25.ai.studio',
   RESEND_FROM_EMAIL: 'EchoNote <invitations@echotechai.in>',
   RAZORPAY_PRO_MONTHLY_PLAN_ID: 'plan_TambUyuTkGL4zY',
@@ -71,7 +76,7 @@ export interface TransformResult {
 /**
  * Validates and transforms a Cloud Run Knative Service manifest
  * into an atomic, declarative desired-state manifest:
- * - Converts the 6 sensitive variables from literal to Secret Manager references.
+ * - Converts sensitive variables from literal to Secret Manager references.
  * - Enforces exactly 9 ordinary variables with zero overlap.
  * - Pins 100% traffic strictly to the existing serving revision.
  * - Preserves all container resources, ports, annotations, and service account.
@@ -233,6 +238,7 @@ export function transformServiceManifest(options: TransformOptions): TransformRe
     'RAZORPAY_MODE',
     'RAZORPAY_KEY_ID',
     'NODE_ENV',
+    'ALLOW_PRODUCTION_RESOURCES',
     'APP_URL',
     'RESEND_FROM_EMAIL',
     'RAZORPAY_PRO_MONTHLY_PLAN_ID',
@@ -248,7 +254,7 @@ export function transformServiceManifest(options: TransformOptions): TransformRe
     });
   }
 
-  // Add 6 secret variables with secretKeyRef
+  // Add secret variables with secretKeyRef
   for (const secret of SECRET_MAPPINGS) {
     desiredEnv.push({
       name: secret.name,
@@ -270,8 +276,9 @@ export function transformServiceManifest(options: TransformOptions): TransformRe
     seenNames.add(item.name);
   }
 
-  if (desiredEnv.length !== 15) {
-    throw new Error(`Expected exactly 15 environment entries, got ${desiredEnv.length}`);
+  const expectedTotalEnvCount = ordinaryKeys.length + SECRET_MAPPINGS.length;
+  if (desiredEnv.length !== expectedTotalEnvCount) {
+    throw new Error(`Expected exactly ${expectedTotalEnvCount} environment entries, got ${desiredEnv.length}`);
   }
 
   container.env = desiredEnv;
