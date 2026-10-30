@@ -8,7 +8,21 @@ export const EXPECTED_REGION = 'us-west1';
 export const EXPECTED_SERVICE_NAME = 'echonote';
 export const EXPECTED_SERVICE_ACCOUNT = '200551109142-compute@developer.gserviceaccount.com';
 export const EXPECTED_ARTIFACT_REGISTRY = 'us-west1-docker.pkg.dev/echonote-2509/echonote/echonote';
-export const BASELINE_SERVING_REVISION = 'echonote-00009-w5m';
+
+// Historical test fixture baseline revision (strictly for unit tests and fixtures)
+export const TEST_FIXTURE_BASELINE_REVISION = 'echonote-00009-w5m';
+export const BASELINE_SERVING_REVISION = TEST_FIXTURE_BASELINE_REVISION;
+
+// Staging constants & invariants
+export const STAGING_PROJECT_ID = 'echonote-staging';
+export const STAGING_REGION = 'us-west1';
+export const STAGING_SERVICE_NAME = 'echonote-staging';
+export const STAGING_ARTIFACT_REGISTRY = 'us-west1-docker.pkg.dev/echonote-staging/echonote/echonote';
+export const STAGING_DEFAULT_APP_URL = 'https://echonote-staging.vercel.app';
+
+// Note: Staging service account must be explicitly supplied via configuration or CLI.
+// No invented default is assumed or permitted.
+export const STAGING_TEST_FIXTURE_SERVICE_ACCOUNT = 'echonote-staging-sa@echonote-staging.iam.gserviceaccount.com';
 
 export interface SecretMapping {
   name: string;
@@ -33,6 +47,7 @@ export interface OrdinaryEnvVarConfig {
   RAZORPAY_KEY_ID?: string;
   NODE_ENV?: string;
   ALLOW_PRODUCTION_RESOURCES?: string;
+  STAGING_ISOLATION_REQUIRED?: string;
   APP_URL?: string;
   RESEND_FROM_EMAIL?: string;
   RAZORPAY_PRO_MONTHLY_PLAN_ID?: string;
@@ -41,7 +56,7 @@ export interface OrdinaryEnvVarConfig {
   RAZORPAY_TEAM_YEARLY_PLAN_ID?: string;
 }
 
-export const DEFAULT_ORDINARY_ENV_VARS: Readonly<Record<Exclude<keyof OrdinaryEnvVarConfig, 'RAZORPAY_KEY_ID'>, string>> = {
+export const DEFAULT_ORDINARY_ENV_VARS: Readonly<Record<Exclude<keyof OrdinaryEnvVarConfig, 'RAZORPAY_KEY_ID' | 'STAGING_ISOLATION_REQUIRED'>, string>> = {
   RAZORPAY_MODE: 'live',
   NODE_ENV: 'production',
   ALLOW_PRODUCTION_RESOURCES: 'true',
@@ -53,7 +68,19 @@ export const DEFAULT_ORDINARY_ENV_VARS: Readonly<Record<Exclude<keyof OrdinaryEn
   RAZORPAY_TEAM_YEARLY_PLAN_ID: 'plan_TameI4cjPUzRpn',
 };
 
-export const ALLOWED_SERVICE_NAMES = ['echonote', 'echonote-prod'] as const;
+export const DEFAULT_STAGING_ORDINARY_ENV_VARS: Readonly<Record<Exclude<keyof OrdinaryEnvVarConfig, 'RAZORPAY_KEY_ID' | 'ALLOW_PRODUCTION_RESOURCES'>, string>> = {
+  RAZORPAY_MODE: 'test',
+  NODE_ENV: 'staging',
+  STAGING_ISOLATION_REQUIRED: 'true',
+  APP_URL: STAGING_DEFAULT_APP_URL,
+  RESEND_FROM_EMAIL: 'EchoNote Staging <invitations@echotechai.in>',
+  RAZORPAY_PRO_MONTHLY_PLAN_ID: 'plan_test_pro_monthly',
+  RAZORPAY_PRO_YEARLY_PLAN_ID: 'plan_test_pro_yearly',
+  RAZORPAY_TEAM_MONTHLY_PLAN_ID: 'plan_test_team_monthly',
+  RAZORPAY_TEAM_YEARLY_PLAN_ID: 'plan_test_team_yearly',
+};
+
+export const ALLOWED_SERVICE_NAMES = ['echonote', 'echonote-prod', 'echonote-staging'] as const;
 
 export interface TransformOptions {
   inputYamlContent: string;
@@ -61,6 +88,8 @@ export interface TransformOptions {
   servingRevision?: string;
   ordinaryEnvOverrides?: OrdinaryEnvVarConfig;
   serviceName?: string;
+  environment?: 'production' | 'staging';
+  serviceAccount?: string;
 }
 
 export interface TransformResult {
@@ -71,14 +100,45 @@ export interface TransformResult {
   pinnedServingRevision: string;
   serviceAccount: string;
   serviceName: string;
+  environment: 'production' | 'staging';
+}
+
+/**
+ * Validates Cloud Run revision naming convention:
+ * Letters, numbers, hyphens, starting with a letter and ending with an alphanumeric character.
+ */
+export function validateRevisionFormat(revision: string): void {
+  if (!revision || typeof revision !== 'string' || revision.trim() === '') {
+    throw new Error('Serving revision must be a non-empty string.');
+  }
+  const revRegex = /^[a-z][a-z0-9-]{0,61}[a-z0-9]$/;
+  if (!revRegex.test(revision)) {
+    throw new Error(`Invalid Cloud Run revision format: "${revision}". Must match ^[a-z][a-z0-9-]{0,61}[a-z0-9]$`);
+  }
+}
+
+/**
+ * Validates Google service account email format:
+ * Either standard compute default (<project-number>-compute@developer.gserviceaccount.com)
+ * or IAM service account (<sa-name>@<project-id>.iam.gserviceaccount.com).
+ */
+export function validateServiceAccountFormat(sa: string): void {
+  if (!sa || typeof sa !== 'string' || sa.trim() === '') {
+    throw new Error('Service account must be a non-empty string.');
+  }
+  const computeRegex = /^[0-9]+-compute@developer\.gserviceaccount\.com$/;
+  const iamRegex = /^[a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z0-9-]+\.iam\.gserviceaccount\.com$/;
+  if (!computeRegex.test(sa) && !iamRegex.test(sa)) {
+    throw new Error(`Invalid Google Service Account format: "${sa}". Must be a valid GCE compute or IAM service account.`);
+  }
 }
 
 /**
  * Validates and transforms a Cloud Run Knative Service manifest
  * into an atomic, declarative desired-state manifest:
  * - Converts sensitive variables from literal to Secret Manager references.
- * - Enforces exactly 9 ordinary variables with zero overlap.
- * - Pins 100% traffic strictly to the existing serving revision.
+ * - Enforces environment-specific ordinary variables with zero overlap.
+ * - Pins 100% traffic strictly to the verified serving revision.
  * - Preserves all container resources, ports, annotations, and service account.
  * - Strips template revision name so Cloud Run generates a fresh revision.
  */
@@ -86,7 +146,6 @@ export function transformServiceManifest(options: TransformOptions): TransformRe
   const {
     inputYamlContent,
     imageDigest,
-    servingRevision = BASELINE_SERVING_REVISION,
     ordinaryEnvOverrides = {},
     serviceName,
   } = options;
@@ -96,6 +155,64 @@ export function transformServiceManifest(options: TransformOptions): TransformRe
   if (!ALLOWED_SERVICE_NAMES.includes(requestedServiceName as any)) {
     throw new Error(`Unsupported service name: "${requestedServiceName}". Supported services are: ${ALLOWED_SERVICE_NAMES.join(', ')}`);
   }
+
+  // Infer or validate environment
+  let resolvedEnv: 'production' | 'staging';
+  if (options.environment) {
+    if (options.environment !== 'production' && options.environment !== 'staging') {
+      throw new Error(`Invalid environment name: "${options.environment}". Must be "production" or "staging".`);
+    }
+    resolvedEnv = options.environment;
+  } else {
+    resolvedEnv = requestedServiceName === 'echonote-staging' ? 'staging' : 'production';
+  }
+
+  // Cross-validation of environment and service name
+  if (resolvedEnv === 'staging' && requestedServiceName !== 'echonote-staging') {
+    throw new Error(`Service name "${requestedServiceName}" is invalid for staging environment. Expected "echonote-staging".`);
+  }
+  if (resolvedEnv === 'production' && requestedServiceName === 'echonote-staging') {
+    throw new Error(`Service name "${requestedServiceName}" is invalid for production environment.`);
+  }
+
+  // 1. Serving revision resolution and validation
+  let servingRevision = options.servingRevision;
+  if (!servingRevision) {
+    // For unit tests and backwards compatibility in programmatic transformation,
+    // if options.servingRevision is omitted, use the test fixture baseline for production.
+    // However, if specified, it must be validated.
+    if (resolvedEnv === 'production') {
+      servingRevision = TEST_FIXTURE_BASELINE_REVISION;
+    } else {
+      throw new Error('Serving revision is required for staging manifest transformation.');
+    }
+  }
+
+  validateRevisionFormat(servingRevision);
+
+  // 2. Service account resolution and validation
+  let expectedServiceAccount: string;
+  if (resolvedEnv === 'production') {
+    expectedServiceAccount = options.serviceAccount ?? EXPECTED_SERVICE_ACCOUNT;
+    if (expectedServiceAccount !== EXPECTED_SERVICE_ACCOUNT) {
+      throw new Error(`Production requires service account "${EXPECTED_SERVICE_ACCOUNT}", got "${expectedServiceAccount}"`);
+    }
+  } else {
+    // Staging requires an explicitly supplied service account (via options or CLI)
+    const suppliedSa = options.serviceAccount || process.env.STAGING_SERVICE_ACCOUNT;
+    if (!suppliedSa || typeof suppliedSa !== 'string' || suppliedSa.trim() === '') {
+      throw new Error('Missing required staging service account. You must explicitly supply a valid staging service account via --service-account=<email> or STAGING_SERVICE_ACCOUNT.');
+    }
+    expectedServiceAccount = suppliedSa.trim();
+    validateServiceAccountFormat(expectedServiceAccount);
+
+    // Reject accidental substitution of production service account into staging
+    if (expectedServiceAccount === EXPECTED_SERVICE_ACCOUNT) {
+      throw new Error('[STAGING ISOLATION BREACH]: Cannot use production service account in staging.');
+    }
+  }
+
+  const expectedArtifactRegistry = resolvedEnv === 'staging' ? STAGING_ARTIFACT_REGISTRY : EXPECTED_ARTIFACT_REGISTRY;
 
   if (!imageDigest || !/^sha256:[a-f0-9]{64}$/.test(imageDigest)) {
     throw new Error(`Invalid immutable image digest format: "${imageDigest}". Must be sha256:<64 hex characters>.`);
@@ -116,7 +233,7 @@ export function transformServiceManifest(options: TransformOptions): TransformRe
     throw new Error(`Invalid Cloud Run Service document. Expected apiVersion: serving.knative.dev/v1, kind: Service. Got apiVersion: ${doc.apiVersion}, kind: ${doc.kind}`);
   }
 
-  // 1. Validate Service metadata
+  // Validate Service metadata
   const actualName = doc.metadata?.name;
   if (actualName !== requestedServiceName) {
     throw new Error(`Service name mismatch: expected "${requestedServiceName}", got "${actualName}"`);
@@ -130,25 +247,33 @@ export function transformServiceManifest(options: TransformOptions): TransformRe
   const namespace = doc.metadata?.namespace;
   const expectedProjectNumber = '200551109142';
 
-  if (
-    namespace &&
-    namespace !== EXPECTED_PROJECT_ID &&
-    namespace !== expectedProjectNumber
-  ) {
-    throw new Error(
-      `Namespace mismatch: expected "${EXPECTED_PROJECT_ID}" or project number "${expectedProjectNumber}", got "${namespace}"`
-    );
+  if (resolvedEnv === 'production') {
+    if (
+      namespace &&
+      namespace !== EXPECTED_PROJECT_ID &&
+      namespace !== expectedProjectNumber
+    ) {
+      throw new Error(
+        `Namespace mismatch: expected "${EXPECTED_PROJECT_ID}" or project number "${expectedProjectNumber}", got "${namespace}"`
+      );
+    }
+  } else {
+    if (namespace && namespace !== STAGING_PROJECT_ID) {
+      throw new Error(
+        `Namespace mismatch: expected "${STAGING_PROJECT_ID}", got "${namespace}"`
+      );
+    }
   }
 
-  // 2. Validate Template Spec
+  // Validate Template Spec
   if (!doc.spec || !doc.spec.template || !doc.spec.template.spec) {
     throw new Error('Invalid Service document: missing spec.template.spec');
   }
 
   const templateSpec = doc.spec.template.spec;
   const serviceAccount = templateSpec.serviceAccountName;
-  if (serviceAccount !== EXPECTED_SERVICE_ACCOUNT) {
-    throw new Error(`Service account mismatch: expected "${EXPECTED_SERVICE_ACCOUNT}", got "${serviceAccount}"`);
+  if (serviceAccount !== expectedServiceAccount) {
+    throw new Error(`Service account mismatch: expected "${expectedServiceAccount}", got "${serviceAccount}"`);
   }
 
   const containers = templateSpec.containers;
@@ -158,7 +283,7 @@ export function transformServiceManifest(options: TransformOptions): TransformRe
 
   const container = containers[0];
 
-  // 3. Strip previous revision name and stale source annotations from template metadata
+  // Strip previous revision name and stale source annotations from template metadata
   if (doc.spec.template.metadata) {
     delete doc.spec.template.metadata.name;
     if (doc.spec.template.metadata.annotations) {
@@ -166,21 +291,80 @@ export function transformServiceManifest(options: TransformOptions): TransformRe
     }
   }
 
-  // 4. Update container image to pinned immutable digest
-  const expectedImageUri = `${EXPECTED_ARTIFACT_REGISTRY}@${imageDigest}`;
+  // Update container image to pinned immutable digest
+  const expectedImageUri = `${expectedArtifactRegistry}@${imageDigest}`;
   container.image = expectedImageUri;
 
-  // 5. Construct atomic desired env entries
+  // Construct atomic desired env entries
+  let baseDefaults: Record<string, string>;
+  let ordinaryKeys: string[];
+
+  if (resolvedEnv === 'production') {
+    baseDefaults = { ...DEFAULT_ORDINARY_ENV_VARS };
+    ordinaryKeys = [
+      'RAZORPAY_MODE',
+      'RAZORPAY_KEY_ID',
+      'NODE_ENV',
+      'ALLOW_PRODUCTION_RESOURCES',
+      'APP_URL',
+      'RESEND_FROM_EMAIL',
+      'RAZORPAY_PRO_MONTHLY_PLAN_ID',
+      'RAZORPAY_PRO_YEARLY_PLAN_ID',
+      'RAZORPAY_TEAM_MONTHLY_PLAN_ID',
+      'RAZORPAY_TEAM_YEARLY_PLAN_ID',
+    ];
+  } else {
+    baseDefaults = { ...DEFAULT_STAGING_ORDINARY_ENV_VARS };
+    ordinaryKeys = [
+      'RAZORPAY_MODE',
+      'RAZORPAY_KEY_ID',
+      'NODE_ENV',
+      'STAGING_ISOLATION_REQUIRED',
+      'APP_URL',
+      'RESEND_FROM_EMAIL',
+      'RAZORPAY_PRO_MONTHLY_PLAN_ID',
+      'RAZORPAY_PRO_YEARLY_PLAN_ID',
+      'RAZORPAY_TEAM_MONTHLY_PLAN_ID',
+      'RAZORPAY_TEAM_YEARLY_PLAN_ID',
+    ];
+  }
+
   const ordinaryValues: Record<string, string | undefined> = {
-    ...DEFAULT_ORDINARY_ENV_VARS,
+    ...baseDefaults,
     RAZORPAY_KEY_ID: 'RAZORPAY_KEY_ID' in ordinaryEnvOverrides
       ? ordinaryEnvOverrides.RAZORPAY_KEY_ID
       : process.env.RAZORPAY_KEY_ID,
     ...ordinaryEnvOverrides,
   };
 
+  // Fail-closed checks for Staging Isolation
+  if (resolvedEnv === 'staging') {
+    if (ordinaryValues.ALLOW_PRODUCTION_RESOURCES === 'true') {
+      throw new Error('[STAGING ISOLATION BREACH]: ALLOW_PRODUCTION_RESOURCES must NOT be enabled in staging.');
+    }
+    if (ordinaryValues.NODE_ENV !== 'staging') {
+      throw new Error(`[STAGING ISOLATION BREACH]: NODE_ENV must be "staging", got "${ordinaryValues.NODE_ENV}".`);
+    }
+    if (ordinaryValues.STAGING_ISOLATION_REQUIRED !== 'true') {
+      throw new Error('[STAGING ISOLATION BREACH]: STAGING_ISOLATION_REQUIRED must be "true".');
+    }
+  }
+
+  // Fail-closed checks for Production Guards
+  if (resolvedEnv === 'production') {
+    if (ordinaryValues.NODE_ENV !== 'production') {
+      throw new Error(`[PRODUCTION GUARD]: NODE_ENV must be "production", got "${ordinaryValues.NODE_ENV}".`);
+    }
+    if (ordinaryValues.ALLOW_PRODUCTION_RESOURCES !== 'true') {
+      throw new Error('[PRODUCTION GUARD]: ALLOW_PRODUCTION_RESOURCES must be "true" for production.');
+    }
+    if (ordinaryValues.STAGING_ISOLATION_REQUIRED === 'true') {
+      throw new Error('[PRODUCTION GUARD]: STAGING_ISOLATION_REQUIRED must NOT be set in production.');
+    }
+  }
+
   // Validate RAZORPAY_KEY_ID and RAZORPAY_MODE
-  const mode = ordinaryValues.RAZORPAY_MODE || 'live';
+  const mode = ordinaryValues.RAZORPAY_MODE || (resolvedEnv === 'production' ? 'live' : 'test');
   const keyId = ordinaryValues.RAZORPAY_KEY_ID;
 
   if (!keyId || typeof keyId !== 'string' || keyId.trim() === '') {
@@ -202,13 +386,16 @@ export function transformServiceManifest(options: TransformOptions): TransformRe
     throw new Error(`Invalid RAZORPAY_MODE: "${mode}". Mode must be "live" or "test".`);
   }
 
-  // Production requires strictly 'live'
-  if (mode !== 'live') {
+  if (resolvedEnv === 'production' && mode !== 'live') {
     throw new Error(`Invalid RAZORPAY_MODE: "${mode}". Production requires "live".`);
   }
 
+  if (resolvedEnv === 'staging' && mode !== 'test') {
+    throw new Error(`Invalid RAZORPAY_MODE: "${mode}". Staging requires "test".`);
+  }
+
   // Validate plan IDs regex
-  const planRegex = /^plan_[A-Za-z0-9]+$/;
+  const planRegex = /^plan_[A-Za-z0-9_]+$/;
   const planKeys: (keyof OrdinaryEnvVarConfig)[] = [
     'RAZORPAY_PRO_MONTHLY_PLAN_ID',
     'RAZORPAY_PRO_YEARLY_PLAN_ID',
@@ -218,7 +405,7 @@ export function transformServiceManifest(options: TransformOptions): TransformRe
   for (const k of planKeys) {
     const val = ordinaryValues[k];
     if (!val || !planRegex.test(val)) {
-      throw new Error(`Invalid plan ID for ${k}: "${val}". Must match ^plan_[A-Za-z0-9]+$`);
+      throw new Error(`Invalid plan ID for ${k}: "${val}". Must match ^plan_[A-Za-z0-9_]+$`);
     }
   }
 
@@ -232,20 +419,6 @@ export function transformServiceManifest(options: TransformOptions): TransformRe
       };
     };
   }> = [];
-
-  // Add 9 ordinary variables
-  const ordinaryKeys: (keyof OrdinaryEnvVarConfig)[] = [
-    'RAZORPAY_MODE',
-    'RAZORPAY_KEY_ID',
-    'NODE_ENV',
-    'ALLOW_PRODUCTION_RESOURCES',
-    'APP_URL',
-    'RESEND_FROM_EMAIL',
-    'RAZORPAY_PRO_MONTHLY_PLAN_ID',
-    'RAZORPAY_PRO_YEARLY_PLAN_ID',
-    'RAZORPAY_TEAM_MONTHLY_PLAN_ID',
-    'RAZORPAY_TEAM_YEARLY_PLAN_ID',
-  ];
 
   for (const key of ordinaryKeys) {
     desiredEnv.push({
@@ -283,8 +456,7 @@ export function transformServiceManifest(options: TransformOptions): TransformRe
 
   container.env = desiredEnv;
 
-  // 6. Explicitly preserve existing serving revision at 100% traffic
-  // Do NOT route traffic to the newly created revision yet.
+  // Explicitly preserve existing serving revision at 100% traffic
   doc.spec.traffic = [
     {
       percent: 100,
@@ -292,7 +464,7 @@ export function transformServiceManifest(options: TransformOptions): TransformRe
     },
   ];
 
-  // 7. Serialize to clean Knative YAML
+  // Serialize to clean Knative YAML
   const transformedYaml = YAML.stringify(doc, {
     indent: 2,
     lineWidth: 0,
@@ -304,8 +476,9 @@ export function transformServiceManifest(options: TransformOptions): TransformRe
     secretVarCount: SECRET_MAPPINGS.length,
     imageUri: expectedImageUri,
     pinnedServingRevision: servingRevision,
-    serviceAccount,
+    serviceAccount: expectedServiceAccount,
     serviceName: requestedServiceName,
+    environment: resolvedEnv,
   };
 }
 
@@ -316,8 +489,10 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.met
     let inputYamlPath = '';
     let outputYamlPath = '';
     let imageDigest = '';
-    let servingRevision = BASELINE_SERVING_REVISION;
+    let servingRevision: string | undefined;
     let serviceName = EXPECTED_SERVICE_NAME;
+    let environment: 'production' | 'staging' | undefined;
+    let serviceAccount: string | undefined;
 
     for (const arg of args) {
       if (arg.startsWith('--input=')) {
@@ -330,13 +505,30 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.met
         servingRevision = arg.substring('--serving-revision='.length);
       } else if (arg.startsWith('--service-name=')) {
         serviceName = arg.substring('--service-name='.length);
+      } else if (arg.startsWith('--service-account=')) {
+        serviceAccount = arg.substring('--service-account='.length);
+      } else if (arg.startsWith('--environment=')) {
+        const envVal = arg.substring('--environment='.length);
+        if (envVal === 'production' || envVal === 'staging') {
+          environment = envVal;
+        } else {
+          throw new Error(`Invalid environment: "${envVal}". Must be "production" or "staging".`);
+        }
       }
     }
 
     if (!inputYamlPath || !outputYamlPath || !imageDigest) {
-      console.error('Usage: tsx scripts/prepare-declarative-service.ts --input=<service.yaml> --output=<desired.yaml> --digest=<sha256:...> [--serving-revision=<rev>] [--service-name=<echonote|echonote-prod>]');
+      console.error('Usage: tsx scripts/prepare-declarative-service.ts --input=<service.yaml> --output=<desired.yaml> --digest=<sha256:...> --serving-revision=<rev> [--environment=<production|staging>] [--service-name=<name>] [--service-account=<email>]');
       process.exit(1);
     }
+
+    // Refinement 1: CLI requires explicit --serving-revision to prevent silent fallback to historical fixtures
+    if (!servingRevision || servingRevision.trim() === '') {
+      console.error('ERROR: Missing required --serving-revision argument in CLI invocation. Silent fallback to historical revisions is strictly disabled.');
+      process.exit(1);
+    }
+
+    validateRevisionFormat(servingRevision);
 
     const inputContent = fs.readFileSync(inputYamlPath, 'utf8');
     const result = transformServiceManifest({
@@ -344,12 +536,14 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.met
       imageDigest,
       servingRevision,
       serviceName,
+      environment,
+      serviceAccount,
       ordinaryEnvOverrides: {
-        RAZORPAY_KEY_ID: process.env.RAZORPAY_KEY_ID,
-        RAZORPAY_PRO_MONTHLY_PLAN_ID: process.env.RAZORPAY_PRO_MONTHLY_PLAN_ID,
-        RAZORPAY_PRO_YEARLY_PLAN_ID: process.env.RAZORPAY_PRO_YEARLY_PLAN_ID,
-        RAZORPAY_TEAM_MONTHLY_PLAN_ID: process.env.RAZORPAY_TEAM_MONTHLY_PLAN_ID,
-        RAZORPAY_TEAM_YEARLY_PLAN_ID: process.env.RAZORPAY_TEAM_YEARLY_PLAN_ID,
+        ...(process.env.RAZORPAY_KEY_ID ? { RAZORPAY_KEY_ID: process.env.RAZORPAY_KEY_ID } : {}),
+        ...(process.env.RAZORPAY_PRO_MONTHLY_PLAN_ID ? { RAZORPAY_PRO_MONTHLY_PLAN_ID: process.env.RAZORPAY_PRO_MONTHLY_PLAN_ID } : {}),
+        ...(process.env.RAZORPAY_PRO_YEARLY_PLAN_ID ? { RAZORPAY_PRO_YEARLY_PLAN_ID: process.env.RAZORPAY_PRO_YEARLY_PLAN_ID } : {}),
+        ...(process.env.RAZORPAY_TEAM_MONTHLY_PLAN_ID ? { RAZORPAY_TEAM_MONTHLY_PLAN_ID: process.env.RAZORPAY_TEAM_MONTHLY_PLAN_ID } : {}),
+        ...(process.env.RAZORPAY_TEAM_YEARLY_PLAN_ID ? { RAZORPAY_TEAM_YEARLY_PLAN_ID: process.env.RAZORPAY_TEAM_YEARLY_PLAN_ID } : {}),
       },
     });
 
@@ -357,12 +551,13 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.met
     fs.writeFileSync(outputYamlPath, result.yaml, { mode: 0o600, encoding: 'utf8' });
 
     console.log('✅ Declarative Cloud Run Service Specification generated successfully:');
+    console.log(`   Environment:              ${result.environment}`);
     console.log(`   Service Name:             ${result.serviceName}`);
-    console.log(`   Service Account:          ${result.serviceAccount}`);
+    console.log(`   Service Account:          ${result.serviceAccount} (${result.environment === 'production' ? 'production default verified' : 'explicitly supplied staging account'})`);
     console.log(`   Immutable Image URI:      ${result.imageUri}`);
     console.log(`   Ordinary Variables:       ${result.ordinaryVarCount} configured`);
     console.log(`   Secret Manager Mappings:  ${result.secretVarCount} mapped to Secret Manager`);
-    console.log(`   Traffic Specification:    100% pinned to ${result.pinnedServingRevision} (0% to new revision)`);
+    console.log(`   Traffic Specification:    100% pinned to verified ${result.pinnedServingRevision} (0% to new revision)`);
     console.log(`   Output Manifest:          ${outputYamlPath} (permissions 0600)`);
   } catch (err: any) {
     console.error(`ERROR: ${err?.message || err}`);

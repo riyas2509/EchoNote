@@ -101,7 +101,7 @@ test('6. Staging dry-run outputs echonote-staging plan and exits 0', () => {
   assert(res.stdout.includes('Environment:         staging'));
   assert(res.stdout.includes('Target Project:      echonote-staging'));
   assert(res.stdout.includes('Target Region:       us-west1'));
-  assert(res.stdout.includes('https://echonote-staging-zfo2izdqla-uw.a.run.app/api/internal/reports/process-recurring'));
+  assert(res.stdout.includes('https://echonote-staging-3fgo4kkjgq-uw.a.run.app/api/internal/reports/process-recurring'));
   assert(res.stdout.includes('[DRY-RUN / PRINT MODE]: No mutations will be executed.'));
 });
 

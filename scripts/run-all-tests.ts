@@ -134,6 +134,10 @@ export const TEST_SUITES: TestSuiteDefinition[] = [
     filePath: 'tests/test_deployment_script_safety.ts',
   },
   {
+    name: 'Staging Configuration Isolation & Scheduler Reliability (Req 24)',
+    filePath: 'tests/test_staging_configuration_isolation.ts',
+  },
+  {
     name: 'Cloud Scheduler Script Safety & Provisioning (Req 24)',
     filePath: 'tests/test_scheduler_script_safety.ts',
   },
