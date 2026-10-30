@@ -150,6 +150,7 @@ export const PricingPage: React.FC = () => {
   const pricingStructuredData = {
     "@context": "https://schema.org",
     "@type": "WebPage",
+    "@id": "https://echonote-25.vercel.app/pricing#webpage",
     "name": "EchoNote Pricing & Plans",
     "description": "Transparent pricing for EchoNote decision and execution memory platform. Free, Pro, Team, and Enterprise plans available.",
     "mainEntity": {

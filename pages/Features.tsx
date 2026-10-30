@@ -60,9 +60,11 @@ export const Features: React.FC<FeaturesProps> = ({
     "@graph": [
       {
         "@type": "SoftwareApplication",
+        "@id": "https://echonote-25.vercel.app/features#software",
         "name": "EchoNote Features",
         "applicationCategory": "BusinessApplication",
-        "description": "Comprehensive capabilities for capturing conversations, extracting decisions, retaining organizational context, tracking execution, and enterprise governance.",
+        "operatingSystem": "Web Browser",
+        "description": "Comprehensive capabilities for turning conversations into structured decisions, clear ownership, actionable tasks, and traceable organizational memory.",
         "offers": {
           "@type": "Offer",
           "price": "0",

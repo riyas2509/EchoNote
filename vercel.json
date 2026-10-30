@@ -3,6 +3,7 @@
   "outputDirectory": "dist",
   "framework": "vite",
   "rewrites": [
+    { "source": "/api/(.*)", "destination": "https://echonote-zfo2izdqla-uw.a.run.app/api/$1" },
     { "source": "/(.*)", "destination": "/index.html" }
   ]
 }
