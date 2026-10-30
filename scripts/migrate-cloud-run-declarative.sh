@@ -30,8 +30,23 @@ readonly EXPECTED_REGION="us-west1"
 readonly EXPECTED_SERVICE_NAME="echonote"
 readonly EXPECTED_SERVICE_ACCOUNT="200551109142-compute@developer.gserviceaccount.com"
 readonly EXPECTED_ARTIFACT_REGISTRY="us-west1-docker.pkg.dev/echonote-2509/echonote/echonote"
-readonly CURRENT_SERVING_PROD_REVISION="echonote-00009-w5m"
-readonly LAST_KNOWN_PROD_REVISION="echonote-00008-lw9"
+
+# Live baseline variables dynamically discovered from Cloud Run
+LIVE_SERVING_REVISION=""
+LIVE_TRAFFIC_PERCENT=""
+
+# Production Secret Manager Mappings (9 production secrets)
+readonly SECRET_MAPPINGS=(
+  "GEMINI_API_KEY=echonote-gemini-api-key:latest"
+  "RAZORPAY_KEY_SECRET=echonote-razorpay-key-secret:latest"
+  "RAZORPAY_WEBHOOK_SECRET=echonote-razorpay-webhook-secret:latest"
+  "RESEND_API_KEY=echonote-resend-api-key:latest"
+  "PLAYBACK_SECRET=echonote-playback-secret:latest"
+  "CRON_SECRET=echonote-cron-secret:latest"
+  "INTEGRATION_ENCRYPTION_KEY=echonote-integration-encryption-key:latest"
+  "ZOOM_WEBHOOK_SECRET=echonote-zoom-webhook-secret:latest"
+  "REPORT_DOWNLOAD_SECRET=echonote-report-download-secret:latest"
+)
 
 # Default pinned immutable image digest for Step 6M-I
 readonly DEFAULT_IMMUTABLE_DIGEST="sha256:ca1549df6662f01d7c489ed8ebdc536b0044c51ee55aa4d314e5522a9cd8820c"
@@ -229,10 +244,40 @@ run_preflight() {
 }
 
 # ------------------------------------------------------------------------------
+# 7. Dynamic Cloud Run Baseline Discovery
+# ------------------------------------------------------------------------------
+query_live_baseline() {
+  local active_rev=""
+  local traffic_pct=""
+
+  if command -v gcloud &>/dev/null; then
+    active_rev="$(gcloud run services describe "$SERVICE_NAME" \
+      --project="$PROJECT_ID" \
+      --region="$REGION" \
+      --format='value(status.traffic[0].revisionName)' 2>/dev/null || true)"
+    traffic_pct="$(gcloud run services describe "$SERVICE_NAME" \
+      --project="$PROJECT_ID" \
+      --region="$REGION" \
+      --format='value(status.traffic[0].percent)' 2>/dev/null || true)"
+  fi
+
+  LIVE_SERVING_REVISION="${active_rev:-}"
+  LIVE_TRAFFIC_PERCENT="${traffic_pct:-}"
+}
+
+# ------------------------------------------------------------------------------
 # Safe Summary (Zero secrets logged)
 # ------------------------------------------------------------------------------
 print_migration_summary() {
   local digest="$1"
+  local secret_count="${#SECRET_MAPPINGS[@]}"
+  local secret_lines=""
+  for entry in "${SECRET_MAPPINGS[@]}"; do
+    local var_name="${entry%%=*}"
+    local sec_ref="${entry#*=}"
+    secret_lines="${secret_lines}                               ${var_name} -> ${sec_ref}"$'\n'
+  done
+
   echo "======================================================================"
   echo "EchoNote Safe Declarative Cloud Run Migration"
   echo "Target Specifications:"
@@ -248,13 +293,9 @@ print_migration_summary() {
   echo "                               RESEND_FROM_EMAIL, RAZORPAY_PRO_MONTHLY_PLAN_ID,"
   echo "                               RAZORPAY_PRO_YEARLY_PLAN_ID, RAZORPAY_TEAM_MONTHLY_PLAN_ID,"
   echo "                               RAZORPAY_TEAM_YEARLY_PLAN_ID"
-  echo "  Secret Manager Mappings (6): GEMINI_API_KEY -> echonote-gemini-api-key:latest"
-  echo "                               RAZORPAY_KEY_SECRET -> echonote-razorpay-key-secret:latest"
-  echo "                               RAZORPAY_WEBHOOK_SECRET -> echonote-razorpay-webhook-secret:latest"
-  echo "                               RESEND_API_KEY -> echonote-resend-api-key:latest"
-  echo "                               PLAYBACK_SECRET -> echonote-playback-secret:latest"
-  echo "                               CRON_SECRET -> echonote-cron-secret:latest"
-  echo "  Current Serving Revision:    $CURRENT_SERVING_PROD_REVISION (100% traffic locked)"
+  echo "  Secret Manager Mappings ($secret_count):"
+  printf "%s" "$secret_lines"
+  echo "  Current Serving Revision:    ${LIVE_SERVING_REVISION:-querying...} (${LIVE_TRAFFIC_PERCENT:-100}% traffic locked)"
   echo "  New Revision Traffic Target: 0% (traffic promotion requires explicit action)"
   echo "======================================================================"
 }
@@ -270,6 +311,22 @@ case "$ACTION" in
     validate_razorpay_key_id
     validate_razorpay_mode
     run_preflight
+
+    # Dynamically determine the live serving revision baseline from Cloud Run
+    query_live_baseline
+
+    if [ -z "$LIVE_SERVING_REVISION" ] || [ "$LIVE_SERVING_REVISION" = "unknown" ]; then
+      echo "ERROR: Unable to safely determine live serving revision baseline from Cloud Run." >&2
+      echo "Refusing to proceed with migration without a verified serving baseline." >&2
+      exit 1
+    fi
+
+    if [ -n "$LIVE_TRAFFIC_PERCENT" ] && [ "$LIVE_TRAFFIC_PERCENT" != "100" ]; then
+      echo "ERROR: Baseline revision '$LIVE_SERVING_REVISION' does not hold 100% traffic (current: '$LIVE_TRAFFIC_PERCENT'%). Aborting." >&2
+      exit 1
+    fi
+
+    BASELINE_SERVING_REVISION="$LIVE_SERVING_REVISION"
 
     DIGEST="$(resolve_digest "$@")"
     print_migration_summary "$DIGEST"
@@ -307,7 +364,7 @@ case "$ACTION" in
       --input="$EXPORTED_YAML" \
       --output="$DESIRED_YAML" \
       --digest="$DIGEST" \
-      --serving-revision="$CURRENT_SERVING_PROD_REVISION"
+      --serving-revision="$BASELINE_SERVING_REVISION"
 
     if [ ! -s "$DESIRED_YAML" ]; then
       echo "ERROR: Generated desired-state manifest is missing or empty. Aborting." >&2
@@ -342,9 +399,9 @@ case "$ACTION" in
 
     echo "Current serving revision in status: '$SERVING_TRAFFIC_REV' ($SERVING_TRAFFIC_PCT%)"
 
-    if [ "$SERVING_TRAFFIC_REV" != "$CURRENT_SERVING_PROD_REVISION" ] || [ "$SERVING_TRAFFIC_PCT" != "100" ]; then
+    if [ "$SERVING_TRAFFIC_REV" != "$BASELINE_SERVING_REVISION" ] || [ "$SERVING_TRAFFIC_PCT" != "100" ]; then
       echo "CRITICAL SAFETY ALERT: Traffic allocation mismatch!" >&2
-      echo "Expected revision '$CURRENT_SERVING_PROD_REVISION' to have 100% traffic." >&2
+      echo "Expected revision '$BASELINE_SERVING_REVISION' to have 100% traffic." >&2
       echo "Actual: '$SERVING_TRAFFIC_REV' has '$SERVING_TRAFFIC_PCT'%." >&2
       exit 1
     fi
@@ -355,7 +412,7 @@ case "$ACTION" in
       --region="$REGION" \
       --format='value(status.latestCreatedRevisionName)' 2>/dev/null || true)"
 
-    if [ -z "$NEW_REVISION" ] || [ "$NEW_REVISION" = "$CURRENT_SERVING_PROD_REVISION" ]; then
+    if [ -z "$NEW_REVISION" ] || [ "$NEW_REVISION" = "$BASELINE_SERVING_REVISION" ]; then
       echo "ERROR: Failed to resolve newly created revision name (got: '$NEW_REVISION'). Aborting." >&2
       exit 1
     fi
@@ -370,7 +427,7 @@ case "$ACTION" in
 
     if [ "$IS_READY" != "True" ]; then
       echo "ERROR: Revision $NEW_REVISION failed health check (Ready: '$IS_READY'). Refusing to promote traffic!" >&2
-      echo "100% of production traffic remains safely on: $CURRENT_SERVING_PROD_REVISION" >&2
+      echo "100% of production traffic remains safely on: $BASELINE_SERVING_REVISION" >&2
       exit 1
     fi
 
@@ -384,7 +441,7 @@ case "$ACTION" in
       echo "ERROR: Revision $NEW_REVISION image verification failed!" >&2
       echo "Expected digest: $DIGEST" >&2
       echo "Actual image:    $REVISION_IMAGE" >&2
-      echo "100% of production traffic remains safely on: $CURRENT_SERVING_PROD_REVISION" >&2
+      echo "100% of production traffic remains safely on: $BASELINE_SERVING_REVISION" >&2
       exit 1
     fi
 
@@ -392,7 +449,7 @@ case "$ACTION" in
     echo "✅ DECLARATIVE MIGRATION PREPARATION & VERIFICATION SUCCEEDED!"
     echo "======================================================================"
     echo "  Verified Revision:        $NEW_REVISION (Ready: True, Digest: $DIGEST)"
-    echo "  Current Serving Traffic:  100% safely on $CURRENT_SERVING_PROD_REVISION"
+    echo "  Current Serving Traffic:  100% safely on $BASELINE_SERVING_REVISION"
     echo "  New Revision Traffic:     0%"
     echo ""
     echo "To shift 100% production traffic to the new revision, run the explicit promote command:"

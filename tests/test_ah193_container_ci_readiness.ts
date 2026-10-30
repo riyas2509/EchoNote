@@ -1,4 +1,4 @@
-﻿/**
+/**
  * AH.193 — Container CI Readiness and Synthetic Startup Audit Test Suite
  *
  * Validates:
@@ -11,7 +11,7 @@
  *    - Proves /api/health does not require Bearer token, session cookie, or auth header.
  *    - Confirms /api/health returns only status, time, and service name without leaking internal environment variables or secrets.
  * 3. Dedicated /api/* 404 Routing:
- *    - Asserts server.ts contains explicit app.all("/api/*", ...) route returning HTTP 404 JSON.
+ *    - Asserts server.ts contains explicit app.all("/api/*all", ...) route returning HTTP 404 JSON.
  *    - Confirms unmatched API requests do NOT inadvertently serve HTML index or status 200.
  * 4. CI Workflow Safety, Permissions & Cleanup:
  *    - Workflow specifies explicit `permissions: contents: read`.
@@ -24,6 +24,8 @@
 
 import fs from 'fs';
 import path from 'path';
+import os from 'os';
+import { spawnSync } from 'child_process';
 
 let passCount = 0;
 let failCount = 0;
@@ -71,10 +73,59 @@ async function runTestSuite() {
   const fbAdminPath = path.join(cwd, "lib", "firebaseAdmin.ts");
   assert(fs.existsSync(fbAdminPath), "lib/firebaseAdmin.ts exists");
   const fbAdminSource = fs.readFileSync(fbAdminPath, 'utf8');
+
+  // Supplementary source-structure checks
   assert(fbAdminSource.includes("admin.credential.applicationDefault()"),
-    "Firebase Admin attempts applicationDefault credential");
-  assert(fbAdminSource.includes("falling back without explicit credential"),
-    "Firebase Admin gracefully falls back without throwing when credentials are absent");
+    "[Source Check (Supplementary)] Firebase Admin attempts applicationDefault credential");
+  assert(fbAdminSource.includes("catch") && fbAdminSource.includes("appAdminInstance = initializeApp({"),
+    "[Source Check (Supplementary)] Firebase Admin gracefully falls back without throwing when credentials are absent");
+
+  // Authoritative runtime behavioral verification: Firebase Admin initializes cleanly in an isolated child process without credentials
+  const tsxCli = path.resolve(cwd, "node_modules", "tsx", "dist", "cli.mjs");
+  const tempEmptyDir = fs.mkdtempSync(path.join(os.tmpdir(), "echonote-ci-empty-adc-"));
+  const childInlineCode = `
+    const { getFirebaseAdminApp, getFirebaseConfig } = await import('./lib/firebaseAdmin.ts');
+    const app = getFirebaseAdminApp();
+    if (!app || app.name !== '[DEFAULT]') process.exit(2);
+    const config = getFirebaseConfig();
+    if (!config.projectId) process.exit(3);
+    console.log('CI_READINESS_OK');
+    process.exit(0);
+  `;
+  const childEnv: NodeJS.ProcessEnv = {
+    ...process.env,
+    PATH: process.env.PATH || '',
+    SystemRoot: process.env.SystemRoot || '',
+    NODE_ENV: 'test',
+    VITE_TEST_MODE: 'true',
+    GOOGLE_CLOUD_PROJECT: 'echonote-test',
+    CLOUDSDK_CONFIG: tempEmptyDir,         // Real empty temp directory blocks developer ADC
+    NO_GCE_CHECK: 'true',                // Prevents metadata server probes
+    GCE_METADATA_HOST: '127.0.0.1:9999', // Metadata network probe safeguard
+  };
+  delete childEnv.GOOGLE_APPLICATION_CREDENTIALS;
+  delete childEnv.GCLOUD_PROJECT;
+  delete childEnv.FIRESTORE_EMULATOR_HOST;
+  delete childEnv.FIREBASE_STORAGE_EMULATOR_HOST;
+  delete childEnv.FIREBASE_AUTH_EMULATOR_HOST;
+  delete childEnv.STAGING_ISOLATION_REQUIRED;
+  delete childEnv.ALLOW_PRODUCTION_RESOURCES;
+
+  try {
+    const childRes = spawnSync(process.execPath, [tsxCli, '--input-type=module', '-e', childInlineCode], {
+      cwd,
+      env: childEnv,
+      encoding: 'utf8',
+      timeout: 30000,
+    });
+
+    assert(
+      childRes.status === 0 && childRes.stdout.includes('CI_READINESS_OK'),
+      "[Behavioral Check (Authoritative)] Firebase Admin initializes cleanly in isolated child process without credentials"
+    );
+  } finally {
+    fs.rmSync(tempEmptyDir, { recursive: true, force: true });
+  }
 
   // Verify checkIdentity error safety
   assert(serverSource.includes("async function checkIdentity()"),

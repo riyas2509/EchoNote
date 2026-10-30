@@ -1,5 +1,8 @@
+import { registerReportDeliveryRoutes } from "./lib/recurringReportDeliveryService.ts";
 import dotenv from "dotenv";
 dotenv.config();
+import { registerRecurringWorkerRoutes } from "./lib/recurringScheduleWorker.ts";
+import { registerRecurringScheduleRoutes } from "./lib/recurringScheduleRoutes.ts";
 
 console.log("🔥 SERVER RESTARTED WITH NEW CODE");
 
@@ -12,6 +15,7 @@ import fs from "fs";
 import os from "os";
 import { convertOpusToWav, convertAudioToWav, normalizeAudioMimeType, isFfmpegAvailable } from "./lib/audioUtils.js";
 import { trimAudioBuffer, validateTrimRange, alignTranscriptSegments } from "./lib/audioTrimService.js";
+import { generatePlaybackToken, verifyPlaybackToken, getPlaybackSecret } from "./lib/playbackTokenService.ts";
 import { FieldValue } from "firebase-admin/firestore";
 import admin from "firebase-admin";
 import { getAuth } from "firebase-admin/auth";
@@ -360,6 +364,9 @@ async function startServer() {
     "https://echonote-25.ai.studio",
     "https://ai.studio",
     "https://echonote-25.vercel.app",
+    "https://echonote.vercel.app",
+    "https://echonote-staging.vercel.app",
+    "https://echonote-stage.vercel.app",
     "https://echotechai.in",
     "https://www.echotechai.in",
     "http://localhost:3000",
@@ -375,6 +382,11 @@ async function startServer() {
 
       const cleanOrigin = origin.replace(/\/+$/, '');
 
+      // Explicitly reject "null" origin string (sandboxed iframes, data URLs, privacy-stripped redirects)
+      if (cleanOrigin === "null" || cleanOrigin === "") {
+        return callback(null, false);
+      }
+
       if (defaultAllowedOrigins.includes(cleanOrigin) || customOrigins.includes(cleanOrigin)) {
         return callback(null, true);
       }
@@ -384,8 +396,14 @@ async function startServer() {
         return callback(null, true);
       }
 
-      // Allow EchoNote Vercel deployments (production, previews, and branch deploys)
-      if (/^https:\/\/echonote(-[a-zA-Z0-9_-]+)?\.vercel\.app$/.test(cleanOrigin)) {
+      // Allow only explicitly approved EchoNote Vercel deployments (strict allowlist, no broad wildcards)
+      const approvedVercelOrigins = [
+        "https://echonote-25.vercel.app",
+        "https://echonote.vercel.app",
+        "https://echonote-staging.vercel.app",
+        "https://echonote-stage.vercel.app"
+      ];
+      if (approvedVercelOrigins.includes(cleanOrigin)) {
         return callback(null, true);
       }
 
@@ -402,11 +420,6 @@ async function startServer() {
 
       // Allow local development on any port
       if (/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(cleanOrigin)) {
-        return callback(null, true);
-      }
-
-      // If in dev mode, allow all origins
-      if (process.env.NODE_ENV !== "production") {
         return callback(null, true);
       }
 
@@ -9737,43 +9750,8 @@ If you did not expect this invitation, you can safely ignore this email.
   // ==============================================================================
   // Secure Audio Playback & Streaming Architecture
   // ==============================================================================
-  // Ephemeral cryptographic secret generated in memory if not explicitly provided in environment
-  const EPHEMERAL_PLAYBACK_SECRET = crypto.randomBytes(32).toString('hex');
-  const PLAYBACK_SECRET = process.env.PLAYBACK_SECRET || process.env.SESSION_SECRET || EPHEMERAL_PLAYBACK_SECRET;
-
-  function generatePlaybackToken(payload: { uid: string; recId: string; email?: string; platform_admin?: boolean; role?: string }, expiresIn = 900): { token: string; expiresIn: number } {
-    const exp = Math.floor(Date.now() / 1000) + expiresIn;
-    const tokenData = { ...payload, exp };
-    const encodedData = Buffer.from(JSON.stringify(tokenData)).toString("base64url");
-    const signature = crypto.createHmac("sha256", PLAYBACK_SECRET).update(encodedData).digest("base64url");
-    return {
-      token: `${encodedData}.${signature}`,
-      expiresIn
-    };
-  }
-
-  function verifyPlaybackToken(tokenString: string): { valid: boolean; data?: any; error?: string } {
-    try {
-      const parts = tokenString.split(".");
-      if (parts.length !== 2) {
-        return { valid: false, error: "Malformed token format" };
-      }
-      const [encodedData, signature] = parts;
-      const expectedSig = crypto.createHmac("sha256", PLAYBACK_SECRET).update(encodedData).digest("base64url");
-      const sigBuf = Buffer.from(signature);
-      const expBuf = Buffer.from(expectedSig);
-      if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
-        return { valid: false, error: "Invalid token signature" };
-      }
-      const data = JSON.parse(Buffer.from(encodedData, "base64url").toString("utf8"));
-      if (Date.now() / 1000 > data.exp) {
-        return { valid: false, error: "Playback token expired" };
-      }
-      return { valid: true, data };
-    } catch (err: any) {
-      return { valid: false, error: err?.message || "Verification failed" };
-    }
-  }
+  // Validates persistent secret configuration or warns on ephemeral fallback
+  getPlaybackSecret();
 
   const authorizeRecordingAccess = async (
     user: { uid: string; email?: string; platform_admin?: boolean; role?: string; orgRole?: string; [key: string]: any },
@@ -13289,10 +13267,8 @@ If you did not expect this invitation, you can safely ignore this email.
           transaction.set(docRef, updateData, { merge: true });
 
           // Also mirror to projectTasks
-          try {
-            const mirrorRef = db.collection("projectTasks").doc(item.taskId);
-            transaction.set(mirrorRef, updateData, { merge: true });
-          } catch {}
+          const mirrorRef = db.collection("projectTasks").doc(item.taskId);
+          transaction.set(mirrorRef, updateData, { merge: true });
         }
 
         // Apply notification creations
@@ -16475,6 +16451,621 @@ If you did not expect this invitation, you can safely ignore this email.
     }
   });
 
+
+  // 10. POST /api/follow-ups/:meetingId/complete-reasoning - Complete reasoning meeting workflow (Req 23)
+  app.post("/api/follow-ups/:meetingId/complete-reasoning", requireAuth, async (req: AuthenticatedRequest, res: express.Response) => {
+    try {
+      const { meetingId } = req.params;
+      if (!meetingId || typeof meetingId !== "string" || !meetingId.trim()) {
+        return res.status(400).json({ error: "Bad Request", message: "Valid meetingId is required." });
+      }
+
+      const body = req.body || {};
+      const {
+        rootCause,
+        agreedDueDate,
+        agreedStartDate,
+        scheduleVersionToken,
+        autoPropagateDownstream,
+        resolveExceptionIds
+      } = body;
+
+      // 1. Validate rootCause
+      if (!rootCause || typeof rootCause !== "string" || !rootCause.trim()) {
+        return res.status(400).json({
+          error: "Bad Request",
+          code: "INVALID_ROOT_CAUSE",
+          message: "A non-empty rootCause explaining the incomplete task is required."
+        });
+      }
+      if (rootCause.trim().length > 3000) {
+        return res.status(400).json({
+          error: "Bad Request",
+          code: "INVALID_ROOT_CAUSE",
+          message: "rootCause must not exceed 3000 characters."
+        });
+      }
+
+      // 2. Validate calendar dates
+      if (!agreedDueDate || typeof agreedDueDate !== "string" || !agreedDueDate.trim()) {
+        return res.status(400).json({
+          error: "Bad Request",
+          code: "INVALID_CALENDAR_DATE",
+          message: "A valid agreedDueDate calendar date (YYYY-MM-DD) is required."
+        });
+      }
+
+      const parsedDue = parseCalendarDate(agreedDueDate);
+      if (!parsedDue) {
+        return res.status(400).json({
+          error: "Bad Request",
+          code: "INVALID_CALENDAR_DATE",
+          message: "agreedDueDate must be a valid calendar date in YYYY-MM-DD format."
+        });
+      }
+
+      let cleanStartDate: string | undefined = undefined;
+      if (agreedStartDate !== undefined && agreedStartDate !== null) {
+        if (typeof agreedStartDate !== "string" || !agreedStartDate.trim()) {
+          return res.status(400).json({
+            error: "Bad Request",
+            code: "INVALID_CALENDAR_DATE",
+            message: "agreedStartDate, if provided, must be a valid non-empty string."
+          });
+        }
+        const parsedStart = parseCalendarDate(agreedStartDate);
+        if (!parsedStart) {
+          return res.status(400).json({
+            error: "Bad Request",
+            code: "INVALID_CALENDAR_DATE",
+            message: "agreedStartDate must be a valid calendar date in YYYY-MM-DD format."
+          });
+        }
+        const startIso = `${parsedStart.year}-${String(parsedStart.month).padStart(2, "0")}-${String(parsedStart.day).padStart(2, "0")}`;
+        const dueIso = `${parsedDue.year}-${String(parsedDue.month).padStart(2, "0")}-${String(parsedDue.day).padStart(2, "0")}`;
+        if (startIso > dueIso) {
+          return res.status(400).json({
+            error: "Bad Request",
+            code: "INVALID_DATE_RELATIONSHIP",
+            message: `agreedStartDate (${startIso}) cannot be after agreedDueDate (${dueIso}).`
+          });
+        }
+        cleanStartDate = startIso;
+      }
+      const cleanDueDate = `${parsedDue.year}-${String(parsedDue.month).padStart(2, "0")}-${String(parsedDue.day).padStart(2, "0")}`;
+
+      // 3. Validate scheduleVersionToken
+      if (!scheduleVersionToken || typeof scheduleVersionToken !== "string" || !scheduleVersionToken.trim()) {
+        return res.status(400).json({
+          error: "Bad Request",
+          code: "MISSING_SCHEDULE_VERSION_TOKEN",
+          message: "scheduleVersionToken is required for deterministic consistency and optimistic concurrency control."
+        });
+      }
+
+      // 4. Validate autoPropagateDownstream is explicit boolean (mandatory field)
+      if (autoPropagateDownstream === undefined || typeof autoPropagateDownstream !== "boolean") {
+        return res.status(400).json({
+          error: "Bad Request",
+          code: "INVALID_PROPAGATION_FLAG",
+          message: "autoPropagateDownstream must be an explicit boolean value."
+        });
+      }
+
+      // 5. Validate resolveExceptionIds format (if provided, must be array of strings)
+      if (resolveExceptionIds !== undefined && resolveExceptionIds !== null) {
+        if (!Array.isArray(resolveExceptionIds) || resolveExceptionIds.some(eid => typeof eid !== "string" || !eid.trim())) {
+          return res.status(400).json({
+            error: "Bad Request",
+            code: "INVALID_EXCEPTION_IDS",
+            message: "resolveExceptionIds, if provided, must be an array of non-empty strings."
+          });
+        }
+      }
+
+      // 6. Fetch and validate meeting
+      const meetingDoc = await db.collection("followUpMeetings").doc(meetingId).get();
+      if (!meetingDoc.exists) {
+        return res.status(404).json({ error: "Not Found", message: "Follow-up meeting not found." });
+      }
+
+      const meetingData = { id: meetingDoc.id, ...meetingDoc.data() } as any;
+      const projectId = meetingData.projectId;
+      if (!projectId) {
+        return res.status(500).json({ error: "Internal Server Error", message: "Meeting is missing projectId." });
+      }
+
+      // 7. Project Authorization: EDIT_CONTENT required
+      const projAccess = await resolveProjectAccess(db, req.user, projectId, { requiredPermission: "EDIT_CONTENT" });
+      if (!projAccess.hasAccess || !projAccess.permissions.canEditContent) {
+        if (projAccess.notFound) {
+          return res.status(404).json({ error: "Not Found", message: "Project not found." });
+        }
+        return res.status(403).json({
+          error: "Forbidden",
+          message: "Permission denied: Only editors or administrators can complete reasoning meetings."
+        });
+      }
+
+      // 8. Check meeting status eligibility
+      if (meetingData.status === "completed") {
+        return res.status(400).json({
+          error: "Bad Request",
+          code: "ALREADY_COMPLETED",
+          message: "Meeting is already marked completed."
+        });
+      }
+      if (meetingData.status === "cancelled") {
+        return res.status(400).json({
+          error: "Bad Request",
+          code: "MEETING_CANCELLED",
+          message: "Cannot complete a cancelled meeting."
+        });
+      }
+
+      // 9. Resolve target task from trusted persisted meeting data
+      const relatedTaskIds: string[] = Array.isArray(meetingData.relatedTaskIds) ? meetingData.relatedTaskIds : [];
+      if (relatedTaskIds.length === 0) {
+        return res.status(400).json({
+          error: "Bad Request",
+          code: "NO_ASSOCIATED_TASK",
+          message: "Follow-up meeting does not have an associated task for reasoning completion."
+        });
+      }
+      const targetTaskId = relatedTaskIds[0];
+
+      // 10. Execute transactionally
+      const result = await db.runTransaction(async (transaction) => {
+        // Re-read meeting inside transaction to prevent duplicate concurrent completions
+        const freshMeetingDoc = await transaction.get(db.collection("followUpMeetings").doc(meetingId));
+        if (!freshMeetingDoc.exists) {
+          const nfErr: any = new Error("Follow-up meeting was removed.");
+          nfErr.statusCode = 404;
+          throw nfErr;
+        }
+        const freshMeeting = { id: freshMeetingDoc.id, ...freshMeetingDoc.data() } as any;
+        if (freshMeeting.status === "completed") {
+          const compErr: any = new Error("Meeting is already marked completed.");
+          compErr.statusCode = 400;
+          compErr.errorCode = "ALREADY_COMPLETED";
+          throw compErr;
+        }
+
+        // Read all project tasks from authoritative collection (consistent with preview & execute)
+        let snapshot = await transaction.get(db.collection("tasks").where("projectId", "==", projectId));
+        let primaryCollection = "tasks";
+        if (snapshot.empty) {
+          snapshot = await transaction.get(db.collection("projectTasks").where("projectId", "==", projectId));
+          primaryCollection = "projectTasks";
+        }
+
+        // Normalize allTasks fields exactly matching preview & execute token calculation
+        const allTasks: SchedulableTask[] = snapshot.docs.map(doc => {
+          const d = doc.data() || {};
+          return {
+            id: doc.id,
+            projectId: d.projectId || projectId,
+            title: d.title || "Untitled Task",
+            status: d.status || "pending",
+            startDate: d.startDate || null,
+            dueDate: d.dueDate || null,
+            prerequisiteTaskIds: Array.isArray(d.prerequisiteTaskIds) ? d.prerequisiteTaskIds : [],
+            assigneeId: d.assigneeId || null,
+            assigneeEmail: d.assigneeEmail || null,
+            activityHistory: Array.isArray(d.activityHistory) ? d.activityHistory : [],
+            updatedAt: typeof d.updatedAt === "string" ? d.updatedAt : (d.updatedAt?.toDate ? d.updatedAt.toDate().toISOString() : undefined)
+          };
+        });
+
+        const targetTask = allTasks.find(t => t.id === targetTaskId);
+        if (!targetTask) {
+          const nfErr: any = new Error(`Target task "${targetTaskId}" does not belong to project "${projectId}" or does not exist.`);
+          nfErr.statusCode = 404;
+          nfErr.errorCode = "NOT_FOUND";
+          throw nfErr;
+        }
+
+        // Tenant and project isolation check on task
+        if (targetTask.projectId !== projectId) {
+          const crossProjErr: any = new Error(`Task "${targetTaskId}" does not belong to project "${projectId}".`);
+          crossProjErr.statusCode = 403;
+          crossProjErr.errorCode = "CROSS_PROJECT_REFERENCE";
+          throw crossProjErr;
+        }
+
+        // Concurrency token validation (matches preview algorithm deterministically)
+        const currentVersionToken = computeScheduleVersionToken(allTasks);
+        if (scheduleVersionToken !== currentVersionToken) {
+          const staleErr: any = new Error("The project tasks schedule was modified by another operation. Please refresh the preview.");
+          staleErr.statusCode = 409;
+          staleErr.errorCode = "STALE_VERSION";
+          staleErr.currentScheduleVersionToken = currentVersionToken;
+          throw staleErr;
+        }
+
+        // Calculate schedule propagation or direct update
+        let tasksToUpdate: any[] = [];
+        let notificationsToCreate: InAppNotificationRecord[] = [];
+        const now = new Date().toISOString();
+        const actorUid = req.user.uid;
+        const actorEmail = normalizeEmail(req.user.email);
+        const performerName = req.user.displayName || req.user.name || (req.user.email ? req.user.email.split("@")[0] : "User");
+        const triggerTitle = targetTask.title || "Prerequisite Task";
+
+        if (autoPropagateDownstream) {
+          const propagation = calculateDeadlinePropagation(allTasks, targetTaskId, {
+            newStartDate: cleanStartDate,
+            newDueDate: cleanDueDate
+          });
+
+          if (propagation.hasConflicts) {
+            const conflictErr: any = new Error(`Cannot apply schedule changes due to conflicts: ${propagation.conflicts.join(", ")}`);
+            conflictErr.statusCode = 400;
+            conflictErr.errorCode = "CONFLICT_GRAPH";
+            conflictErr.conflicts = propagation.conflicts;
+            throw conflictErr;
+          }
+
+          tasksToUpdate = propagation.affectedTasks.filter(a => {
+            if (a.isCompleted) return false;
+            const startChanged = a.proposedStartDate !== a.currentStartDate;
+            const dueChanged = a.proposedDueDate !== a.currentDueDate;
+            return startChanged || dueChanged;
+          });
+
+          // Generate notifications for affected downstream tasks
+          for (const item of tasksToUpdate) {
+            if (item.isDirectTarget) continue;
+            const orig = allTasks.find(t => t.id === item.taskId);
+            if (!orig) continue;
+
+            const rawAssigneeId = orig.assigneeId || null;
+            const rawAssigneeEmail = orig.assigneeEmail || null;
+            const normAssigneeEmail = rawAssigneeEmail ? normalizeEmail(rawAssigneeEmail) : null;
+
+            const isActor = (rawAssigneeId && rawAssigneeId === actorUid) ||
+                            (normAssigneeEmail && normAssigneeEmail === actorEmail);
+            if (isActor) continue;
+
+            const hasReliableRecipient = Boolean(
+              (rawAssigneeId && typeof rawAssigneeId === "string" && rawAssigneeId.trim()) ||
+              (normAssigneeEmail && isValidEmail(normAssigneeEmail))
+            );
+            if (!hasReliableRecipient) continue;
+
+            const recipientIdentifier = rawAssigneeId || normAssigneeEmail!;
+            const dedupKey = generateDeadlinePropagationDedupKey(
+              projectId,
+              item.taskId,
+              recipientIdentifier,
+              item.proposedDueDate,
+              item.proposedStartDate,
+              item.shiftDays || 0
+            );
+
+            const { title: notifTitle, message: notifMessage } = formatDeadlinePropagationMessage({
+              affectedTaskTitle: item.title,
+              triggerTaskTitle: triggerTitle,
+              performerName,
+              oldDueDate: item.currentDueDate,
+              newDueDate: item.proposedDueDate,
+              shiftDays: item.shiftDays || 0
+            });
+
+            notificationsToCreate.push({
+              id: dedupKey,
+              projectId,
+              taskId: item.taskId,
+              recipientUserId: rawAssigneeId,
+              recipientEmail: normAssigneeEmail,
+              userId: rawAssigneeId,
+              userEmail: normAssigneeEmail,
+              type: "DEADLINE_PROPAGATED",
+              title: notifTitle,
+              message: notifMessage,
+              metadata: {
+                triggerTaskId: targetTaskId,
+                triggerTaskTitle: triggerTitle,
+                affectedTaskId: item.taskId,
+                affectedTaskTitle: item.title,
+                oldStartDate: item.currentStartDate,
+                oldDueDate: item.currentDueDate,
+                newStartDate: item.proposedStartDate,
+                newDueDate: item.proposedDueDate,
+                shiftDays: item.shiftDays || 0,
+                performerId: actorUid,
+                performerName,
+                scheduleVersionToken: currentVersionToken
+              },
+              isRead: false,
+              createdAt: now,
+              updatedAt: now,
+              idempotencyKey: dedupKey
+            });
+          }
+        } else {
+          // Direct target task update only (autoPropagateDownstream = false)
+          const startChanged = cleanStartDate !== undefined && cleanStartDate !== targetTask.startDate;
+          const dueChanged = cleanDueDate !== targetTask.dueDate;
+          if (startChanged || dueChanged) {
+            tasksToUpdate.push({
+              taskId: targetTaskId,
+              title: targetTask.title,
+              isDirectTarget: true,
+              proposedStartDate: cleanStartDate !== undefined ? cleanStartDate : targetTask.startDate,
+              proposedDueDate: cleanDueDate,
+              currentStartDate: targetTask.startDate,
+              currentDueDate: targetTask.dueDate,
+              shiftDays: null
+            });
+          }
+        }
+
+        // Exception handling: read exception docs
+        const requestedExceptionIds: string[] = Array.isArray(resolveExceptionIds) ? resolveExceptionIds : [];
+        const relatedExceptionIds: string[] = Array.isArray(freshMeeting.relatedExceptionIds) ? freshMeeting.relatedExceptionIds : [];
+        const exceptionsToResolve: any[] = [];
+        const exceptionsToAnnotate: any[] = [];
+
+        // Verify requested exceptions belong to related exceptions list
+        for (const reqId of requestedExceptionIds) {
+          if (!relatedExceptionIds.includes(reqId)) {
+            const err: any = new Error(`Exception "${reqId}" is not associated with this reasoning meeting.`);
+            err.statusCode = 400;
+            err.errorCode = "UNASSOCIATED_EXCEPTION";
+            throw err;
+          }
+        }
+
+        for (const eid of relatedExceptionIds) {
+          const exDoc = await transaction.get(db.collection("taskExceptions").doc(eid));
+          if (!exDoc.exists) {
+            if (requestedExceptionIds.includes(eid)) {
+              const nfExErr: any = new Error(`Exception "${eid}" not found.`);
+              nfExErr.statusCode = 404;
+              nfExErr.errorCode = "NOT_FOUND";
+              throw nfExErr;
+            }
+            continue;
+          }
+          const exData = { id: exDoc.id, ...exDoc.data() } as any;
+          if (exData.projectId !== projectId) {
+            const crossExErr: any = new Error(`Exception "${eid}" does not belong to project "${projectId}".`);
+            crossExErr.statusCode = 403;
+            crossExErr.errorCode = "CROSS_PROJECT_REFERENCE";
+            throw crossExErr;
+          }
+
+          // Blocker safety: if exception is "blocked", resolving it requires explicit request AND verification
+          // of non-blocker state. A new agreed deadline alone does NOT resolve a blocker.
+          if (requestedExceptionIds.includes(eid)) {
+            if (exData.type === "blocked") {
+              // Keep blocker open; annotate with agreed deadline instead of falsely marking resolved
+              exceptionsToAnnotate.push(exData);
+            } else if (["open", "in_progress", "acknowledged"].includes(exData.status)) {
+              exceptionsToResolve.push(exData);
+            }
+          } else if (["open", "in_progress", "acknowledged"].includes(exData.status)) {
+            // Unrequested active exceptions are annotated with reasoning outcome
+            exceptionsToAnnotate.push(exData);
+          }
+        }
+
+        // Accurate transaction write accounting:
+        // 1. tasks writes: tasksToUpdate.length
+        // 2. projectTasks mirror writes: tasksToUpdate.length
+        // 3. notifications writes: notificationsToCreate.length
+        // 4. followUpMeetings write: 1
+        // 5. taskExceptions writes: exceptionsToResolve.length + exceptionsToAnnotate.length
+        const FIRESTORE_MAX_TRANSACTION_WRITES = 500;
+        const taskWrites = tasksToUpdate.length;
+        const mirrorWrites = tasksToUpdate.length;
+        const notifWrites = notificationsToCreate.length;
+        const meetingWrites = 1;
+        const exceptionWrites = exceptionsToResolve.length + exceptionsToAnnotate.length;
+        const totalPlannedWrites = taskWrites + mirrorWrites + notifWrites + meetingWrites + exceptionWrites;
+
+        if (totalPlannedWrites > FIRESTORE_MAX_TRANSACTION_WRITES) {
+          const payloadErr: any = new Error(
+            `Reasoning meeting completion would perform ${totalPlannedWrites} atomic writes (${taskWrites} primary tasks, ${mirrorWrites} mirror projectTasks, ${notifWrites} notifications, ${meetingWrites} meeting, ${exceptionWrites} exceptions), exceeding the Firestore limit of ${FIRESTORE_MAX_TRANSACTION_WRITES}.`
+          );
+          payloadErr.statusCode = 413;
+          payloadErr.errorCode = "PAYLOAD_TOO_LARGE";
+          payloadErr.details = {
+            totalPlannedWrites,
+            maxAllowedWrites: FIRESTORE_MAX_TRANSACTION_WRITES,
+            taskWrites,
+            mirrorWrites,
+            notifWrites,
+            meetingWrites,
+            exceptionWrites
+          };
+          throw payloadErr;
+        }
+
+        // Apply task updates
+        for (const item of tasksToUpdate) {
+          const docRef = db.collection("tasks").doc(item.taskId);
+          const updateData: Record<string, any> = { updatedAt: now };
+          if (item.proposedStartDate !== undefined) updateData.startDate = item.proposedStartDate || "";
+          if (item.proposedDueDate !== undefined) updateData.dueDate = item.proposedDueDate || "";
+
+          const originalTask = allTasks.find(t => t.id === item.taskId);
+          const existingHistory = Array.isArray(originalTask?.activityHistory) ? originalTask.activityHistory : [];
+          const activityDetails = item.isDirectTarget
+            ? `Deadline rescheduled via reasoning meeting "${freshMeeting.title || meetingId}" (Root cause: ${rootCause.trim().substring(0, 100)}; due: ${item.proposedDueDate})`
+            : `Deadline propagated from prerequisite task "${triggerTitle}" (due: ${item.proposedDueDate})`;
+
+          const newActivity = {
+            id: crypto.randomUUID ? crypto.randomUUID().substring(0, 8) : Math.random().toString(36).substring(2, 9),
+            action: item.isDirectTarget ? "reasoning_rescheduled" : "schedule_propagated",
+            performedBy: performerName,
+            timestamp: now,
+            details: activityDetails
+          };
+
+          updateData.activityHistory = [...existingHistory, newActivity];
+          transaction.set(docRef, updateData, { merge: true });
+
+          const mirrorRef = db.collection("projectTasks").doc(item.taskId);
+          transaction.set(mirrorRef, updateData, { merge: true });
+        }
+
+        // Apply notifications
+        for (const notif of notificationsToCreate) {
+          const notifRef = db.collection("notifications").doc(notif.id);
+          transaction.set(notifRef, notif);
+        }
+
+        // Apply exception resolutions
+        for (const ex of exceptionsToResolve) {
+          const exRef = db.collection("taskExceptions").doc(ex.id);
+          const existingHistory = Array.isArray(ex.history) ? ex.history : [];
+          const historyEntry = {
+            id: crypto.randomUUID ? crypto.randomUUID().substring(0, 8) : Math.random().toString(36).substring(2, 9),
+            action: "resolved",
+            performedBy: actorUid,
+            performedByName: performerName,
+            performedByEmail: req.user.email || "",
+            timestamp: now,
+            previousStatus: ex.status,
+            newStatus: "resolved",
+            details: `Resolved via reasoning meeting "${freshMeeting.title || meetingId}". New deadline: ${cleanDueDate}.`
+          };
+          transaction.set(exRef, {
+            status: "resolved",
+            resolutionSummary: `Resolved via reasoning meeting: Root cause: ${rootCause.trim().substring(0, 200)}. Agreed deadline: ${cleanDueDate}.`,
+            resolvedAt: now,
+            resolvedById: actorUid,
+            updatedAt: now,
+            history: [...existingHistory, historyEntry]
+          }, { merge: true });
+        }
+
+        // Apply exception annotations
+        for (const ex of exceptionsToAnnotate) {
+          const exRef = db.collection("taskExceptions").doc(ex.id);
+          const existingHistory = Array.isArray(ex.history) ? ex.history : [];
+          const historyEntry = {
+            id: crypto.randomUUID ? crypto.randomUUID().substring(0, 8) : Math.random().toString(36).substring(2, 9),
+            action: "updated",
+            performedBy: actorUid,
+            performedByName: performerName,
+            performedByEmail: req.user.email || "",
+            timestamp: now,
+            details: `Reasoning meeting completed. Root cause: ${rootCause.trim().substring(0, 200)}. Agreed deadline: ${cleanDueDate}. (Underlying blocker remains open).`
+          };
+          transaction.set(exRef, {
+            updatedAt: now,
+            history: [...existingHistory, historyEntry]
+          }, { merge: true });
+        }
+
+        // Structured reasoning outcome
+        const reasoningOutcome = {
+          rootCause: rootCause.trim(),
+          agreedDueDate: cleanDueDate,
+          agreedStartDate: cleanStartDate || null,
+          autoPropagateDownstream,
+          propagationPerformed: autoPropagateDownstream && tasksToUpdate.length > 0,
+          propagationSummary: {
+            targetTaskId,
+            updatedTaskCount: tasksToUpdate.length,
+            updatedTasks: tasksToUpdate.map(t => ({
+              taskId: t.taskId,
+              title: t.title,
+              startDate: t.proposedStartDate,
+              dueDate: t.proposedDueDate,
+              shiftDays: t.shiftDays
+            })),
+            notificationsCreated: notificationsToCreate.length
+          },
+          resolvedExceptionIds: exceptionsToResolve.map(e => e.id),
+          annotatedExceptionIds: exceptionsToAnnotate.map(e => e.id),
+          completedAt: now,
+          completedBy: {
+            uid: actorUid,
+            name: performerName,
+            email: req.user.email || ""
+          }
+        };
+
+        const meetingHistoryEntry = {
+          id: crypto.randomUUID ? crypto.randomUUID().substring(0, 8) : Math.random().toString(36).substring(2, 9),
+          action: "completed",
+          performedBy: actorUid,
+          performedByName: performerName,
+          performedByEmail: req.user.email || "",
+          timestamp: now,
+          previousStatus: freshMeeting.status,
+          newStatus: "completed",
+          details: `Reasoning meeting completed. Root cause: ${rootCause.trim().substring(0, 150)}. Agreed due date: ${cleanDueDate}. Propagated tasks: ${tasksToUpdate.length}.`
+        };
+
+        const meetingUpdates = {
+          status: "completed",
+          completedAt: now,
+          updatedAt: now,
+          reasoningOutcome,
+          history: [...(Array.isArray(freshMeeting.history) ? freshMeeting.history : []), meetingHistoryEntry]
+        };
+
+        const meetingRef = db.collection("followUpMeetings").doc(meetingId);
+        transaction.set(meetingRef, meetingUpdates, { merge: true });
+
+        return {
+          success: true,
+          message: `Reasoning meeting completed successfully. ${tasksToUpdate.length} task schedule(s) updated.`,
+          meeting: { ...freshMeeting, ...meetingUpdates },
+          reasoningOutcome
+        };
+      });
+
+      // 11. Audit event logging (post-commit with reliable durability)
+      try {
+        await recordAuthAuditEvent(db, {
+          eventType: "REASONING_MEETING_COMPLETED",
+          action: "follow_up.reasoning.complete",
+          status: "allowed",
+          severity: "medium",
+          actorUserId: req.user.uid,
+          actorEmail: req.user.email,
+          projectId,
+          resourceId: meetingId,
+          resourceType: "followUpMeeting",
+          requiredPermission: "EDIT_CONTENT",
+          callerRole: projAccess.role,
+          details: `Completed reasoning meeting "${result.meeting.title || meetingId}" for task "${targetTaskId}". Agreed due date: ${cleanDueDate}.`,
+          metadata: {
+            meetingId,
+            targetTaskId,
+            agreedDueDate: cleanDueDate,
+            agreedStartDate: cleanStartDate || null,
+            autoPropagateDownstream,
+            updatedTaskCount: result.reasoningOutcome.propagationSummary.updatedTaskCount,
+            notificationsCreated: result.reasoningOutcome.propagationSummary.notificationsCreated,
+            resolvedExceptionsCount: result.reasoningOutcome.resolvedExceptionIds.length,
+            annotatedExceptionsCount: result.reasoningOutcome.annotatedExceptionIds.length
+          }
+        });
+      } catch (auditErr: any) {
+        console.warn("⚠️ [AUDIT WARNING]: Failed to record reasoning meeting completion audit log:", auditErr?.message || auditErr);
+      }
+
+      return res.json(result);
+    } catch (err: any) {
+      console.error("[Complete Reasoning Meeting Error]:", err);
+      const status = err.statusCode || (err.errorCode === "STALE_VERSION" ? 409 : 500);
+      return res.status(status).json({
+        error: err.errorCode || "Internal Server Error",
+        message: err.message || "Failed to complete reasoning meeting.",
+        ...(err.currentScheduleVersionToken ? { currentScheduleVersionToken: err.currentScheduleVersionToken } : {}),
+        ...(err.conflicts ? { conflicts: err.conflicts } : {}),
+        ...(err.details ? { details: err.details } : {})
+      });
+    }
+  });
+
   // =========================================================================
   // DEPENDENCY AND DEADLINE TRACKING ENGINE (Step 3.7)
   // =========================================================================
@@ -17091,16 +17682,19 @@ If you did not expect this invitation, you can safely ignore this email.
     }
   });
 
+  // Requirement 24.3: Register recurring schedule management routes
+  registerRecurringScheduleRoutes(app, db);
+
   // Google Cloud Scheduler OIDC Verification Client (singleton instance)
   const oidcClient = new OAuth2Client();
 
   // Internal Worker Authentication Helper
   // Supports:
-  // 1. x-cron-key matching CRON_SECRET (legacy shared secret)
-  // 2. Authorization: Bearer <INTERNAL_WORKER_SECRET>
+  // 1. x-cron-key matching CRON_SECRET (dedicated shared secret)
+  // 2. Authorization: Bearer <INTERNAL_WORKER_SECRET> (dedicated internal bearer secret)
   // 3. Authorization: Bearer <Google_Cloud_Scheduler_OIDC_Token> (verified via google-auth-library)
-  // 4. Authorization: Bearer <Firebase_Admin_ID_Token> (admin / org_admin / platform_admin)
   // Fails closed when unconfigured and never logs raw tokens or secrets.
+  // Note: Firebase user ID tokens (including admin/org_admin) are strictly prohibited per Requirement 24.17.
   async function authenticateInternalWorker(req: express.Request): Promise<{ authorized: boolean; reason?: string; identity?: string }> {
     const cronKey = req.headers["x-cron-key"];
     const configuredCronSecret = (process.env.CRON_SECRET || "").trim();
@@ -17164,20 +17758,20 @@ If you did not expect this invitation, you can safely ignore this email.
           }
         }
 
-        // Firebase Admin Bearer Token verification
-        try {
-          const decoded = await getAuth(appAdmin).verifyIdToken(token);
-          if (decoded.role === "admin" || decoded.platform_admin === true || decoded.role === "org_admin" || decoded.isOrgAdmin === true) {
-            return { authorized: true, identity: decoded.email || decoded.uid };
-          }
-        } catch {
-          // Token invalid or expired
-        }
+        // Requirement 24.17: Strict worker credential isolation.
+        // Standalone Firebase user ID tokens (even with administrative roles) are explicitly prohibited
+        // from invoking internal worker endpoints. Worker execution requires dedicated worker credentials
+        // (CRON_SECRET, INTERNAL_WORKER_SECRET, or Google Cloud Scheduler OIDC identity).
       }
     }
 
     return { authorized: false, reason: "Valid x-cron-key, authorized OIDC token, or worker Bearer token required." };
   }
+
+  // Requirement 24.4 & 24.5: Register recurring execution worker and report delivery endpoints with OIDC worker auth
+  const recurringStorageBucket = admin.storage().bucket(firebaseConfig.storageBucket || "echonote-2509.firebasestorage.app");
+  registerRecurringWorkerRoutes(app, db, recurringStorageBucket, authenticateInternalWorker);
+  registerReportDeliveryRoutes(app, db, recurringStorageBucket, authenticateInternalWorker);
 
   // 3. POST /api/internal/tracking/process-jobs - Worker endpoint to claim and process pending jobs
   // Authenticated via x-cron-key (CRON_SECRET) or Bearer token (INTERNAL_WORKER_SECRET or Admin)

@@ -80,19 +80,19 @@ export const Home: React.FC<HomeProps> = ({
     "@graph": [
       {
         "@type": "Organization",
-        "@id": "https://echonote.ai/#organization",
+        "@id": "https://echonote-25.vercel.app/#organization",
         "name": "EchoNote",
-        "url": "https://echonote.ai",
-        "logo": "https://echonote.ai/Logo-2.png",
-        "description": "EchoNote provides AI-powered decision and execution memory for coordination-heavy teams, turning conversations into searchable decisions, context, ownership, and follow-through."
+        "url": "https://echonote-25.vercel.app",
+        "logo": "https://echonote-25.vercel.app/Logo-2.png",
+        "description": "EchoNote is a decision and execution memory layer for coordination-heavy teams, turning conversations into structured decisions, clear ownership, and traceable organizational memory."
       },
       {
         "@type": "SoftwareApplication",
-        "@id": "https://echonote.ai/#software",
+        "@id": "https://echonote-25.vercel.app/#software",
         "name": "EchoNote",
         "applicationCategory": "BusinessApplication",
         "operatingSystem": "Web Browser",
-        "description": "Organizational decision memory and execution tracking platform that transforms audio conversations and meetings into structured decisions, rationale, ownership, and historical continuity.",
+        "description": "Decision and execution memory platform that turns conversations into structured decisions, clear ownership, actionable tasks, and traceable organizational memory.",
         "offers": {
           "@type": "Offer",
           "price": "0",
@@ -101,17 +101,17 @@ export const Home: React.FC<HomeProps> = ({
       },
       {
         "@type": "WebSite",
-        "@id": "https://echonote.ai/#website",
-        "url": "https://echonote.ai",
+        "@id": "https://echonote-25.vercel.app/#website",
+        "url": "https://echonote-25.vercel.app",
         "name": "EchoNote",
         "description": "Decision & Execution Memory for Coordination-Heavy Teams",
         "publisher": {
-          "@id": "https://echonote.ai/#organization"
+          "@id": "https://echonote-25.vercel.app/#organization"
         }
       },
       {
         "@type": "FAQPage",
-        "@id": "https://echonote.ai/#faq",
+        "@id": "https://echonote-25.vercel.app/#faq",
         "mainEntity": [
           {
             "@type": "Question",

@@ -335,6 +335,58 @@
   }
 </style>
 <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+  <!-- Structured Data / JSON-LD for Search Engines and AI Answer Engines (GEO) -->
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@graph": [
+      {
+        "@type": "Organization",
+        "@id": "https://echonote-25.vercel.app/#organization",
+        "name": "EchoNote",
+        "url": "https://echonote-25.vercel.app/",
+        "logo": "https://echonote-25.vercel.app/favicon.png",
+        "description": "EchoNote is a decision and execution memory layer for coordination-heavy teams, turning conversations into structured decisions, clear ownership, actionable tasks, and traceable organizational memory.",
+        "contactPoint": {
+          "@type": "ContactPoint",
+          "email": "riya@echotechai.in",
+          "contactType": "customer support"
+        }
+      },
+      {
+        "@type": "SoftwareApplication",
+        "@id": "https://echonote-25.vercel.app/#software",
+        "name": "EchoNote",
+        "applicationCategory": "BusinessApplication",
+        "operatingSystem": "Web",
+        "url": "https://echonote-25.vercel.app/",
+        "description": "Decision and execution memory platform that turns conversations into structured decisions, clear ownership, actionable tasks, and traceable organizational memory.",
+        "offers": {
+          "@type": "Offer",
+          "price": "0",
+          "priceCurrency": "USD"
+        },
+        "featureList": [
+          "Voice and audio meeting recording with AI transcription & speaker diarization",
+          "Automated decision extraction and actionable task creation with ownership",
+          "Reasoning meeting review and completion workflows",
+          "Recurring progress report generation and scheduled email delivery",
+          "Full-text and semantic cross-project search history"
+        ]
+      },
+      {
+        "@type": "WebSite",
+        "@id": "https://echonote-25.vercel.app/#website",
+        "url": "https://echonote-25.vercel.app/",
+        "name": "EchoNote",
+        "description": "EchoNote | Decision & Execution Memory for Coordination-Heavy Teams",
+        "publisher": {
+          "@id": "https://echonote-25.vercel.app/#organization"
+        }
+      }
+    ]
+  }
+  </script>
 </head>
 <body class="min-h-screen">
   <div id="root"></div>

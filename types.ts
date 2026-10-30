@@ -1338,11 +1338,56 @@ export interface FollowUpMeeting {
   cancelledAt?: string | null;
   completedAt?: string | null;
   history: FollowUpHistoryEntry[];
+  reasoningOutcome?: ReasoningMeetingOutcome;
   createdBy: string;
   creatorName: string;
   creatorEmail: string;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface ReasoningMeetingOutcome {
+  rootCause: string;
+  agreedDueDate: string;
+  agreedStartDate?: string | null;
+  autoPropagateDownstream: boolean;
+  propagationPerformed: boolean;
+  propagationSummary: {
+    targetTaskId: string;
+    updatedTaskCount: number;
+    updatedTasks: Array<{
+      taskId: string;
+      title: string;
+      startDate?: string | null;
+      dueDate?: string | null;
+      shiftDays?: number | null;
+    }>;
+    notificationsCreated: number;
+  };
+  resolvedExceptionIds?: string[];
+  annotatedExceptionIds?: string[];
+  completedAt: string;
+  completedBy: {
+    uid: string;
+    name: string;
+    email: string;
+  };
+}
+
+export interface CompleteReasoningMeetingRequest {
+  rootCause: string;
+  agreedDueDate: string;
+  agreedStartDate?: string;
+  scheduleVersionToken: string;
+  autoPropagateDownstream: boolean;
+  resolveExceptionIds?: string[];
+}
+
+export interface CompleteReasoningMeetingResponse {
+  success: boolean;
+  message: string;
+  meeting: FollowUpMeeting;
+  reasoningOutcome: ReasoningMeetingOutcome;
 }
 
 export interface AutomatedTaggingDetection {
@@ -2072,3 +2117,251 @@ export interface CreateProjectFromTemplateResponse {
   tasks: any[];
 }
 
+// ==========================================
+// Requirement 24.2 - Recurrence Scheduling Types
+// ==========================================
+
+export type RecurrenceFrequency = 'weekly' | 'biweekly' | 'monthly' | 'quarterly';
+
+export interface RecurrenceScheduleConfig {
+  frequency: RecurrenceFrequency;
+  timeOfDay: string; // HH:mm format (24-hour, 00:00 - 23:59)
+  timeZone: string; // Valid IANA time zone identifier (e.g., 'Asia/Kolkata', 'America/New_York')
+  dayOfWeek?: number; // 0 = Sunday, 1 = Monday, ..., 6 = Saturday (required for 'weekly' and 'biweekly')
+  dayOfMonth?: number; // 1 - 31, or -1 for last day of month (used for 'monthly' and 'quarterly')
+  anchorDate: string; // ISO 8601 string or YYYY-MM-DD anchor date for cycle alignment
+  startBoundary?: string | null; // Optional ISO 8601 start boundary
+  endBoundary?: string | null; // Optional ISO 8601 end boundary
+}
+
+export interface RecurrenceValidationResult {
+  valid: boolean;
+  errors: string[];
+}
+
+export interface NextOccurrenceResult {
+  nextOccurrence: string; // ISO 8601 UTC string (e.g., '2026-11-02T03:30:00.000Z')
+  localOccurrence: {
+    year: number;
+    month: number;
+    day: number;
+    hour: number;
+    minute: number;
+    timeZone: string;
+    formatted: string;
+  };
+  cycleIndex?: number; // Zero-indexed cycle sequence from anchor
+}
+
+// ==========================================
+// Requirement 24.3 - Recurring Schedule Persistence & Management Types
+// ==========================================
+
+export type ReportCoverageScope = 'all_time' | 'since_last_run' | 'rolling_7_days' | 'rolling_30_days' | 'custom_window';
+
+export interface ReportCoverageConfig {
+  scope: ReportCoverageScope;
+  windowDays?: number; // Optional number of rolling days when scope is 'custom_window'
+}
+
+export interface ReportDeliveryConfig {
+  recipients: string[]; // List of user email addresses to deliver reports to
+  notifyOnFailure?: boolean; // Whether to send failure alerts to creator/recipients
+}
+
+export interface MeetingAutomationConfig {
+  enabled: boolean;
+  meetingTitleTemplate?: string;
+  meetingDurationMinutes?: number;
+  autoInviteAssignees?: boolean;
+}
+
+export interface RecurringScheduleExecutionMetadata {
+  lastRunAt?: string | null;
+  lastRunStatus?: 'success' | 'failed' | 'in_progress' | null;
+  lastError?: string | null;
+  consecutiveFailures?: number;
+  totalRunCount?: number;
+}
+
+export interface RecurringSchedule {
+  id: string;
+  projectId: string;
+  organizationId: string | null;
+  title: string;
+  description?: string;
+  schedule: RecurrenceScheduleConfig;
+  reportType: ReportType;
+  formats: ReportFormat[];
+  coverage: ReportCoverageConfig;
+  delivery: ReportDeliveryConfig;
+  meetingAutomation?: MeetingAutomationConfig;
+  active: boolean;
+  nextRunAt: string; // ISO 8601 UTC timestamp of next scheduled execution
+  execution?: RecurringScheduleExecutionMetadata;
+  createdAt: string; // ISO 8601 UTC timestamp
+  updatedAt: string; // ISO 8601 UTC timestamp
+  createdBy: {
+    uid: string;
+    email: string;
+    name: string;
+  };
+  updatedBy?: {
+    uid: string;
+    email: string;
+    name: string;
+  };
+}
+
+export interface CreateRecurringScheduleRequest {
+  title: string;
+  description?: string;
+  schedule: RecurrenceScheduleConfig;
+  reportType: ReportType;
+  formats: ReportFormat[];
+  coverage?: ReportCoverageConfig;
+  delivery: ReportDeliveryConfig;
+  meetingAutomation?: MeetingAutomationConfig;
+  active?: boolean;
+}
+
+export interface UpdateRecurringScheduleRequest {
+  title?: string;
+  description?: string;
+  schedule?: RecurrenceScheduleConfig;
+  reportType?: ReportType;
+  formats?: ReportFormat[];
+  coverage?: ReportCoverageConfig;
+  delivery?: ReportDeliveryConfig;
+  meetingAutomation?: MeetingAutomationConfig;
+  active?: boolean;
+}
+
+export interface ListRecurringSchedulesResponse {
+  success: boolean;
+  projectId: string;
+  schedules: RecurringSchedule[];
+  total: number;
+}
+
+export interface RecurringScheduleResponse {
+  success: boolean;
+  message: string;
+  schedule: RecurringSchedule;
+}
+// ==========================================
+// Requirement 24.4 - Recurring Execution Worker & Artifact Types
+// ==========================================
+
+export type RecurringOccurrenceStatus = 'pending' | 'processing' | 'succeeded' | 'failed';
+
+export interface GeneratedReportArtifact {
+  id: string; // Deterministic artifact ID
+  occurrenceId: string; // Stable occurrence ID
+  scheduleId: string;
+  projectId: string;
+  organizationId: string | null;
+  reportType: ReportType;
+  format: ReportFormat;
+  storagePath: string; // Server-controlled Firebase Storage path
+  contentType: string; // MIME type ('application/vnd.openxmlformats-officedocument.presentationml.presentation' or 'spreadsheetml.sheet')
+  fileSizeBytes: number;
+  reportingPeriod: {
+    startDate: string;
+    endDate: string;
+  };
+  isTruncated: boolean;
+  warnings: string[];
+  generatedAt: string; // ISO 8601 UTC timestamp
+}
+
+export interface RecurringScheduleOccurrence {
+  id: string; // Stable occurrence ID: \_\
+  scheduleId: string;
+  projectId: string;
+  organizationId: string | null;
+  scheduledFor: string; // ISO 8601 UTC canonical scheduled occurrence instant
+  status: RecurringOccurrenceStatus;
+  lease?: {
+    workerId: string;
+    leaseExpiresAt: string; // ISO 8601 UTC timestamp
+    fencingToken: number;
+  } | null;
+  artifacts: GeneratedReportArtifact[];
+  meetingId?: string | null;
+  error?: string | null;
+  retryCount: number;
+  claimedAt?: string | null;
+  completedAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ProcessRecurringResult {
+  claimedCount: number;
+  completedCount: number;
+  skippedCount: number;
+  failedCount: number;
+  occurrences: Array<{
+    occurrenceId: string;
+    scheduleId: string;
+    status: RecurringOccurrenceStatus;
+    error?: string;
+  }>;
+}
+
+// ==========================================
+// Requirement 24.5 - Recurring Report Notification & Delivery Types
+// ==========================================
+
+export type ReportDeliveryStatus =
+  | 'queued'
+  | 'processing'
+  | 'sent'
+  | 'retryable_failure'
+  | 'permanent_failure';
+
+export type ReportDeliveryNotificationType = 'report_ready' | 'report_failed';
+
+export interface ReportDeliveryRecord {
+  id: string; // Deterministic delivery ID: delivery_<occurrenceId>_<type>_<sha256(recipient)>
+  occurrenceId: string;
+  scheduleId: string;
+  projectId: string;
+  organizationId: string | null;
+  notificationType: ReportDeliveryNotificationType;
+  recipientEmail: string;
+  status: ReportDeliveryStatus;
+  attempts: number;
+  maxAttempts: number;
+  workerId?: string | null;
+  leaseExpiresAt?: string | null;
+  providerMessageId?: string | null;
+  artifacts?: Array<{
+    artifactId: string;
+    format: ReportFormat;
+    reportType: ReportType;
+    downloadUrl: string;
+    fileSizeBytes: number;
+  }>;
+  reportingPeriod?: {
+    startDate: string;
+    endDate: string;
+  };
+  meetingId?: string | null;
+  error?: string | null;
+  lastAttemptAt?: string | null;
+  sentAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ReportDownloadTokenClaims {
+  uid?: string;
+  email: string;
+  projectId: string;
+  artifactId: string;
+  occurrenceId: string;
+  exp: number; // Expiration epoch in seconds
+  iat: number;
+}

@@ -1,3 +1,4 @@
+import { RecurringScheduleManager } from './RecurringScheduleManager';
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { 
   ResponsiveContainer, 
@@ -111,6 +112,7 @@ import { useDemoWorkspace, isDemoIdentifier, assertNotDemoWrite } from '../lib/d
 import { WorkspaceTourGuide } from './WorkspaceTourGuide';
 import { DEMO_TOUR_STEPS } from '../lib/demoTourConfig';
 import { DeadlinePropagationModal } from './DeadlinePropagationModal';
+import { ReasoningMeetingCompletionModal } from './ReasoningMeetingCompletionModal';
 import { previewDeadlinePropagation, executeDeadlinePropagation } from '../lib/apiClient';
 import { PropagationPreviewResult } from '../lib/taskScheduling';
 
@@ -194,7 +196,7 @@ export const CollaborationDashboard: React.FC<CollaborationDashboardProps> = ({
 }) => {
   const effectiveTranscriptions = transcriptions || textHistory || [];
   const [chartMode, setChartMode] = useState<'grouped' | 'stacked'>('grouped');
-  const [activeProjectTab, setActiveProjectTab] = useState<'projects' | 'workspace' | 'meetings' | 'search' | 'analytics' | 'timelines' | 'exceptions' | 'followups' | 'tracking'>('workspace');
+  const [activeProjectTab, setActiveProjectTab] = useState<'projects' | 'workspace' | 'meetings' | 'search' | 'analytics' | 'timelines' | 'exceptions' | 'followups' | 'tracking' | 'recurring'>('workspace');
   const [projectSearch, setProjectSearch] = useState('');
   const [isAutomatedTaggingOpen, setIsAutomatedTaggingOpen] = useState(false);
 
@@ -343,6 +345,7 @@ export const CollaborationDashboard: React.FC<CollaborationDashboardProps> = ({
   const [cancelReasonText, setCancelReasonText] = useState('');
   const [completingMeetingId, setCompletingMeetingId] = useState<string | null>(null);
   const [completionNotesText, setCompletionNotesText] = useState('');
+  const [reasoningMeetingToComplete, setReasoningMeetingToComplete] = useState<FollowUpMeeting | null>(null);
 
   // Dependency & Deadline Tracking State (Step 3.7)
   const [trackingMetrics, setTrackingMetrics] = useState<ProjectTrackingMetrics | null>(null);
@@ -3332,6 +3335,20 @@ export const CollaborationDashboard: React.FC<CollaborationDashboardProps> = ({
                 </span>
               )}
             </button>
+            {/* 8. Recurring Reports (Requirement 24) */}
+            <button
+              id="tab-project-recurring"
+              onClick={() => setActiveProjectTab('recurring')}
+              aria-current={activeProjectTab === 'recurring' ? 'page' : undefined}
+              className={`px-3.5 py-2 rounded-xl text-xs font-bold uppercase tracking-wider transition-all flex items-center gap-2 shrink-0 ${
+                activeProjectTab === 'recurring'
+                  ? 'bg-indigo-600 text-white shadow-sm ring-2 ring-indigo-600/20'
+                  : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50 hover:text-slate-900'
+              }`}
+            >
+              <CalendarClock className={`w-4 h-4 ${activeProjectTab === 'recurring' ? 'text-white' : 'text-indigo-600'}`} />
+              <span>Recurring Reports</span>
+            </button>
           </nav>
         </div>
 
@@ -4077,19 +4094,29 @@ export const CollaborationDashboard: React.FC<CollaborationDashboardProps> = ({
                                 Reschedule...
                               </button>
                             )}
-                            {item.status === 'scheduled' && (
+                             {item.status === 'scheduled' && (!item.relatedTaskIds && item.relatedTaskIds.length > 0) && (userRole === 'owner' || userRole === 'admin') && (
+                              <button
+                                type="button"
+                                onClick={() => setReasoningMeetingToComplete(item)}
+                                className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-xs font-bold transition-all shadow-2xs flex items-center gap-1.5"
+                                title="Complete reasoning meeting and resolve task delay"
+                              >
+                                <CalendarClock className="w-3.5 h-3.5" />
+                                 Complete Reasoning...
+                              </button>
+                            )}
+                            {item.status === 'scheduled' && (!item.relatedTaskIds || item.relatedTaskIds.length === 0 || !(userRole === 'owner' || userRole === 'admin')) && (
                               <button
                                 type="button"
                                 onClick={() => {
-                                  setCompletingMeetingId(item.id);
-                                  setCompletionNotesText('');
-                                }}
+                                   setCompletingMeetingId(item.id);
+                                   setCompletionNotesText('');
+                                 }}
                                 className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-bold transition-all shadow-2xs"
                               >
                                 Mark Completed
                               </button>
-                            )}
-                            {!['completed', 'cancelled'].includes(item.status) && (
+                             )}\n                            {!['completed', 'cancelled'].includes(item.status) && (
                               <button
                                 type="button"
                                 onClick={() => {
@@ -4110,6 +4137,12 @@ export const CollaborationDashboard: React.FC<CollaborationDashboardProps> = ({
               );
             })()}
           </div>
+        ) : activeProjectTab === 'recurring' ? (
+          <RecurringScheduleManager
+            projectId={activeProject?.id || ''}
+            projectName={activeProject?.name}
+            userRole={userRole}
+          />
         ) : activeProjectTab === 'tracking' ? (
           <div className="space-y-6">
             {/* Header & Worker Health Bar */}
@@ -7487,6 +7520,85 @@ export const CollaborationDashboard: React.FC<CollaborationDashboardProps> = ({
               <p className="text-slate-500">Status: <span className="font-bold uppercase text-purple-700">{selectedFollowUpDetail.status}</span></p>
             </div>
 
+            {selectedFollowUpDetail.reasoningOutcome && (
+              <div className="p-3.5 bg-amber-50/70 rounded-xl border border-amber-200 text-xs space-y-2.5">
+                <div className="flex items-center justify-between border-b border-amber-200/60 pb-2">
+                  <span className="font-black uppercase tracking-wider text-[11px] text-amber-900 flex items-center gap-1.5">
+                    <CalendarClock className="w-3.5 h-3.5 text-amber-700" />
+                    Reasoning Meeting Outcome
+                  </span>
+                  <span className="text-[10px] text-amber-700 font-semibold">
+                    {new Date(selectedFollowUpDetail.reasoningOutcome.completedAt).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })}
+                  </span>
+                </div>
+
+                <div className="space-y-1">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-amber-800">Root Cause</span>
+                  <p className="text-slate-800 bg-white/80 p-2 rounded-lg border border-amber-100 text-xs whitespace-pre-wrap">
+                    {selectedFollowUpDetail.reasoningOutcome.rootCause}
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2 text-xs">
+                  {selectedFollowUpDetail.reasoningOutcome.agreedStartDate && (
+                    <div className="bg-white/80 p-2 rounded-lg border border-amber-100">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 block">Agreed Start Date</span>
+                      <span className="font-semibold text-slate-800">
+                        {new Date(selectedFollowUpDetail.reasoningOutcome.agreedStartDate).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' })}
+                      </span>
+                    </div>
+                  )}
+                  <div className="bg-white/80 p-2 rounded-lg border border-amber-100">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 block">Agreed Deadline</span>
+                    <span className="font-bold text-amber-900">
+                      {new Date(selectedFollowUpDetail.reasoningOutcome.agreedDueDate).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' })}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2 pt-1">
+                  <span className={selectedFollowUpDetail.reasoningOutcome.propagationPerformed ? 'bg-purple-100 text-purple-800 border border-purple-200 text-[10px] font-bold px-2 py-0.5 rounded-full' : 'bg-slate-100 text-slate-700 border border-slate-200 text-[10px] font-bold px-2 py-0.5 rounded-full'}>
+                    {selectedFollowUpDetail.reasoningOutcome.propagationPerformed ? 'Rescheduled Downstream Tasks' : 'Target Task Only'}
+                  </span>
+                  {selectedFollowUpDetail.reasoningOutcome.propagationSummary && (
+                    <span className="text-[11px] text-slate-600 font-medium">
+                      {selectedFollowUpDetail.reasoningOutcome.propagationSummary.updatedTaskCount} task(s) updated
+                    </span>
+                  )}
+                </div>
+
+                {selectedFollowUpDetail.reasoningOutcome.propagationSummary?.updatedTasks && selectedFollowUpDetail.reasoningOutcome.propagationSummary.updatedTasks.length > 0 && (
+                  <div className="space-y-1 pt-1">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 block">Updated Tasks</span>
+                    <div className="space-y-1 max-h-28 overflow-y-auto pr-1">
+                      {selectedFollowUpDetail.reasoningOutcome.propagationSummary.updatedTasks.map((t) => (
+                        <div key={t.taskId} className="text-[11px] bg-white/70 px-2 py-1 rounded border border-amber-100/70 flex items-center justify-between">
+                          <span className="font-medium text-slate-800 truncate mr-2">{t.title || t.taskId}</span>
+                          <span className="text-slate-500 font-mono text-[10px] shrink-0">
+                            {t.dueDate ? new Date(t.dueDate).toLocaleDateString([], { month: 'short', day: 'numeric' }) : ''}
+                            {t.shiftDays ? (' (+' + t.shiftDays + 'd)') : ''}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  )}
+
+                {selectedFollowUpDetail.reasoningOutcome.resolvedExceptionIds && selectedFollowUpDetail.reasoningOutcome.resolvedExceptionIds.length > 0 && (
+                  <div className="text-[11px] text-emerald-800 bg-emerald-50/80 px-2.5 py-1.5 rounded-lg border border-emerald-200 flex items-center justify-between">
+                    <span className="font-semibold">Resolved Exceptions</span>
+                    <span className="font-bold font-mono text-xs">{selectedFollowUpDetail.reasoningOutcome.resolvedExceptionIds.length} resolved</span>
+                  </div>
+                )}
+
+                {selectedFollowUpDetail.reasoningOutcome.completedBy && (
+                  <div className="text-[10px] text-slate-500 pt-1 border-t border-amber-100 flex items-center justify-between">
+                    <span>Completed by: {selectedFollowUpDetail.reasoningOutcome.completedBy.name || selectedFollowUpDetail.reasoningOutcome.completedBy.email}</span>
+                  </div>
+                )}
+              </div>
+            )}
+
             <div className="overflow-y-auto space-y-3 flex-1 pr-1 border-t border-slate-100 pt-3">
               {(selectedFollowUpDetail.history || []).map((h, idx) => (
                 <div key={h.id || idx} className="p-3 bg-slate-50 rounded-lg border border-slate-200 text-xs space-y-1">
@@ -7516,6 +7628,26 @@ export const CollaborationDashboard: React.FC<CollaborationDashboardProps> = ({
           </div>
         </div>
       )}
+
+      {/* Reasoning Meeting Completion Modal (AH.193 / Req 23) */}
+      <ReasoningMeetingCompletionModal
+        isOpen={Boolean(reasoningMeetingToComplete)}
+        onClose={() => setReasoningMeetingToComplete(null)}
+        meeting={reasoningMeetingToComplete}
+        targetTask={
+          reasoningMeetingToComplete?.relatedTaskIds?.[0]
+            ? tasks.find(t => t.id === reasoningMeetingToComplete.relatedTaskIds[0]) || null
+            : null
+        }
+        exceptions={exceptions}
+        onSuccess={() => {
+          toast.success("Reasoning meeting completed and schedule updated!");
+          fetchFollowUps();
+          fetchExceptions();
+          fetchTrackingInsights();
+          setReasoningMeetingToComplete(null);
+        }}
+      />
 
       {/* Deadline Propagation Modal (AH.181) */}
       <DeadlinePropagationModal

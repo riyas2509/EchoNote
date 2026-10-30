@@ -414,10 +414,25 @@
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["title", "message", "isRead"]
+    },
+    "MfaRecoveryRecord": {
+      "title": "MFA Recovery Record",
+      "description": "Server-side verifiers for single-use MFA recovery codes.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "version": { "type": "number" },
+        "totalCodes": { "type": "number" },
+        "remainingCodes": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "version", "totalCodes", "remainingCodes"]
     }
   },
   "firestore": {
     "/users/{userId}": { "schema": "UserProfile", "description": "User profiles" },
+    "/users/{userId}/security/{securityDoc}": { "schema": "MfaRecoveryRecord", "description": "Authoritative isolated MFA recovery codes verifiers" },
     "/transactions/{id}": { "schema": "Transaction", "description": "Billing and invoice transactions" },
     "/projects/{projectId}": { "schema": "Project", "description": "Collaboration projects" },
     "/recordings/{recordingId}": { "schema": "Recording", "description": "Audio recordings" },

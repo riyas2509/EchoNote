@@ -28,7 +28,13 @@ export interface AuthAuditLogEvent {
     | 'RECORDING_TRIMMED'
     | 'RECORDING_ASSOCIATION_REMOVED'
     | 'RECORDING_ASSOCIATION_ADDED'
-    | 'AI_RESOURCE_GATEWAY_CHECK';
+    | 'AI_RESOURCE_GATEWAY_CHECK'
+    | 'REASONING_MEETING_COMPLETED'
+    | 'REPORT_NOTIFICATION_QUEUED'
+    | 'REPORT_DELIVERY_SENT'
+    | 'REPORT_DELIVERY_FAILED'
+    | 'REPORT_ARTIFACT_DOWNLOADED'
+    | 'REPORT_DOWNLOAD_ACCESS_DENIED';
   action: string;
   status: 'denied' | 'allowed' | 'warning';
   severity: 'low' | 'medium' | 'high' | 'critical';
