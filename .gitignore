@@ -37,3 +37,7 @@ tmp/
 
 .vercel
 .env*
+
+# Sensitive runtime telemetry and test output
+data/ai_usage_store.json
+mfa-test-output.txt

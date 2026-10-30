@@ -189,7 +189,95 @@ export type EmailErrorCode =
   | 'SANDBOX_RESTRICTION'
   | 'MISSING_MESSAGE_ID'
   | 'VALIDATION_ERROR'
+  | 'STAGING_DELIVERY_DISABLED'
+  | 'STAGING_ALLOWLIST_MISSING'
+  | 'STAGING_RECIPIENT_BLOCKED'
   | 'UNEXPECTED_EXCEPTION';
+
+/**
+ * Validates whether email delivery is allowed in staging environment.
+ * Hardened fail-closed staging safety policy (Requirement 24.7.4):
+ * - Staging email delivery is disabled by default.
+ * - Requires STAGING_EMAIL_DELIVERY_ENABLED=true to allow sending.
+ * - Missing or empty allowlist strictly rejects all deliveries.
+ * - Recipient must match STAGING_ALLOWED_RECIPIENTS or STAGING_ALLOWED_DOMAINS.
+ * - Never allows production fallback.
+ */
+export function validateStagingEmailRecipient(recipientEmail: string): {
+  allowed: boolean;
+  reason?: string;
+  errorCode?: EmailErrorCode;
+} {
+  const isStaging =
+    process.env.STAGING_MODE === 'true' ||
+    process.env.NODE_ENV === 'staging' ||
+    process.env.STAGING_SAFETY_ENABLED === 'true';
+
+  // If not staging mode, safety checks pass
+  if (!isStaging) {
+    return { allowed: true };
+  }
+
+  // 1. Staging delivery is disabled by default
+  const deliveryEnabled = process.env.STAGING_EMAIL_DELIVERY_ENABLED === 'true';
+  if (!deliveryEnabled) {
+    return {
+      allowed: false,
+      reason: 'Staging email delivery is disabled by default. Set STAGING_EMAIL_DELIVERY_ENABLED=true to enable.',
+      errorCode: 'STAGING_DELIVERY_DISABLED',
+    };
+  }
+
+  // 2. Parse allowlist
+  const rawAllowedRecipients = process.env.STAGING_ALLOWED_RECIPIENTS || process.env.STAGING_ALLOWED_RECIPIENT_EMAILS || '';
+  const rawAllowedDomains = process.env.STAGING_ALLOWED_DOMAINS || process.env.STAGING_ALLOWED_EMAIL_DOMAINS || '';
+
+  const allowedEmails = new Set(
+    rawAllowedRecipients
+      .split(',')
+      .map(e => e.trim().toLowerCase())
+      .filter(Boolean)
+  );
+
+  const allowedDomains = new Set(
+    rawAllowedDomains
+      .split(',')
+      .map(d => d.trim().toLowerCase().replace(/^@/, ''))
+      .filter(Boolean)
+  );
+
+  if (allowedEmails.size === 0 && allowedDomains.size === 0) {
+    return {
+      allowed: false,
+      reason: 'Staging email delivery fail-closed: allowlist is empty or not configured. Set STAGING_ALLOWED_RECIPIENTS or STAGING_ALLOWED_DOMAINS.',
+      errorCode: 'STAGING_ALLOWLIST_MISSING',
+    };
+  }
+
+  const normalized = (recipientEmail || '').trim().toLowerCase();
+  if (!normalized || !normalized.includes('@')) {
+    return {
+      allowed: false,
+      reason: 'Invalid recipient email format.',
+      errorCode: 'VALIDATION_ERROR',
+    };
+  }
+
+  if (allowedEmails.has(normalized)) {
+    return { allowed: true };
+  }
+
+  const domain = normalized.split('@')[1];
+  if (domain && allowedDomains.has(domain)) {
+    return { allowed: true };
+  }
+
+  return {
+    allowed: false,
+    reason: 'Recipient blocked by staging safety policy: ' + maskEmailForLogs(recipientEmail) + ' is not in the staging allowlist.',
+    errorCode: 'STAGING_RECIPIENT_BLOCKED',
+  };
+}
 
 export interface EmailErrorDetail {
   code: EmailErrorCode;
@@ -233,6 +321,26 @@ async function sendEmail(options: {
   replyTo?: string | string[];
 }): Promise<EmailSendResult> {
   const maskedTo = maskEmailForLogs(options.to);
+
+  // Staging Safety Enforcement (Requirement 24.7.4)
+  const stagingCheck = validateStagingEmailRecipient(options.to);
+  if (!stagingCheck.allowed) {
+    console.warn('[EMAIL SERVICE] Blocked email to ' + maskedTo + ': ' + stagingCheck.reason);
+    const code = stagingCheck.errorCode || 'STAGING_RECIPIENT_BLOCKED';
+    return {
+      success: false,
+      error: stagingCheck.reason,
+      errorCode: code,
+      statusCode: 403,
+      isSandboxOrValidation: true,
+      errorDetail: {
+        code,
+        message: stagingCheck.reason || 'Blocked by staging safety policy.',
+        statusCode: 403,
+        recipientMasked: maskedTo,
+      },
+    };
+  }
   const apiKey = process.env.RESEND_API_KEY;
   if (!apiKey) {
     console.warn(`⚠️ [EMAIL SERVICE] Cannot dispatch email to ${maskedTo}: RESEND_API_KEY environment variable is not configured.`);

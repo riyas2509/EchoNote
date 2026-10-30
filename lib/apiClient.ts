@@ -4,10 +4,42 @@ import { auth } from '../firebase';
  * Returns the base API URL configured in the environment, or empty string for same-origin requests.
  * Safely trims and strips trailing slashes to prevent double slashes.
  */
+export const APPROVED_PRODUCTION_HOSTS: readonly string[] = [
+  'echonote-25.vercel.app',
+  'echonote.vercel.app'
+];
+
+export const APPROVED_STAGING_HOSTS: readonly string[] = [
+  'echonote-staging.vercel.app',
+  'echonote-stage.vercel.app'
+];
+
+export const CLOUD_RUN_PRODUCTION_BACKEND = 'https://echonote-zfo2izdqla-uw.a.run.app';
+export const CLOUD_RUN_STAGING_BACKEND = 'https://echonote-staging-3fgo4kkjgq-uw.a.run.app';
+
+/**
+ * Normalizes a hostname by trimming, lowercasing, stripping any port suffix,
+ * and removing trailing FQDN dots to ensure exact domain comparison.
+ */
+export function normalizeHostname(raw: string | undefined | null): string {
+  if (!raw || typeof raw !== 'string') return '';
+  return raw
+    .trim()
+    .toLowerCase()
+    .replace(/:\d+$/, '') // Strip unexpected port suffix if passed in hostname
+    .replace(/\.+$/, ''); // Strip trailing FQDN dot
+}
+
+/**
+ * Returns the base API URL configured in the environment, or empty string for same-origin requests.
+ * Safely trims and strips trailing slashes to prevent double slashes.
+ * Implements strict, fail-closed environment routing.
+ */
 export function getApiBaseUrl(): string {
   const envUrl = (typeof import.meta !== 'undefined' && (import.meta as any)?.env)
     ? (import.meta as any).env.VITE_API_URL
     : (typeof process !== 'undefined' && process.env ? process.env.VITE_API_URL : undefined);
+
   if (typeof envUrl === 'string') {
     const trimmed = envUrl.trim();
     if (
@@ -16,27 +48,97 @@ export function getApiBaseUrl(): string {
       trimmed.toLowerCase() !== 'undefined' &&
       trimmed.toLowerCase() !== 'null'
     ) {
-      // Remove all trailing slashes
       const cleanBase = trimmed.replace(/\/+$/, '');
-      
-      // Safety check: Warn if VITE_API_URL points to the frontend origin instead of the backend
-      if (typeof window !== 'undefined' && window.location.origin) {
-        try {
-          const parsed = new URL(cleanBase);
-          if (parsed.origin === window.location.origin && window.location.hostname.endsWith('.vercel.app')) {
-            console.warn(
-              "⚠️ [EchoNote Config Warning] VITE_API_URL is configured to the Vercel frontend domain itself. " +
-              "It must point to your Cloud Run Express backend URL (e.g. https://<backend-service>.run.app)."
-            );
+
+      // In browser environment, perform origin and environment integrity checks
+      if (typeof window !== 'undefined' && window.location && window.location.hostname) {
+        const hostname = normalizeHostname(window.location.hostname);
+        const isProdHost = APPROVED_PRODUCTION_HOSTS.includes(hostname);
+        const isStagingHost = APPROVED_STAGING_HOSTS.includes(hostname);
+        const isDevHost = hostname === 'localhost' || hostname === '127.0.0.1';
+
+        // 1. Detect if VITE_API_URL accidentally targets the frontend origin itself
+        if (window.location.origin) {
+          try {
+            const parsed = new URL(cleanBase, window.location.origin);
+            const cleanOrigin = parsed.origin.toLowerCase();
+            const windowOrigin = (window.location.origin || '').trim().toLowerCase().replace(/\/+$/, '');
+
+            if (cleanOrigin === windowOrigin) {
+              if (isProdHost) {
+                console.warn(
+                  "⚠️ [EchoNote Config] VITE_API_URL points to the frontend origin. " +
+                  "Automatically rerouting API requests to the approved production Cloud Run backend."
+                );
+                return CLOUD_RUN_PRODUCTION_BACKEND;
+              } else if (isStagingHost) {
+                console.warn(
+                  "⚠️ [EchoNote Config] VITE_API_URL points to the frontend origin. " +
+                  "Automatically rerouting API requests to the approved staging Cloud Run backend."
+                );
+                return CLOUD_RUN_STAGING_BACKEND;
+              } else {
+                // Untrusted or unknown host pointing at frontend origin: FAIL CLOSED!
+                throw new Error(
+                  `EchoNote API Configuration Error: Untrusted frontend host "${hostname}". Cannot safely resolve Cloud Run backend.`
+                );
+              }
+            }
+          } catch (e: any) {
+            if (e?.message?.includes('EchoNote API Configuration Error')) {
+              throw e;
+            }
           }
-        } catch {
-          // Ignore invalid URL parsing here
+        }
+
+        // 2. Prevent explicit API URLs from crossing environment boundaries or routing from untrusted hosts
+        if (cleanBase.startsWith('http://') || cleanBase.startsWith('https://')) {
+          const cleanBaseLower = cleanBase.toLowerCase();
+          const targetsStaging = cleanBaseLower === CLOUD_RUN_STAGING_BACKEND.toLowerCase() || cleanBaseLower.includes('echonote-staging');
+          const targetsProd = cleanBaseLower === CLOUD_RUN_PRODUCTION_BACKEND.toLowerCase() || cleanBaseLower.includes('echonote-zfo2izdqla');
+
+          if (isProdHost && targetsStaging) {
+            throw new Error('EchoNote API Configuration Error: Production frontend host cannot target staging backend.');
+          }
+          if (isStagingHost && targetsProd) {
+            throw new Error('EchoNote API Configuration Error: Staging frontend host cannot target production backend.');
+          }
+          if (!isProdHost && !isStagingHost && !isDevHost && (targetsProd || targetsStaging)) {
+            throw new Error(`EchoNote API Configuration Error: Untrusted host "${hostname}" cannot route to Cloud Run backend.`);
+          }
         }
       }
 
       return cleanBase;
     }
   }
+
+  // Browser environment fallback when VITE_API_URL is unset or empty
+  if (typeof window !== 'undefined' && window.location && window.location.hostname) {
+    const hostname = normalizeHostname(window.location.hostname);
+
+    // 1. Approved Production Hosts -> Production Cloud Run
+    if (APPROVED_PRODUCTION_HOSTS.includes(hostname)) {
+      return CLOUD_RUN_PRODUCTION_BACKEND;
+    }
+
+    // 2. Approved Staging Hosts -> Staging Cloud Run
+    if (APPROVED_STAGING_HOSTS.includes(hostname)) {
+      return CLOUD_RUN_STAGING_BACKEND;
+    }
+
+    // 3. Local Development Hosts -> Same-origin relative URLs forwarded by Vite dev proxy
+    if (hostname === 'localhost' || hostname === '127.0.0.1') {
+      return '';
+    }
+
+    // 4. Unknown Vercel preview hosts, forks, arbitrary domains -> FAIL CLOSED!
+    throw new Error(
+      `EchoNote API Configuration Error: Untrusted host "${hostname}". Unknown frontend host cannot resolve API backend.`
+    );
+  }
+
+  // Node.js / test environments default to same-origin relative URLs
   return '';
 }
 
@@ -975,6 +1077,38 @@ export async function executeDeadlinePropagation(
   return safeApiJson<PropagationExecuteResponse>(res);
 }
 
+
+// ============================================================================
+// REQUIREMENT 23: REASONING MEETING COMPLETION CLIENT METHOD
+// ============================================================================
+
+import type {
+  CompleteReasoningMeetingRequest,
+  CompleteReasoningMeetingResponse
+} from '../types';
+
+export type {
+  CompleteReasoningMeetingRequest,
+  CompleteReasoningMeetingResponse
+};
+
+/**
+ * Completes a scheduled reasoning meeting for an incomplete task.
+ * Records root cause, updates agreed task deadlines, resolves exceptions,
+ * and conditionally reschedules downstream dependencies with optimistic concurrency control.
+ */
+export async function completeReasoningMeeting(
+  meetingId: string,
+  payload: CompleteReasoningMeetingRequest
+): Promise<CompleteReasoningMeetingResponse> {
+  const endpoint = `/api/follow-ups/${encodeURIComponent(meetingId)}/complete-reasoning`;
+  const res = await apiFetch(endpoint, {
+    method: 'POST',
+    body: JSON.stringify(payload)
+  });
+  return safeApiJson<CompleteReasoningMeetingResponse>(res);
+}
+
 // ============================================================================
 // AH.183: MULTI-PROJECT RECORDING ASSOCIATION CLIENT METHODS
 // ============================================================================
@@ -1375,4 +1509,143 @@ export async function associateMeeting(
     body: JSON.stringify({ projectId })
   });
   return parseApiResponse<AssociateMeetingResponse>(res);
+}
+
+// ==========================================
+// Requirement 24.3 - Recurring Schedule API Client Helpers
+// ==========================================
+
+import type {
+  RecurringSchedule,
+  CreateRecurringScheduleRequest,
+  UpdateRecurringScheduleRequest,
+} from '../types.ts';
+
+export interface ListRecurringSchedulesResponse {
+  success: boolean;
+  schedules: RecurringSchedule[];
+  total: number;
+}
+
+export interface CreateRecurringScheduleResponse {
+  success: boolean;
+  message: string;
+  schedule: RecurringSchedule;
+}
+
+export interface UpdateRecurringScheduleResponse {
+  success: boolean;
+  message: string;
+  schedule: RecurringSchedule;
+}
+
+export interface DeleteRecurringScheduleResponse {
+  success: boolean;
+  message: string;
+  scheduleId: string;
+}
+
+/**
+ * Lists all recurring schedules for a project.
+ */
+export async function listRecurringSchedules(
+  projectId: string
+): Promise<ListRecurringSchedulesResponse> {
+  const endpoint = '/api/projects/' + encodeURIComponent(projectId) + '/recurring-schedules';
+  const res = await apiFetch(endpoint, { method: 'GET' });
+  return safeApiJson<ListRecurringSchedulesResponse>(res);
+}
+
+/**
+ * Creates a new recurring schedule for a project.
+ */
+export async function createRecurringSchedule(
+  projectId: string,
+  payload: CreateRecurringScheduleRequest
+): Promise<CreateRecurringScheduleResponse> {
+  const endpoint = '/api/projects/' + encodeURIComponent(projectId) + '/recurring-schedules';
+  const res = await apiFetch(endpoint, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+  return safeApiJson<CreateRecurringScheduleResponse>(res);
+}
+
+/**
+ * Updates an existing recurring schedule for a project.
+ */
+export async function updateRecurringSchedule(
+  projectId: string,
+  scheduleId: string,
+  payload: UpdateRecurringScheduleRequest
+): Promise<UpdateRecurringScheduleResponse> {
+  const endpoint = '/api/projects/' + encodeURIComponent(projectId) + '/recurring-schedules/' + encodeURIComponent(scheduleId);
+  const res = await apiFetch(endpoint, {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  });
+  return safeApiJson<UpdateRecurringScheduleResponse>(res);
+}
+
+/**
+ * Deletes a recurring schedule for a project.
+ */
+export async function deleteRecurringSchedule(
+  projectId: string,
+  scheduleId: string
+): Promise<DeleteRecurringScheduleResponse> {
+  const endpoint = '/api/projects/' + encodeURIComponent(projectId) + '/recurring-schedules/' + encodeURIComponent(scheduleId);
+  const res = await apiFetch(endpoint, { method: 'DELETE' });
+  return safeApiJson<DeleteRecurringScheduleResponse>(res);
+}
+
+
+export interface RecurringScheduleOccurrenceHistoryItem {
+  id: string;
+  scheduleId: string;
+  projectId: string;
+  organizationId: string | null;
+  scheduledFor: string;
+  status: 'pending' | 'processing' | 'succeeded' | 'failed' | 'skipped';
+  artifacts: Array<{
+    id: string;
+    format: 'pptx' | 'xlsx';
+    storagePath: string;
+    fileSizeBytes: number;
+    downloadUrl?: string;
+  }>;
+  meetingId?: string | null;
+  error?: string | null;
+  retryCount: number;
+  completedAt?: string | null;
+  deliveries: Array<{
+    id: string;
+    notificationType: 'report_ready' | 'report_failed';
+    recipientEmail: string;
+    status: 'queued' | 'processing' | 'sent' | 'retryable_failure' | 'permanent_failure';
+    attempts: number;
+    maxAttempts: number;
+    lastError?: string | null;
+    sentAt?: string | null;
+    createdAt: string;
+  }>;
+}
+
+export interface GetRecurringScheduleHistoryResponse {
+  scheduleId: string;
+  occurrences: RecurringScheduleOccurrenceHistoryItem[];
+}
+
+/**
+ * Requirement 24.6 - Get occurrence and delivery history for a recurring schedule.
+ */
+export async function getRecurringScheduleHistory(
+  projectId: string,
+  scheduleId: string
+): Promise<GetRecurringScheduleHistoryResponse> {
+  const endpoint = '/api/projects/' + encodeURIComponent(projectId) + '/recurring-schedules/' + encodeURIComponent(scheduleId) + '/history';
+  const res = await apiFetch(endpoint, {
+    method: 'GET',
+  });
+  return safeApiJson<GetRecurringScheduleHistoryResponse>(res);
 }
