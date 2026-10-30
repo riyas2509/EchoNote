@@ -27,7 +27,7 @@
 #      Project:           echonote-staging
 #      Region:            us-west1
 #      Canonical App URL: https://echonote-staging-3fgo4kkjgq-uw.a.run.app
-#      Scheduler SA:      echonote-scheduler-invoker@echonote-staging.iam.gserviceaccount.com
+#      Scheduler SA:      echo-scheduler@echonote-staging.iam.gserviceaccount.com
 #      Secret Reference:  echonote-cron-secret:latest (CRON_SECRET)
 #
 # Authentication Modes Supported:
@@ -53,7 +53,7 @@ readonly PROD_SECRET_NAME="echonote-cron-secret"
 readonly STAGING_PROJECT_ID="echonote-staging"
 readonly STAGING_REGION="us-west1"
 readonly STAGING_SERVICE_NAME="echonote-staging"
-readonly STAGING_SERVICE_ACCOUNT="echonote-scheduler-invoker@echonote-staging.iam.gserviceaccount.com"
+readonly STAGING_SERVICE_ACCOUNT="echo-scheduler@echonote-staging.iam.gserviceaccount.com"
 readonly STAGING_SERVICE_URL="https://echonote-staging-3fgo4kkjgq-uw.a.run.app"
 readonly STAGING_SECRET_NAME="echonote-cron-secret"
 
@@ -202,8 +202,46 @@ print_commands() {
   echo "  --message-body='${PAYLOAD_RECOVERY}' \\"
   echo "  --description=\"Quarantines notifications abandoned in dispatching status for >10 minutes (bounded batch: 50).\""
   echo ""
+  echo "--- Command 1B (If Job Present): Update Stale-Dispatch Recovery Job ($AUTH_TYPE) ---"
+  echo "gcloud scheduler jobs update http ${JOB_RECOVERY_NAME} \\"
+  echo "  --project=\"${EXPECTED_PROJECT_ID}\" \\"
+  echo "  --location=\"${EXPECTED_REGION}\" \\"
+  echo "  --schedule=\"${SCHEDULE_RECOVERY}\" \\"
+  echo "  --uri=\"${URI_RECOVERY}\" \\"
+  echo "  --http-method=\"POST\" \\"
+  echo "  --time-zone=\"Etc/UTC\" \\"
+  echo "  --attempt-deadline=\"60s\" \\"
+  if [ "$AUTH_TYPE" = "oidc" ]; then
+    echo "  --oidc-service-account-email=\"${EXPECTED_SERVICE_ACCOUNT}\" \\"
+    echo "  --oidc-token-audience=\"${EXPECTED_SERVICE_URL}\" \\"
+    echo "  --headers=\"Content-Type=application/json\" \\"
+  else
+    echo "  --headers=\"Content-Type=application/json,x-cron-key=<CRON_SECRET_VALUE>\" \\"
+  fi
+  echo "  --message-body='${PAYLOAD_RECOVERY}' \\"
+  echo "  --description=\"Quarantines notifications abandoned in dispatching status for >10 minutes (bounded batch: 50).\""
+  echo ""
   echo "--- Command 2A (If Job Absent): Create Notification Dispatch Worker Job ($AUTH_TYPE) ---"
   echo "gcloud scheduler jobs create http ${JOB_DISPATCH_NAME} \\"
+  echo "  --project=\"${EXPECTED_PROJECT_ID}\" \\"
+  echo "  --location=\"${EXPECTED_REGION}\" \\"
+  echo "  --schedule=\"${SCHEDULE_DISPATCH}\" \\"
+  echo "  --uri=\"${URI_DISPATCH}\" \\"
+  echo "  --http-method=\"POST\" \\"
+  echo "  --time-zone=\"Etc/UTC\" \\"
+  echo "  --attempt-deadline=\"120s\" \\"
+  if [ "$AUTH_TYPE" = "oidc" ]; then
+    echo "  --oidc-service-account-email=\"${EXPECTED_SERVICE_ACCOUNT}\" \\"
+    echo "  --oidc-token-audience=\"${EXPECTED_SERVICE_URL}\" \\"
+    echo "  --headers=\"Content-Type=application/json\" \\"
+  else
+    echo "  --headers=\"Content-Type=application/json,x-cron-key=<CRON_SECRET_VALUE>\" \\"
+  fi
+  echo "  --message-body='${PAYLOAD_DISPATCH}' \\"
+  echo "  --description=\"Processes pending task notification dispatch batch (bounded batch: 10, default-off safety preserved).\""
+  echo ""
+  echo "--- Command 2B (If Job Present): Update Notification Dispatch Worker Job ($AUTH_TYPE) ---"
+  echo "gcloud scheduler jobs update http ${JOB_DISPATCH_NAME} \\"
   echo "  --project=\"${EXPECTED_PROJECT_ID}\" \\"
   echo "  --location=\"${EXPECTED_REGION}\" \\"
   echo "  --schedule=\"${SCHEDULE_DISPATCH}\" \\"
@@ -229,6 +267,28 @@ if [ "$MODE" = "print" ]; then
   echo "No live cloud resources were created or modified."
   exit 0
 fi
+
+# Live execution handling (guarded by operator confirmation)
+echo "SAFETY CHECK: Live resource modification requested."
+read -p "Proceed with live Cloud Scheduler configuration in project ${EXPECTED_PROJECT_ID}? (y/N): " -r CONFIRM
+if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
+  echo "Aborted by operator. No live resources modified."
+  exit 0
+fi
+
+CRON_SECRET_VAL=""
+if [ "$AUTH_TYPE" = "header" ]; then
+  # Ensure xtrace is disabled so secrets are not echoed if someone runs with bash -x
+  set +x
+  CRON_SECRET_VAL="$(gcloud secrets versions access latest --secret="${EXPECTED_SECRET_NAME}" --project="${EXPECTED_PROJECT_ID}" 2>/dev/null || true)"
+  if [ -z "$CRON_SECRET_VAL" ]; then
+    echo "ERROR: Failed to retrieve secret from Secret Manager or secret value is empty." >&2
+    exit 1
+  fi
+fi
+
+# Clear secret variable immediately
+unset CRON_SECRET_VAL
 
 echo "ERROR: --execute-live requested, but live execution is locked in this environment."
 exit 1

@@ -100,7 +100,7 @@ spec:
     spec:
       serviceAccountName: 123456789012-compute@developer.gserviceaccount.com
       containers:
-        - image: us-west1-docker.pkg.dev/echonote-staging/echonote/echonote@sha256:ba5eba5eba5eba5eba5eba5eba5eba5eba5eba5eba5eba5eba5eba5eba5eba5e
+        - image: us-west1-docker.pkg.dev/echonote-staging/echonote-staging/echonote@sha256:ba5eba5eba5eba5eba5eba5eba5eba5eba5eba5eba5eba5eba5eba5eba5eba5e
 `;
 
 const IMMUTABLE_DIGEST = 'sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
@@ -125,15 +125,33 @@ test('1. Staging manifest generates cleanly with environment=staging and explici
   assert.strictEqual(result.serviceName, 'echonote-staging');
   assert.strictEqual(result.serviceAccount, VALID_STAGING_SA);
   assert.strictEqual(result.pinnedServingRevision, VALID_STAGING_REV);
+  assert.strictEqual(result.imageUri, `us-west1-docker.pkg.dev/echonote-staging/echonote-staging/echonote@${IMMUTABLE_DIGEST}`);
+  assert.strictEqual(result.secretVarCount, 2, 'Staging core manifest maps exactly 2 verified secrets');
 
   const doc = YAML.parse(result.yaml);
-  const env: Array<{ name: string; value?: string }> = doc.spec.template.spec.containers[0].env;
+  const env: Array<{ name: string; value?: string; valueFrom?: any }> = doc.spec.template.spec.containers[0].env;
 
   assert.strictEqual(env.find(e => e.name === 'NODE_ENV')?.value, 'staging');
   assert.strictEqual(env.find(e => e.name === 'STAGING_ISOLATION_REQUIRED')?.value, 'true');
+  assert.strictEqual(env.find(e => e.name === 'STAGING_EMAIL_DELIVERY_ENABLED')?.value, 'false');
   assert.strictEqual(env.find(e => e.name === 'ALLOW_PRODUCTION_RESOURCES'), undefined);
   assert.strictEqual(env.find(e => e.name === 'RAZORPAY_MODE')?.value, 'test');
   assert.strictEqual(env.find(e => e.name === 'RAZORPAY_KEY_ID')?.value, 'rzp_test_stagingKey123');
+
+  // Verify secret mappings in staging: only verified secrets present
+  const geminiSecret = env.find(e => e.name === 'GEMINI_API_KEY');
+  assert.strictEqual(geminiSecret?.valueFrom?.secretKeyRef?.name, 'echonote-gemini-api-key');
+
+  const reportSecret = env.find(e => e.name === 'REPORT_DOWNLOAD_SECRET');
+  assert.strictEqual(reportSecret?.valueFrom?.secretKeyRef?.name, 'REPORT_DOWNLOAD_SECRET');
+
+  // Verify no production secrets or absent secrets are present
+  assert.strictEqual(env.find(e => e.name === 'RAZORPAY_KEY_SECRET'), undefined);
+  assert.strictEqual(env.find(e => e.name === 'RESEND_API_KEY'), undefined);
+  assert.strictEqual(env.find(e => e.name === 'PLAYBACK_SECRET'), undefined);
+  assert.strictEqual(env.find(e => e.name === 'CRON_SECRET'), undefined);
+  assert.strictEqual(env.find(e => e.name === 'INTEGRATION_ENCRYPTION_KEY'), undefined);
+  assert.strictEqual(env.find(e => e.name === 'ZOOM_WEBHOOK_SECRET'), undefined);
 });
 
 // 2. Refinement 2: Staging strictly requires explicit service account
@@ -399,26 +417,166 @@ test('12. CLI execution succeeds for staging when explicit revision and SA are s
   } catch {}
 });
 
-// 13. Scheduler script verifies staging Cloud Run URL
-test('13. schedule-recurring-report-workers.sh staging targets verified staging URL', () => {
+// 13. Scheduler script verifies staging Cloud Run URL and echo-scheduler SA
+test('13. schedule-recurring-report-workers.sh staging targets verified staging URL and SA', () => {
   const scriptPath = path.join(cwd, 'scripts', 'schedule-recurring-report-workers.sh');
   const res = spawnSync(bashPath, [scriptPath, '--environment=staging'], { encoding: 'utf8', cwd });
   assert.strictEqual(res.status, 0);
   assert(res.stdout.includes('https://echonote-staging-3fgo4kkjgq-uw.a.run.app/api/internal/reports/process-recurring'));
   assert(res.stdout.includes('https://echonote-staging-3fgo4kkjgq-uw.a.run.app/api/internal/reports/dispatch-deliveries'));
   assert(res.stdout.includes('echonote-recurring-report-dispatcher'));
-  assert(res.stdout.includes('echonote-scheduler-invoker@echonote-staging.iam.gserviceaccount.com'));
+  assert(res.stdout.includes('echo-scheduler@echonote-staging.iam.gserviceaccount.com'));
 });
 
-// 14. Overdue alert script supports staging and isolates target URL
-test('14. schedule-overdue-alerts.sh supports staging and isolates target URL', () => {
+// 14. Overdue alert script supports staging and isolates target URL and SA
+test('14. schedule-overdue-alerts.sh supports staging and isolates target URL and SA', () => {
   const scriptPath = path.join(cwd, 'scripts', 'schedule-overdue-alerts.sh');
   const res = spawnSync(bashPath, [scriptPath, '--environment=staging'], { encoding: 'utf8', cwd });
   assert.strictEqual(res.status, 0);
   assert(res.stdout.includes('Environment:         staging'));
   assert(res.stdout.includes('Project ID:          echonote-staging'));
   assert(res.stdout.includes('https://echonote-staging-3fgo4kkjgq-uw.a.run.app/api/admin/tasks/scan-overdue'));
-  assert(res.stdout.includes('echonote-scheduler-invoker@echonote-staging.iam.gserviceaccount.com'));
+  assert(res.stdout.includes('echo-scheduler@echonote-staging.iam.gserviceaccount.com'));
+});
+
+// 15. Notification workers script supports staging and isolates target URL and SA
+test('15. schedule-notification-workers.sh supports staging and isolates target URL and SA', () => {
+  const scriptPath = path.join(cwd, 'scripts', 'schedule-notification-workers.sh');
+  const res = spawnSync(bashPath, [scriptPath, '--environment=staging'], { encoding: 'utf8', cwd });
+  assert.strictEqual(res.status, 0);
+  assert(res.stdout.includes('Operation Mode:      print'));
+  assert(res.stdout.includes('Cloud Run Target:    https://echonote-staging-3fgo4kkjgq-uw.a.run.app'));
+  assert(res.stdout.includes('echo-scheduler@echonote-staging.iam.gserviceaccount.com'));
+  assert(res.stdout.includes('https://echonote-staging-3fgo4kkjgq-uw.a.run.app'));
+});
+
+// 16. Production manifest preserves production Artifact Registry and 9 secrets
+test('16. Production manifest preserves production Artifact Registry and 9 secrets', () => {
+  const result = transformServiceManifest({
+    inputYamlContent: SAMPLE_PROD_YAML,
+    imageDigest: IMMUTABLE_DIGEST,
+    serviceName: 'echonote',
+    environment: 'production',
+    ordinaryEnvOverrides: {
+      RAZORPAY_KEY_ID: 'rzp_live_prodKey123',
+    },
+  });
+
+  assert.strictEqual(result.environment, 'production');
+  assert.strictEqual(result.imageUri, `us-west1-docker.pkg.dev/echonote-2509/echonote/echonote@${IMMUTABLE_DIGEST}`);
+  assert.strictEqual(result.secretVarCount, 9, 'Production manifest must have all 9 secrets mapped');
+});
+
+// 17. Staging manifest fails closed if an enabled feature requires a missing secret
+test('17. Staging manifest fails closed if enabled feature requires missing secret', () => {
+  assert.throws(
+    () => {
+      transformServiceManifest({
+        inputYamlContent: SAMPLE_STAGING_YAML,
+        imageDigest: IMMUTABLE_DIGEST,
+        serviceName: 'echonote-staging',
+        environment: 'staging',
+        servingRevision: VALID_STAGING_REV,
+        serviceAccount: VALID_STAGING_SA,
+        ordinaryEnvOverrides: {
+          RAZORPAY_KEY_ID: 'rzp_test_stagingKey123',
+          STAGING_EMAIL_DELIVERY_ENABLED: 'true',
+        },
+      });
+    },
+    /\[STAGING CONFIG ERROR\]: Feature 'email_delivery' is enabled/
+  );
+});
+
+// 18. Staging manifest succeeds with optional feature when secret is explicitly available in staging
+test('18. Staging manifest succeeds with optional feature when secret is available', () => {
+  const result = transformServiceManifest({
+    inputYamlContent: SAMPLE_STAGING_YAML,
+    imageDigest: IMMUTABLE_DIGEST,
+    serviceName: 'echonote-staging',
+    environment: 'staging',
+    servingRevision: VALID_STAGING_REV,
+    serviceAccount: VALID_STAGING_SA,
+    ordinaryEnvOverrides: {
+      RAZORPAY_KEY_ID: 'rzp_test_stagingKey123',
+      STAGING_EMAIL_DELIVERY_ENABLED: 'true',
+    },
+    stagingSecretsAvailable: ['echonote-resend-api-key'],
+  });
+
+  assert.strictEqual(result.secretVarCount, 3, '2 core secrets + 1 email secret');
+  const doc = YAML.parse(result.yaml);
+  const env: Array<{ name: string; value?: string; valueFrom?: any }> = doc.spec.template.spec.containers[0].env;
+  const resendSecret = env.find(e => e.name === 'RESEND_API_KEY');
+  assert.strictEqual(resendSecret?.valueFrom?.secretKeyRef?.name, 'echonote-resend-api-key');
+});
+
+// 19. Staging rejects production secret substitution
+test('19. Staging rejects production secret substitution', () => {
+  assert.throws(
+    () => {
+      transformServiceManifest({
+        inputYamlContent: SAMPLE_STAGING_YAML,
+        imageDigest: IMMUTABLE_DIGEST,
+        serviceName: 'echonote-staging',
+        environment: 'staging',
+        servingRevision: VALID_STAGING_REV,
+        serviceAccount: VALID_STAGING_SA,
+        ordinaryEnvOverrides: {
+          RAZORPAY_KEY_ID: 'rzp_test_stagingKey123',
+          STAGING_EMAIL_DELIVERY_ENABLED: 'true',
+        },
+        stagingSecretsAvailable: ['echonote-report-download-secret'],
+      });
+    },
+    /\[STAGING CONFIG ERROR\]|\[STAGING ISOLATION BREACH\]/
+  );
+});
+
+// 20. Staging maps PLAYBACK_SECRET when provisioned and enabled
+test('20. Staging maps PLAYBACK_SECRET when provisioned and feature enabled', () => {
+  const result = transformServiceManifest({
+    inputYamlContent: SAMPLE_STAGING_YAML,
+    imageDigest: IMMUTABLE_DIGEST,
+    serviceName: 'echonote-staging',
+    environment: 'staging',
+    servingRevision: VALID_STAGING_REV,
+    serviceAccount: VALID_STAGING_SA,
+    ordinaryEnvOverrides: {
+      RAZORPAY_KEY_ID: 'rzp_test_stagingKey123',
+    },
+    enabledIntegrations: ['playback_signing'],
+    stagingSecretsAvailable: ['PLAYBACK_SECRET'],
+  });
+
+  assert.strictEqual(result.secretVarCount, 3, '2 core secrets + 1 playback secret');
+  const doc = YAML.parse(result.yaml);
+  const env: Array<{ name: string; value?: string; valueFrom?: any }> = doc.spec.template.spec.containers[0].env;
+  const playbackSecret = env.find(e => e.name === 'PLAYBACK_SECRET');
+  assert.ok(playbackSecret, 'PLAYBACK_SECRET must be in container env');
+  assert.strictEqual(playbackSecret?.valueFrom?.secretKeyRef?.name, 'PLAYBACK_SECRET');
+});
+
+// 21. Staging rejects playback_signing when secret is not available
+test('21. Staging fails closed when playback_signing enabled but secret absent', () => {
+  assert.throws(
+    () => {
+      transformServiceManifest({
+        inputYamlContent: SAMPLE_STAGING_YAML,
+        imageDigest: IMMUTABLE_DIGEST,
+        serviceName: 'echonote-staging',
+        environment: 'staging',
+        servingRevision: VALID_STAGING_REV,
+        serviceAccount: VALID_STAGING_SA,
+        ordinaryEnvOverrides: {
+          RAZORPAY_KEY_ID: 'rzp_test_stagingKey123',
+        },
+        enabledIntegrations: ['playback_signing'],
+        stagingSecretsAvailable: [],
+      });
+    },
+    /\[STAGING CONFIG ERROR\]: Feature 'playback_signing' is enabled, but required secret/
+  );
 });
 
 console.log(`\n======================================================`);

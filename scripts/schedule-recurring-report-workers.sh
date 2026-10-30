@@ -27,7 +27,7 @@
 #      Project:         echonote-staging
 #      Region:          us-west1
 #      Canonical App:   https://echonote-staging-3fgo4kkjgq-uw.a.run.app
-#      Scheduler SA:    echonote-scheduler-invoker@echonote-staging.iam.gserviceaccount.com
+#      Scheduler SA:    echo-scheduler@echonote-staging.iam.gserviceaccount.com
 #      Secret:          echonote-cron-secret:latest (CRON_SECRET)
 #
 # Authentication Modes:
@@ -59,7 +59,7 @@ readonly PROD_SECRET_NAME="echonote-cron-secret"
 readonly STAGING_PROJECT_ID="echonote-staging"
 readonly STAGING_REGION="us-west1"
 readonly STAGING_SERVICE_URL="https://echonote-staging-3fgo4kkjgq-uw.a.run.app"
-readonly STAGING_SERVICE_ACCOUNT="echonote-scheduler-invoker@echonote-staging.iam.gserviceaccount.com"
+readonly STAGING_SERVICE_ACCOUNT="echo-scheduler@echonote-staging.iam.gserviceaccount.com"
 readonly STAGING_SECRET_NAME="echonote-cron-secret"
 
 # Job 1 Constants: Execution Worker

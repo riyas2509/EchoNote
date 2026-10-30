@@ -17,8 +17,8 @@ export const BASELINE_SERVING_REVISION = TEST_FIXTURE_BASELINE_REVISION;
 export const STAGING_PROJECT_ID = 'echonote-staging';
 export const STAGING_REGION = 'us-west1';
 export const STAGING_SERVICE_NAME = 'echonote-staging';
-export const STAGING_ARTIFACT_REGISTRY = 'us-west1-docker.pkg.dev/echonote-staging/echonote/echonote';
-export const STAGING_DEFAULT_APP_URL = 'https://echonote-staging.vercel.app';
+export const STAGING_ARTIFACT_REGISTRY = 'us-west1-docker.pkg.dev/echonote-staging/echonote-staging/echonote';
+export const STAGING_DEFAULT_APP_URL = 'https://echonote-staging-3fgo4kkjgq-uw.a.run.app';
 
 // Note: Staging service account must be explicitly supplied via configuration or CLI.
 // No invented default is assumed or permitted.
@@ -30,7 +30,7 @@ export interface SecretMapping {
   secretKey: string;
 }
 
-export const SECRET_MAPPINGS: readonly SecretMapping[] = [
+export const PRODUCTION_SECRET_MAPPINGS: readonly SecretMapping[] = [
   { name: 'GEMINI_API_KEY', secretName: 'echonote-gemini-api-key', secretKey: 'latest' },
   { name: 'RAZORPAY_KEY_SECRET', secretName: 'echonote-razorpay-key-secret', secretKey: 'latest' },
   { name: 'RAZORPAY_WEBHOOK_SECRET', secretName: 'echonote-razorpay-webhook-secret', secretKey: 'latest' },
@@ -42,12 +42,33 @@ export const SECRET_MAPPINGS: readonly SecretMapping[] = [
   { name: 'REPORT_DOWNLOAD_SECRET', secretName: 'echonote-report-download-secret', secretKey: 'latest' },
 ] as const;
 
+// Backward-compatible alias for production secret mappings
+export const SECRET_MAPPINGS = PRODUCTION_SECRET_MAPPINGS;
+
+// Core staging secrets verified in echonote-staging Secret Manager
+export const STAGING_CORE_SECRET_MAPPINGS: readonly SecretMapping[] = [
+  { name: 'GEMINI_API_KEY', secretName: 'echonote-gemini-api-key', secretKey: 'latest' },
+  { name: 'REPORT_DOWNLOAD_SECRET', secretName: 'REPORT_DOWNLOAD_SECRET', secretKey: 'latest' },
+] as const;
+
+// Staging optional feature secret catalog
+export const STAGING_OPTIONAL_FEATURE_SECRETS: Readonly<Record<string, SecretMapping>> = {
+  email_delivery: { name: 'RESEND_API_KEY', secretName: 'echonote-resend-api-key', secretKey: 'latest' },
+  razorpay: { name: 'RAZORPAY_KEY_SECRET', secretName: 'echonote-razorpay-key-secret', secretKey: 'latest' },
+  razorpay_webhook: { name: 'RAZORPAY_WEBHOOK_SECRET', secretName: 'echonote-razorpay-webhook-secret', secretKey: 'latest' },
+  zoom_webhook: { name: 'ZOOM_WEBHOOK_SECRET', secretName: 'echonote-zoom-webhook-secret', secretKey: 'latest' },
+  integration_encryption: { name: 'INTEGRATION_ENCRYPTION_KEY', secretName: 'echonote-integration-encryption-key', secretKey: 'latest' },
+  playback_signing: { name: 'PLAYBACK_SECRET', secretName: 'echonote-playback-secret', secretKey: 'latest' },
+  cron_header: { name: 'CRON_SECRET', secretName: 'echonote-cron-secret', secretKey: 'latest' },
+} as const;
+
 export interface OrdinaryEnvVarConfig {
   RAZORPAY_MODE?: string;
   RAZORPAY_KEY_ID?: string;
   NODE_ENV?: string;
   ALLOW_PRODUCTION_RESOURCES?: string;
   STAGING_ISOLATION_REQUIRED?: string;
+  STAGING_EMAIL_DELIVERY_ENABLED?: string;
   APP_URL?: string;
   RESEND_FROM_EMAIL?: string;
   RAZORPAY_PRO_MONTHLY_PLAN_ID?: string;
@@ -56,7 +77,7 @@ export interface OrdinaryEnvVarConfig {
   RAZORPAY_TEAM_YEARLY_PLAN_ID?: string;
 }
 
-export const DEFAULT_ORDINARY_ENV_VARS: Readonly<Record<Exclude<keyof OrdinaryEnvVarConfig, 'RAZORPAY_KEY_ID' | 'STAGING_ISOLATION_REQUIRED'>, string>> = {
+export const DEFAULT_ORDINARY_ENV_VARS: Readonly<Record<Exclude<keyof OrdinaryEnvVarConfig, 'RAZORPAY_KEY_ID' | 'STAGING_ISOLATION_REQUIRED' | 'STAGING_EMAIL_DELIVERY_ENABLED'>, string>> = {
   RAZORPAY_MODE: 'live',
   NODE_ENV: 'production',
   ALLOW_PRODUCTION_RESOURCES: 'true',
@@ -72,6 +93,7 @@ export const DEFAULT_STAGING_ORDINARY_ENV_VARS: Readonly<Record<Exclude<keyof Or
   RAZORPAY_MODE: 'test',
   NODE_ENV: 'staging',
   STAGING_ISOLATION_REQUIRED: 'true',
+  STAGING_EMAIL_DELIVERY_ENABLED: 'false',
   APP_URL: STAGING_DEFAULT_APP_URL,
   RESEND_FROM_EMAIL: 'EchoNote Staging <invitations@echotechai.in>',
   RAZORPAY_PRO_MONTHLY_PLAN_ID: 'plan_test_pro_monthly',
@@ -90,6 +112,8 @@ export interface TransformOptions {
   serviceName?: string;
   environment?: 'production' | 'staging';
   serviceAccount?: string;
+  enabledIntegrations?: string[];
+  stagingSecretsAvailable?: string[];
 }
 
 export interface TransformResult {
@@ -214,6 +238,14 @@ export function transformServiceManifest(options: TransformOptions): TransformRe
 
   const expectedArtifactRegistry = resolvedEnv === 'staging' ? STAGING_ARTIFACT_REGISTRY : EXPECTED_ARTIFACT_REGISTRY;
 
+  // Cross-environment repository leakage protection
+  if (resolvedEnv === 'staging' && expectedArtifactRegistry === EXPECTED_ARTIFACT_REGISTRY) {
+    throw new Error('[STAGING ISOLATION BREACH]: Cannot use production Artifact Registry in staging.');
+  }
+  if (resolvedEnv === 'production' && expectedArtifactRegistry === STAGING_ARTIFACT_REGISTRY) {
+    throw new Error('[PRODUCTION GUARD]: Cannot use staging Artifact Registry in production.');
+  }
+
   if (!imageDigest || !/^sha256:[a-f0-9]{64}$/.test(imageDigest)) {
     throw new Error(`Invalid immutable image digest format: "${imageDigest}". Must be sha256:<64 hex characters>.`);
   }
@@ -320,6 +352,7 @@ export function transformServiceManifest(options: TransformOptions): TransformRe
       'RAZORPAY_KEY_ID',
       'NODE_ENV',
       'STAGING_ISOLATION_REQUIRED',
+      'STAGING_EMAIL_DELIVERY_ENABLED',
       'APP_URL',
       'RESEND_FROM_EMAIL',
       'RAZORPAY_PRO_MONTHLY_PLAN_ID',
@@ -428,7 +461,87 @@ export function transformServiceManifest(options: TransformOptions): TransformRe
   }
 
   // Add secret variables with secretKeyRef
-  for (const secret of SECRET_MAPPINGS) {
+  const activeSecretMappings: SecretMapping[] = [];
+
+  if (resolvedEnv === 'production') {
+    // Production unconditionally maps all 9 production secrets
+    activeSecretMappings.push(...PRODUCTION_SECRET_MAPPINGS);
+  } else {
+    // Staging maps core verified secrets that exist in staging Secret Manager
+    activeSecretMappings.push(...STAGING_CORE_SECRET_MAPPINGS);
+
+    // Check optional features that require absent secrets:
+    // If an optional feature is enabled, verify the secret is explicitly made available,
+    // otherwise fail closed with clear error without inventing dummy credentials.
+    const isEmailDeliveryEnabled = ordinaryValues.STAGING_EMAIL_DELIVERY_ENABLED === 'true';
+    if (isEmailDeliveryEnabled) {
+      const available = options.stagingSecretsAvailable || [];
+      if (!available.includes('echonote-resend-api-key')) {
+        throw new Error(
+          `[STAGING CONFIG ERROR]: Feature 'email_delivery' is enabled (STAGING_EMAIL_DELIVERY_ENABLED=true), but required secret 'echonote-resend-api-key' is not configured in staging Secret Manager.`
+        );
+      }
+      activeSecretMappings.push(STAGING_OPTIONAL_FEATURE_SECRETS.email_delivery);
+    }
+
+    if (options.enabledIntegrations?.includes('zoom')) {
+      const available = options.stagingSecretsAvailable || [];
+      if (!available.includes('echonote-zoom-webhook-secret')) {
+        throw new Error(
+          `[STAGING CONFIG ERROR]: Feature 'zoom' is enabled, but required secret 'echonote-zoom-webhook-secret' is not configured in staging Secret Manager.`
+        );
+      }
+      activeSecretMappings.push(STAGING_OPTIONAL_FEATURE_SECRETS.zoom_webhook);
+    }
+
+    if (options.enabledIntegrations?.includes('razorpay')) {
+      const available = options.stagingSecretsAvailable || [];
+      if (!available.includes('echonote-razorpay-key-secret')) {
+        throw new Error(
+          `[STAGING CONFIG ERROR]: Feature 'razorpay' is enabled, but required secret 'echonote-razorpay-key-secret' is not configured in staging Secret Manager.`
+        );
+      }
+      activeSecretMappings.push(STAGING_OPTIONAL_FEATURE_SECRETS.razorpay);
+    }
+
+    if (options.enabledIntegrations?.includes('third_party_credentials')) {
+      const available = options.stagingSecretsAvailable || [];
+      if (!available.includes('echonote-integration-encryption-key')) {
+        throw new Error(
+          `[STAGING CONFIG ERROR]: Feature 'third_party_credentials' is enabled, but required secret 'echonote-integration-encryption-key' is not configured in staging Secret Manager.`
+        );
+      }
+      activeSecretMappings.push(STAGING_OPTIONAL_FEATURE_SECRETS.integration_encryption);
+    }
+
+    if (options.enabledIntegrations?.includes('playback_signing')) {
+      const available = options.stagingSecretsAvailable || [];
+      const secretName = available.includes('PLAYBACK_SECRET')
+        ? 'PLAYBACK_SECRET'
+        : 'echonote-playback-secret';
+      if (!available.includes('echonote-playback-secret') && !available.includes('PLAYBACK_SECRET')) {
+        throw new Error(
+          `[STAGING CONFIG ERROR]: Feature 'playback_signing' is enabled, but required secret 'echonote-playback-secret' or 'PLAYBACK_SECRET' is not configured in staging Secret Manager.`
+        );
+      }
+      activeSecretMappings.push({
+        name: 'PLAYBACK_SECRET',
+        secretName,
+        secretKey: 'latest',
+      });
+    }
+
+    // Strict staging isolation check: reject any production secret substitution or production project reference
+    for (const mapping of activeSecretMappings) {
+      if (mapping.secretName.includes('2509') || mapping.secretName === 'echonote-report-download-secret') {
+        throw new Error(
+          `[STAGING ISOLATION BREACH]: Production secret '${mapping.secretName}' cannot be referenced in staging.`
+        );
+      }
+    }
+  }
+
+  for (const secret of activeSecretMappings) {
     desiredEnv.push({
       name: secret.name,
       valueFrom: {
@@ -449,7 +562,7 @@ export function transformServiceManifest(options: TransformOptions): TransformRe
     seenNames.add(item.name);
   }
 
-  const expectedTotalEnvCount = ordinaryKeys.length + SECRET_MAPPINGS.length;
+  const expectedTotalEnvCount = ordinaryKeys.length + activeSecretMappings.length;
   if (desiredEnv.length !== expectedTotalEnvCount) {
     throw new Error(`Expected exactly ${expectedTotalEnvCount} environment entries, got ${desiredEnv.length}`);
   }
@@ -473,7 +586,7 @@ export function transformServiceManifest(options: TransformOptions): TransformRe
   return {
     yaml: transformedYaml,
     ordinaryVarCount: ordinaryKeys.length,
-    secretVarCount: SECRET_MAPPINGS.length,
+    secretVarCount: activeSecretMappings.length,
     imageUri: expectedImageUri,
     pinnedServingRevision: servingRevision,
     serviceAccount: expectedServiceAccount,
@@ -540,6 +653,8 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.met
       serviceAccount,
       ordinaryEnvOverrides: {
         ...(process.env.RAZORPAY_KEY_ID ? { RAZORPAY_KEY_ID: process.env.RAZORPAY_KEY_ID } : {}),
+        ...(process.env.STAGING_EMAIL_DELIVERY_ENABLED ? { STAGING_EMAIL_DELIVERY_ENABLED: process.env.STAGING_EMAIL_DELIVERY_ENABLED } : {}),
+        ...(process.env.APP_URL ? { APP_URL: process.env.APP_URL } : {}),
         ...(process.env.RAZORPAY_PRO_MONTHLY_PLAN_ID ? { RAZORPAY_PRO_MONTHLY_PLAN_ID: process.env.RAZORPAY_PRO_MONTHLY_PLAN_ID } : {}),
         ...(process.env.RAZORPAY_PRO_YEARLY_PLAN_ID ? { RAZORPAY_PRO_YEARLY_PLAN_ID: process.env.RAZORPAY_PRO_YEARLY_PLAN_ID } : {}),
         ...(process.env.RAZORPAY_TEAM_MONTHLY_PLAN_ID ? { RAZORPAY_TEAM_MONTHLY_PLAN_ID: process.env.RAZORPAY_TEAM_MONTHLY_PLAN_ID } : {}),

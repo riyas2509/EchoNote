@@ -15,6 +15,7 @@ import fs from "fs";
 import os from "os";
 import { convertOpusToWav, convertAudioToWav, normalizeAudioMimeType, isFfmpegAvailable } from "./lib/audioUtils.js";
 import { trimAudioBuffer, validateTrimRange, alignTranscriptSegments } from "./lib/audioTrimService.js";
+import { generatePlaybackToken, verifyPlaybackToken, getPlaybackSecret } from "./lib/playbackTokenService.ts";
 import { FieldValue } from "firebase-admin/firestore";
 import admin from "firebase-admin";
 import { getAuth } from "firebase-admin/auth";
@@ -9749,43 +9750,8 @@ If you did not expect this invitation, you can safely ignore this email.
   // ==============================================================================
   // Secure Audio Playback & Streaming Architecture
   // ==============================================================================
-  // Ephemeral cryptographic secret generated in memory if not explicitly provided in environment
-  const EPHEMERAL_PLAYBACK_SECRET = crypto.randomBytes(32).toString('hex');
-  const PLAYBACK_SECRET = process.env.PLAYBACK_SECRET || process.env.SESSION_SECRET || EPHEMERAL_PLAYBACK_SECRET;
-
-  function generatePlaybackToken(payload: { uid: string; recId: string; email?: string; platform_admin?: boolean; role?: string }, expiresIn = 900): { token: string; expiresIn: number } {
-    const exp = Math.floor(Date.now() / 1000) + expiresIn;
-    const tokenData = { ...payload, exp };
-    const encodedData = Buffer.from(JSON.stringify(tokenData)).toString("base64url");
-    const signature = crypto.createHmac("sha256", PLAYBACK_SECRET).update(encodedData).digest("base64url");
-    return {
-      token: `${encodedData}.${signature}`,
-      expiresIn
-    };
-  }
-
-  function verifyPlaybackToken(tokenString: string): { valid: boolean; data?: any; error?: string } {
-    try {
-      const parts = tokenString.split(".");
-      if (parts.length !== 2) {
-        return { valid: false, error: "Malformed token format" };
-      }
-      const [encodedData, signature] = parts;
-      const expectedSig = crypto.createHmac("sha256", PLAYBACK_SECRET).update(encodedData).digest("base64url");
-      const sigBuf = Buffer.from(signature);
-      const expBuf = Buffer.from(expectedSig);
-      if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
-        return { valid: false, error: "Invalid token signature" };
-      }
-      const data = JSON.parse(Buffer.from(encodedData, "base64url").toString("utf8"));
-      if (Date.now() / 1000 > data.exp) {
-        return { valid: false, error: "Playback token expired" };
-      }
-      return { valid: true, data };
-    } catch (err: any) {
-      return { valid: false, error: err?.message || "Verification failed" };
-    }
-  }
+  // Validates persistent secret configuration or warns on ephemeral fallback
+  getPlaybackSecret();
 
   const authorizeRecordingAccess = async (
     user: { uid: string; email?: string; platform_admin?: boolean; role?: string; orgRole?: string; [key: string]: any },
