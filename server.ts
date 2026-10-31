@@ -21109,8 +21109,14 @@ Intents: "summarize", "analyze thinking", "decisions", "add to project", "usage 
     }
   });
 
-  // Frontend serving: Vite middleware for development or pre-built static bundle in production
-  if (process.env.NODE_ENV !== "production" && process.env.VITE_TEST_MODE !== "true") {
+
+  // Frontend serving: Vite middleware for development; pre-built static bundle in production, staging, and test modes
+  if (
+    process.env.NODE_ENV !== "production" &&
+    process.env.NODE_ENV !== "staging" &&
+    process.env.NODE_ENV !== "test" &&
+    process.env.VITE_TEST_MODE !== "true"
+  ) {
     // Vite middleware may match '/app' to root file 'app.tsx' on Windows because of case-insensitivity.
     // Explicitly rewrite '/app' to '/' or '/index.html' so Vite serves the SPA HTML entry.
     app.use((req, res, next) => {

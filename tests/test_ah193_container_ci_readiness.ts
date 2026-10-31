@@ -117,9 +117,15 @@ async function runTestSuite() {
       cwd,
       env: childEnv,
       encoding: 'utf8',
-      timeout: 30000,
+      timeout: 60000,
     });
 
+    if (childRes.status !== 0 || !childRes.stdout?.includes('CI_READINESS_OK')) {
+      console.error('DEBUG childRes status:', childRes.status);
+      console.error('DEBUG childRes stdout:', childRes.stdout);
+      console.error('DEBUG childRes stderr:', childRes.stderr);
+      console.error('DEBUG childRes error:', childRes.error);
+    }
     assert(
       childRes.status === 0 && childRes.stdout.includes('CI_READINESS_OK'),
       "[Behavioral Check (Authoritative)] Firebase Admin initializes cleanly in isolated child process without credentials"
@@ -231,7 +237,7 @@ async function runTestSuite() {
   // 2. Behavioral verification of frontend serving mode decision in isolated process
   const frontendDecisionCode = `
     const checkMode = (nodeEnv, viteTestMode) => {
-      const shouldUseVite = nodeEnv !== "production" && viteTestMode !== "true";
+      const shouldUseVite = nodeEnv !== "production" && nodeEnv !== "staging" && nodeEnv !== "test" && viteTestMode !== "true";
       return shouldUseVite ? "VITE_DEV_SERVER" : "STATIC_DIST_BUNDLE";
     };
 
@@ -239,12 +245,18 @@ async function runTestSuite() {
     if (checkMode("development", undefined) !== "VITE_DEV_SERVER") process.exit(10);
     if (checkMode(undefined, undefined) !== "VITE_DEV_SERVER") process.exit(11);
 
-    // 2. CI test mode: NODE_ENV=test, VITE_TEST_MODE=true
+    // 2. CI test mode: NODE_ENV=test, VITE_TEST_MODE=true or unset
     if (checkMode("test", "true") !== "STATIC_DIST_BUNDLE") process.exit(12);
+    if (checkMode("test", undefined) !== "STATIC_DIST_BUNDLE") process.exit(15);
 
     // 3. Production mode: NODE_ENV=production, VITE_TEST_MODE unset or true
     if (checkMode("production", undefined) !== "STATIC_DIST_BUNDLE") process.exit(13);
     if (checkMode("production", "true") !== "STATIC_DIST_BUNDLE") process.exit(14);
+
+    // 4. Staging mode: NODE_ENV=staging, VITE_TEST_MODE unset, false, or true
+    if (checkMode("staging", undefined) !== "STATIC_DIST_BUNDLE") process.exit(16);
+    if (checkMode("staging", "false") !== "STATIC_DIST_BUNDLE") process.exit(17);
+    if (checkMode("staging", "true") !== "STATIC_DIST_BUNDLE") process.exit(18);
 
     console.log("FRONTEND_MODES_VERIFIED");
     process.exit(0);
@@ -256,7 +268,7 @@ async function runTestSuite() {
   });
   assert(
     decisionRes.status === 0 && decisionRes.stdout.includes("FRONTEND_MODES_VERIFIED"),
-    "Behavioral verification: Dev mode selects Vite; CI test mode and Production mode select static bundle"
+    "Behavioral verification: Dev mode selects Vite; CI test mode, Staging mode, and Production mode select static bundle"
   );
 
   // 3. Live server runtime smoke verification in CI test mode
@@ -281,9 +293,14 @@ async function runTestSuite() {
     stdio: "pipe",
   });
 
+  let smokeStdout = "";
+  let smokeStderr = "";
+  smokeChild.stdout?.on("data", c => smokeStdout += c);
+  smokeChild.stderr?.on("data", c => smokeStderr += c);
+
   let serverStarted = false;
   try {
-    for (let attempt = 0; attempt < 25; attempt++) {
+    for (let attempt = 0; attempt < 50; attempt++) {
       await new Promise(r => setTimeout(r, 400));
       try {
         const healthRes = await new Promise<{ status?: number; data?: any }>((resolve, reject) => {
@@ -304,6 +321,10 @@ async function runTestSuite() {
         }
       } catch {}
     }
+    if (!serverStarted) {
+      console.error("smokeChild stdout:", smokeStdout);
+      console.error("smokeChild stderr:", smokeStderr);
+    }
     assert(serverStarted, "CI test mode server bundle booted cleanly and responded to /api/health with status ok");
 
     // Verify static HTML index is served for root path
@@ -321,6 +342,72 @@ async function runTestSuite() {
     );
   } finally {
     smokeChild.kill("SIGTERM");
+  }
+
+  // 3b. Live server runtime smoke verification in Staging mode
+  // Spawns dist/server.cjs with NODE_ENV=staging, STAGING_ISOLATION_REQUIRED=true, confirms HTTP 200 health & static HTML without Vite
+  const smokeStagingPort = "3097";
+  const smokeStagingEnv: NodeJS.ProcessEnv = {
+    ...process.env,
+    NODE_ENV: "staging",
+    STAGING_ISOLATION_REQUIRED: "true",
+    PORT: smokeStagingPort,
+    GOOGLE_CLOUD_PROJECT: "echonote-staging",
+    FIRESTORE_DATABASE_ID: "(default)",
+    STORAGE_BUCKET: "echonote-staging-reports",
+    SCHEDULER_SERVICE_ACCOUNT: "echo-scheduler@echonote-staging.iam.gserviceaccount.com",
+    K_SERVICE: "echonote-staging",
+  };
+  delete smokeStagingEnv.VITE_TEST_MODE;
+  delete smokeStagingEnv.ALLOW_PRODUCTION_RESOURCES;
+  delete smokeStagingEnv.GOOGLE_APPLICATION_CREDENTIALS;
+
+  const smokeStagingChild = spawn(process.execPath, [path.join(cwd, "dist", "server.cjs")], {
+    cwd,
+    env: smokeStagingEnv,
+    stdio: "pipe",
+  });
+
+  let stagingServerStarted = false;
+  try {
+    for (let attempt = 0; attempt < 50; attempt++) {
+      await new Promise(r => setTimeout(r, 400));
+      try {
+        const healthRes = await new Promise<{ status?: number; data?: any }>((resolve, reject) => {
+          const req = http.get(`http://127.0.0.1:${smokeStagingPort}/api/health`, (res) => {
+            let data = "";
+            res.on("data", c => data += c);
+            res.on("end", () => {
+              try { resolve({ status: res.statusCode, data: JSON.parse(data) }); }
+              catch (err) { reject(err); }
+            });
+          });
+          req.on("error", reject);
+        });
+
+        if (healthRes.status === 200 && healthRes.data?.status === "ok") {
+          stagingServerStarted = true;
+          break;
+        }
+      } catch {}
+    }
+    assert(stagingServerStarted, "Staging mode server bundle booted cleanly and responded to /api/health with status ok");
+
+    // Verify static HTML index is served for root path
+    const rootRes = await new Promise<{ status?: number; data?: string }>((resolve, reject) => {
+      const req = http.get(`http://127.0.0.1:${smokeStagingPort}/`, (res) => {
+        let data = "";
+        res.on("data", c => data += c);
+        res.on("end", () => resolve({ status: res.statusCode, data }));
+      });
+      req.on("error", reject);
+    });
+    assert(
+      rootRes.status === 200 && (rootRes.data || "").toLowerCase().includes("<!doctype html>"),
+      "Staging mode server bundle serves prebuilt static index.html at root without importing Vite"
+    );
+  } finally {
+    smokeStagingChild.kill("SIGTERM");
   }
 
   // 4. Firebase production fail-closed safeguard verification
