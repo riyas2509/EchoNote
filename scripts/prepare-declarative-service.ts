@@ -8,6 +8,7 @@ export const EXPECTED_REGION = 'us-west1';
 export const EXPECTED_SERVICE_NAME = 'echonote';
 export const EXPECTED_SERVICE_ACCOUNT = '200551109142-compute@developer.gserviceaccount.com';
 export const EXPECTED_ARTIFACT_REGISTRY = 'us-west1-docker.pkg.dev/echonote-2509/echonote/echonote';
+export const PRODUCTION_PROJECT_NUMBER = '200551109142';
 
 // Historical test fixture baseline revision (strictly for unit tests and fixtures)
 export const TEST_FIXTURE_BASELINE_REVISION = 'echonote-00009-w5m';
@@ -19,6 +20,11 @@ export const STAGING_REGION = 'us-west1';
 export const STAGING_SERVICE_NAME = 'echonote-staging';
 export const STAGING_ARTIFACT_REGISTRY = 'us-west1-docker.pkg.dev/echonote-staging/echonote-staging/echonote';
 export const STAGING_DEFAULT_APP_URL = 'https://echonote-staging-3fgo4kkjgq-uw.a.run.app';
+export const STAGING_PROJECT_NUMBER = '113524085497';
+export const STAGING_DEFAULT_FIRESTORE_DB = '(default)';
+export const STAGING_DEFAULT_STORAGE_BUCKET = 'echonote-staging-reports';
+export const STAGING_DEFAULT_SCHEDULER_SA = 'echo-scheduler@echonote-staging.iam.gserviceaccount.com';
+export const STAGING_DEFAULT_RAZORPAY_KEY_ID = 'rzp_test_stagingKey123';
 
 // Note: Staging service account must be explicitly supplied via configuration or CLI.
 // No invented default is assumed or permitted.
@@ -75,9 +81,14 @@ export interface OrdinaryEnvVarConfig {
   RAZORPAY_PRO_YEARLY_PLAN_ID?: string;
   RAZORPAY_TEAM_MONTHLY_PLAN_ID?: string;
   RAZORPAY_TEAM_YEARLY_PLAN_ID?: string;
+  GOOGLE_CLOUD_PROJECT?: string;
+  FIRESTORE_DATABASE_ID?: string;
+  STORAGE_BUCKET?: string;
+  SCHEDULER_SERVICE_ACCOUNT?: string;
+  SCHEDULER_OIDC_AUDIENCE?: string;
 }
 
-export const DEFAULT_ORDINARY_ENV_VARS: Readonly<Record<Exclude<keyof OrdinaryEnvVarConfig, 'RAZORPAY_KEY_ID' | 'STAGING_ISOLATION_REQUIRED' | 'STAGING_EMAIL_DELIVERY_ENABLED'>, string>> = {
+export const DEFAULT_ORDINARY_ENV_VARS: Readonly<Record<Exclude<keyof OrdinaryEnvVarConfig, 'RAZORPAY_KEY_ID' | 'STAGING_ISOLATION_REQUIRED' | 'STAGING_EMAIL_DELIVERY_ENABLED' | 'GOOGLE_CLOUD_PROJECT' | 'FIRESTORE_DATABASE_ID' | 'STORAGE_BUCKET' | 'SCHEDULER_SERVICE_ACCOUNT' | 'SCHEDULER_OIDC_AUDIENCE'>, string>> = {
   RAZORPAY_MODE: 'live',
   NODE_ENV: 'production',
   ALLOW_PRODUCTION_RESOURCES: 'true',
@@ -94,6 +105,11 @@ export const DEFAULT_STAGING_ORDINARY_ENV_VARS: Readonly<Record<Exclude<keyof Or
   NODE_ENV: 'staging',
   STAGING_ISOLATION_REQUIRED: 'true',
   STAGING_EMAIL_DELIVERY_ENABLED: 'false',
+  GOOGLE_CLOUD_PROJECT: STAGING_PROJECT_ID,
+  FIRESTORE_DATABASE_ID: STAGING_DEFAULT_FIRESTORE_DB,
+  STORAGE_BUCKET: STAGING_DEFAULT_STORAGE_BUCKET,
+  SCHEDULER_SERVICE_ACCOUNT: STAGING_DEFAULT_SCHEDULER_SA,
+  SCHEDULER_OIDC_AUDIENCE: STAGING_DEFAULT_APP_URL,
   APP_URL: STAGING_DEFAULT_APP_URL,
   RESEND_FROM_EMAIL: 'EchoNote Staging <invitations@echotechai.in>',
   RAZORPAY_PRO_MONTHLY_PLAN_ID: 'plan_test_pro_monthly',
@@ -277,22 +293,25 @@ export function transformServiceManifest(options: TransformOptions): TransformRe
   }
 
   const namespace = doc.metadata?.namespace;
-  const expectedProjectNumber = '200551109142';
 
   if (resolvedEnv === 'production') {
     if (
       namespace &&
       namespace !== EXPECTED_PROJECT_ID &&
-      namespace !== expectedProjectNumber
+      namespace !== PRODUCTION_PROJECT_NUMBER
     ) {
       throw new Error(
-        `Namespace mismatch: expected "${EXPECTED_PROJECT_ID}" or project number "${expectedProjectNumber}", got "${namespace}"`
+        `Namespace mismatch: expected "${EXPECTED_PROJECT_ID}" or project number "${PRODUCTION_PROJECT_NUMBER}", got "${namespace}"`
       );
     }
   } else {
-    if (namespace && namespace !== STAGING_PROJECT_ID) {
+    if (
+      namespace &&
+      namespace !== STAGING_PROJECT_ID &&
+      namespace !== STAGING_PROJECT_NUMBER
+    ) {
       throw new Error(
-        `Namespace mismatch: expected "${STAGING_PROJECT_ID}", got "${namespace}"`
+        `Namespace mismatch: expected "${STAGING_PROJECT_ID}" or project number "${STAGING_PROJECT_NUMBER}", got "${namespace}"`
       );
     }
   }
@@ -353,6 +372,11 @@ export function transformServiceManifest(options: TransformOptions): TransformRe
       'NODE_ENV',
       'STAGING_ISOLATION_REQUIRED',
       'STAGING_EMAIL_DELIVERY_ENABLED',
+      'GOOGLE_CLOUD_PROJECT',
+      'FIRESTORE_DATABASE_ID',
+      'STORAGE_BUCKET',
+      'SCHEDULER_SERVICE_ACCOUNT',
+      'SCHEDULER_OIDC_AUDIENCE',
       'APP_URL',
       'RESEND_FROM_EMAIL',
       'RAZORPAY_PRO_MONTHLY_PLAN_ID',
@@ -366,7 +390,9 @@ export function transformServiceManifest(options: TransformOptions): TransformRe
     ...baseDefaults,
     RAZORPAY_KEY_ID: 'RAZORPAY_KEY_ID' in ordinaryEnvOverrides
       ? ordinaryEnvOverrides.RAZORPAY_KEY_ID
-      : process.env.RAZORPAY_KEY_ID,
+      : ((resolvedEnv === 'staging' && process.env.RAZORPAY_KEY_ID && !process.env.RAZORPAY_KEY_ID.startsWith('rzp_test_'))
+          ? STAGING_DEFAULT_RAZORPAY_KEY_ID
+          : (process.env.RAZORPAY_KEY_ID || (resolvedEnv === 'staging' ? STAGING_DEFAULT_RAZORPAY_KEY_ID : undefined))),
     ...ordinaryEnvOverrides,
   };
 
@@ -380,6 +406,32 @@ export function transformServiceManifest(options: TransformOptions): TransformRe
     }
     if (ordinaryValues.STAGING_ISOLATION_REQUIRED !== 'true') {
       throw new Error('[STAGING ISOLATION BREACH]: STAGING_ISOLATION_REQUIRED must be "true".');
+    }
+    // Prevent accidental production resource leakage into staging
+    if (ordinaryValues.GOOGLE_CLOUD_PROJECT === EXPECTED_PROJECT_ID) {
+      throw new Error(`[STAGING ISOLATION BREACH]: Cannot use production GOOGLE_CLOUD_PROJECT '${EXPECTED_PROJECT_ID}' in staging.`);
+    }
+    if (ordinaryValues.FIRESTORE_DATABASE_ID === 'ai-studio-eb588566-0d1e-4ef9-bca0-1194fd2bb6d5') {
+      throw new Error('[STAGING ISOLATION BREACH]: Cannot use production FIRESTORE_DATABASE_ID in staging.');
+    }
+    if (ordinaryValues.STORAGE_BUCKET === 'echonote-2509.firebasestorage.app') {
+      throw new Error('[STAGING ISOLATION BREACH]: Cannot use production STORAGE_BUCKET in staging.');
+    }
+    // Fail closed if required staging variables are missing or empty
+    if (!ordinaryValues.GOOGLE_CLOUD_PROJECT || ordinaryValues.GOOGLE_CLOUD_PROJECT.trim() === '') {
+      throw new Error('[STAGING CONFIG ERROR]: GOOGLE_CLOUD_PROJECT must be configured for staging.');
+    }
+    if (!ordinaryValues.FIRESTORE_DATABASE_ID || ordinaryValues.FIRESTORE_DATABASE_ID.trim() === '') {
+      throw new Error('[STAGING CONFIG ERROR]: FIRESTORE_DATABASE_ID must be configured for staging.');
+    }
+    if (!ordinaryValues.STORAGE_BUCKET || ordinaryValues.STORAGE_BUCKET.trim() === '') {
+      throw new Error('[STAGING CONFIG ERROR]: STORAGE_BUCKET must be configured for staging.');
+    }
+    if (!ordinaryValues.SCHEDULER_SERVICE_ACCOUNT || ordinaryValues.SCHEDULER_SERVICE_ACCOUNT.trim() === '') {
+      throw new Error('[STAGING CONFIG ERROR]: SCHEDULER_SERVICE_ACCOUNT must be configured for staging.');
+    }
+    if (!ordinaryValues.SCHEDULER_OIDC_AUDIENCE || ordinaryValues.SCHEDULER_OIDC_AUDIENCE.trim() === '') {
+      throw new Error('[STAGING CONFIG ERROR]: SCHEDULER_OIDC_AUDIENCE must be configured for staging.');
     }
   }
 
@@ -655,6 +707,11 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.met
         ...(process.env.RAZORPAY_KEY_ID ? { RAZORPAY_KEY_ID: process.env.RAZORPAY_KEY_ID } : {}),
         ...(process.env.STAGING_EMAIL_DELIVERY_ENABLED ? { STAGING_EMAIL_DELIVERY_ENABLED: process.env.STAGING_EMAIL_DELIVERY_ENABLED } : {}),
         ...(process.env.APP_URL ? { APP_URL: process.env.APP_URL } : {}),
+        ...(process.env.GOOGLE_CLOUD_PROJECT ? { GOOGLE_CLOUD_PROJECT: process.env.GOOGLE_CLOUD_PROJECT } : {}),
+        ...(process.env.FIRESTORE_DATABASE_ID ? { FIRESTORE_DATABASE_ID: process.env.FIRESTORE_DATABASE_ID } : {}),
+        ...(process.env.STORAGE_BUCKET ? { STORAGE_BUCKET: process.env.STORAGE_BUCKET } : {}),
+        ...(process.env.SCHEDULER_SERVICE_ACCOUNT ? { SCHEDULER_SERVICE_ACCOUNT: process.env.SCHEDULER_SERVICE_ACCOUNT } : {}),
+        ...(process.env.SCHEDULER_OIDC_AUDIENCE ? { SCHEDULER_OIDC_AUDIENCE: process.env.SCHEDULER_OIDC_AUDIENCE } : {}),
         ...(process.env.RAZORPAY_PRO_MONTHLY_PLAN_ID ? { RAZORPAY_PRO_MONTHLY_PLAN_ID: process.env.RAZORPAY_PRO_MONTHLY_PLAN_ID } : {}),
         ...(process.env.RAZORPAY_PRO_YEARLY_PLAN_ID ? { RAZORPAY_PRO_YEARLY_PLAN_ID: process.env.RAZORPAY_PRO_YEARLY_PLAN_ID } : {}),
         ...(process.env.RAZORPAY_TEAM_MONTHLY_PLAN_ID ? { RAZORPAY_TEAM_MONTHLY_PLAN_ID: process.env.RAZORPAY_TEAM_MONTHLY_PLAN_ID } : {}),
