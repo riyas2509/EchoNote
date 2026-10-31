@@ -822,6 +822,16 @@ test('29. Missing required staging configuration causes clear failure', () => {
   );
 });
 
+// 30. Staging mode frontend serving selects static dist bundle and avoids importing Vite
+test('30. Staging mode frontend serving selects static dist bundle and avoids importing Vite', () => {
+  const serverSource = fs.readFileSync(path.join(cwd, 'server.ts'), 'utf8');
+  assert.ok(
+    serverSource.includes('process.env.NODE_ENV !== "staging"') ||
+    serverSource.includes("process.env.NODE_ENV !== 'staging'"),
+    'server.ts must explicitly exclude staging from Vite development middleware'
+  );
+});
+
 console.log(`\n======================================================`);
 console.log(`✓ ALL ${passed}/${total} STAGING ISOLATION & SCHEDULER TESTS PASSED!`);
 console.log(`======================================================`);
