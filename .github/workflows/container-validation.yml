@@ -1,4 +1,4 @@
-﻿name: EchoNote Container Build and Runtime Validation
+name: EchoNote Container Build and Runtime Validation
 
 on:
   push:
@@ -57,7 +57,7 @@ jobs:
           docker run -d \
             --name echonote-test-instance \
             -p 3000:3000 \
-            -e NODE_ENV=production \
+            -e NODE_ENV=test \
             -e PORT=3000 \
             -e GOOGLE_CLOUD_PROJECT=echonote-synthetic \
             -e FIRESTORE_DATABASE_ID=echonote-synthetic-db \
