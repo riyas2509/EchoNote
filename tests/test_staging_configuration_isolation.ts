@@ -27,6 +27,7 @@ import {
   validateRevisionFormat,
   validateServiceAccountFormat,
   STAGING_PROJECT_ID,
+  STAGING_PROJECT_NUMBER,
   STAGING_SERVICE_NAME,
   STAGING_TEST_FIXTURE_SERVICE_ACCOUNT,
   EXPECTED_PROJECT_ID,
@@ -137,6 +138,12 @@ test('1. Staging manifest generates cleanly with environment=staging and explici
   assert.strictEqual(env.find(e => e.name === 'ALLOW_PRODUCTION_RESOURCES'), undefined);
   assert.strictEqual(env.find(e => e.name === 'RAZORPAY_MODE')?.value, 'test');
   assert.strictEqual(env.find(e => e.name === 'RAZORPAY_KEY_ID')?.value, 'rzp_test_stagingKey123');
+  assert.strictEqual(env.find(e => e.name === 'GOOGLE_CLOUD_PROJECT')?.value, 'echonote-staging');
+  assert.strictEqual(env.find(e => e.name === 'FIRESTORE_DATABASE_ID')?.value, '(default)');
+  assert.strictEqual(env.find(e => e.name === 'STORAGE_BUCKET')?.value, 'echonote-staging-reports');
+  assert.strictEqual(env.find(e => e.name === 'SCHEDULER_SERVICE_ACCOUNT')?.value, 'echo-scheduler@echonote-staging.iam.gserviceaccount.com');
+  assert.strictEqual(env.find(e => e.name === 'SCHEDULER_OIDC_AUDIENCE')?.value, 'https://echonote-staging-3fgo4kkjgq-uw.a.run.app');
+  assert.strictEqual(env.find(e => e.name === 'APP_URL')?.value, 'https://echonote-staging-3fgo4kkjgq-uw.a.run.app');
 
   // Verify secret mappings in staging: only verified secrets present
   const geminiSecret = env.find(e => e.name === 'GEMINI_API_KEY');
@@ -576,6 +583,242 @@ test('21. Staging fails closed when playback_signing enabled but secret absent',
       });
     },
     /\[STAGING CONFIG ERROR\]: Feature 'playback_signing' is enabled, but required secret/
+  );
+});
+
+// 22. Staging accepts project ID string namespace
+test('22. Staging accepts project ID string namespace (echonote-staging)', () => {
+  const stagingYamlWithId = SAMPLE_STAGING_YAML.replace('namespace: echonote-staging', 'namespace: echonote-staging');
+  const result = transformServiceManifest({
+    inputYamlContent: stagingYamlWithId,
+    imageDigest: IMMUTABLE_DIGEST,
+    serviceName: 'echonote-staging',
+    environment: 'staging',
+    servingRevision: VALID_STAGING_REV,
+    serviceAccount: VALID_STAGING_SA,
+  });
+  assert.strictEqual(result.environment, 'staging');
+});
+
+// 23. Staging accepts verified numeric project-number namespace
+test('23. Staging accepts verified numeric project-number namespace (113524085497)', () => {
+  const stagingYamlWithNumber = SAMPLE_STAGING_YAML.replace('namespace: echonote-staging', `namespace: '${STAGING_PROJECT_NUMBER}'`);
+  const result = transformServiceManifest({
+    inputYamlContent: stagingYamlWithNumber,
+    imageDigest: IMMUTABLE_DIGEST,
+    serviceName: 'echonote-staging',
+    environment: 'staging',
+    servingRevision: VALID_STAGING_REV,
+    serviceAccount: VALID_STAGING_SA,
+  });
+  assert.strictEqual(result.environment, 'staging');
+});
+
+// 24. Staging rejects unrelated project namespace
+test('24. Staging rejects unrelated project namespace', () => {
+  const stagingYamlUnrelated = SAMPLE_STAGING_YAML.replace('namespace: echonote-staging', 'namespace: 999988887777');
+  assert.throws(
+    () => {
+      transformServiceManifest({
+        inputYamlContent: stagingYamlUnrelated,
+        imageDigest: IMMUTABLE_DIGEST,
+        serviceName: 'echonote-staging',
+        environment: 'staging',
+        servingRevision: VALID_STAGING_REV,
+        serviceAccount: VALID_STAGING_SA,
+      });
+    },
+    /Namespace mismatch: expected "echonote-staging" or project number "113524085497"/
+  );
+});
+
+// 25. All required staging environment variables appear in generated manifest
+test('25. All required staging environment variables appear in generated manifest', () => {
+  const result = transformServiceManifest({
+    inputYamlContent: SAMPLE_STAGING_YAML,
+    imageDigest: IMMUTABLE_DIGEST,
+    serviceName: 'echonote-staging',
+    environment: 'staging',
+    servingRevision: VALID_STAGING_REV,
+    serviceAccount: VALID_STAGING_SA,
+  });
+
+  const doc = YAML.parse(result.yaml);
+  const env: Array<{ name: string; value?: string }> = doc.spec.template.spec.containers[0].env;
+
+  const requiredVariables = [
+    { name: 'NODE_ENV', expected: 'staging' },
+    { name: 'STAGING_ISOLATION_REQUIRED', expected: 'true' },
+    { name: 'STAGING_EMAIL_DELIVERY_ENABLED', expected: 'false' },
+    { name: 'GOOGLE_CLOUD_PROJECT', expected: 'echonote-staging' },
+    { name: 'FIRESTORE_DATABASE_ID', expected: '(default)' },
+    { name: 'STORAGE_BUCKET', expected: 'echonote-staging-reports' },
+    { name: 'SCHEDULER_SERVICE_ACCOUNT', expected: 'echo-scheduler@echonote-staging.iam.gserviceaccount.com' },
+    { name: 'SCHEDULER_OIDC_AUDIENCE', expected: 'https://echonote-staging-3fgo4kkjgq-uw.a.run.app' },
+    { name: 'APP_URL', expected: 'https://echonote-staging-3fgo4kkjgq-uw.a.run.app' },
+    { name: 'RAZORPAY_MODE', expected: 'test' },
+    { name: 'RAZORPAY_KEY_ID', expected: 'rzp_test_stagingKey123' },
+  ];
+
+  for (const { name, expected } of requiredVariables) {
+    const entry = env.find(e => e.name === name);
+    assert.ok(entry, `Expected variable ${name} to be present in container env`);
+    assert.strictEqual(entry.value, expected, `Expected variable ${name} to equal "${expected}", got "${entry?.value}"`);
+  }
+});
+
+// 26. Production project/database/bucket values cannot leak into generated staging manifest
+test('26. Production project/database/bucket values cannot leak into staging manifest', () => {
+  assert.throws(
+    () => {
+      transformServiceManifest({
+        inputYamlContent: SAMPLE_STAGING_YAML,
+        imageDigest: IMMUTABLE_DIGEST,
+        serviceName: 'echonote-staging',
+        environment: 'staging',
+        servingRevision: VALID_STAGING_REV,
+        serviceAccount: VALID_STAGING_SA,
+        ordinaryEnvOverrides: {
+          GOOGLE_CLOUD_PROJECT: 'echonote-2509',
+        },
+      });
+    },
+    /\[STAGING ISOLATION BREACH\]: Cannot use production GOOGLE_CLOUD_PROJECT 'echonote-2509'/
+  );
+
+  assert.throws(
+    () => {
+      transformServiceManifest({
+        inputYamlContent: SAMPLE_STAGING_YAML,
+        imageDigest: IMMUTABLE_DIGEST,
+        serviceName: 'echonote-staging',
+        environment: 'staging',
+        servingRevision: VALID_STAGING_REV,
+        serviceAccount: VALID_STAGING_SA,
+        ordinaryEnvOverrides: {
+          FIRESTORE_DATABASE_ID: 'ai-studio-eb588566-0d1e-4ef9-bca0-1194fd2bb6d5',
+        },
+      });
+    },
+    /\[STAGING ISOLATION BREACH\]: Cannot use production FIRESTORE_DATABASE_ID/
+  );
+
+  assert.throws(
+    () => {
+      transformServiceManifest({
+        inputYamlContent: SAMPLE_STAGING_YAML,
+        imageDigest: IMMUTABLE_DIGEST,
+        serviceName: 'echonote-staging',
+        environment: 'staging',
+        servingRevision: VALID_STAGING_REV,
+        serviceAccount: VALID_STAGING_SA,
+        ordinaryEnvOverrides: {
+          STORAGE_BUCKET: 'echonote-2509.firebasestorage.app',
+        },
+      });
+    },
+    /\[STAGING ISOLATION BREACH\]: Cannot use production STORAGE_BUCKET/
+  );
+});
+
+// 27. Both approved secret references remain present
+test('27. Both approved secret references remain present in staging manifest', () => {
+  const result = transformServiceManifest({
+    inputYamlContent: SAMPLE_STAGING_YAML,
+    imageDigest: IMMUTABLE_DIGEST,
+    serviceName: 'echonote-staging',
+    environment: 'staging',
+    servingRevision: VALID_STAGING_REV,
+    serviceAccount: VALID_STAGING_SA,
+  });
+
+  const doc = YAML.parse(result.yaml);
+  const env: Array<{ name: string; valueFrom?: any }> = doc.spec.template.spec.containers[0].env;
+
+  const geminiRef = env.find(e => e.name === 'GEMINI_API_KEY')?.valueFrom?.secretKeyRef;
+  assert.ok(geminiRef, 'GEMINI_API_KEY secret reference must exist');
+  assert.strictEqual(geminiRef.name, 'echonote-gemini-api-key');
+  assert.strictEqual(geminiRef.key, 'latest');
+
+  const reportRef = env.find(e => e.name === 'REPORT_DOWNLOAD_SECRET')?.valueFrom?.secretKeyRef;
+  assert.ok(reportRef, 'REPORT_DOWNLOAD_SECRET secret reference must exist');
+  assert.strictEqual(reportRef.name, 'REPORT_DOWNLOAD_SECRET');
+  assert.strictEqual(reportRef.key, 'latest');
+});
+
+// 28. Existing serving revision remains explicitly at 100% traffic, new revision has 0% traffic
+test('28. Existing serving revision remains at 100% traffic, new revision has 0% public traffic', () => {
+  const result = transformServiceManifest({
+    inputYamlContent: SAMPLE_STAGING_YAML,
+    imageDigest: IMMUTABLE_DIGEST,
+    serviceName: 'echonote-staging',
+    environment: 'staging',
+    servingRevision: VALID_STAGING_REV,
+    serviceAccount: VALID_STAGING_SA,
+  });
+
+  const doc = YAML.parse(result.yaml);
+  assert.deepStrictEqual(doc.spec.traffic, [
+    {
+      percent: 100,
+      revisionName: VALID_STAGING_REV,
+    },
+  ]);
+  // Template name is stripped so Cloud Run dynamically provisions the new revision with 0% traffic
+  assert.strictEqual(doc.spec.template.metadata?.name, undefined);
+});
+
+// 29. Missing required staging configuration causes clear failure
+test('29. Missing required staging configuration causes clear failure', () => {
+  assert.throws(
+    () => {
+      transformServiceManifest({
+        inputYamlContent: SAMPLE_STAGING_YAML,
+        imageDigest: IMMUTABLE_DIGEST,
+        serviceName: 'echonote-staging',
+        environment: 'staging',
+        servingRevision: VALID_STAGING_REV,
+        serviceAccount: VALID_STAGING_SA,
+        ordinaryEnvOverrides: {
+          FIRESTORE_DATABASE_ID: '',
+        },
+      });
+    },
+    /\[STAGING CONFIG ERROR\]: FIRESTORE_DATABASE_ID must be configured for staging/
+  );
+
+  assert.throws(
+    () => {
+      transformServiceManifest({
+        inputYamlContent: SAMPLE_STAGING_YAML,
+        imageDigest: IMMUTABLE_DIGEST,
+        serviceName: 'echonote-staging',
+        environment: 'staging',
+        servingRevision: VALID_STAGING_REV,
+        serviceAccount: VALID_STAGING_SA,
+        ordinaryEnvOverrides: {
+          STORAGE_BUCKET: '   ',
+        },
+      });
+    },
+    /\[STAGING CONFIG ERROR\]: STORAGE_BUCKET must be configured for staging/
+  );
+
+  assert.throws(
+    () => {
+      transformServiceManifest({
+        inputYamlContent: SAMPLE_STAGING_YAML,
+        imageDigest: IMMUTABLE_DIGEST,
+        serviceName: 'echonote-staging',
+        environment: 'staging',
+        servingRevision: VALID_STAGING_REV,
+        serviceAccount: VALID_STAGING_SA,
+        ordinaryEnvOverrides: {
+          GOOGLE_CLOUD_PROJECT: '',
+        },
+      });
+    },
+    /\[STAGING CONFIG ERROR\]: GOOGLE_CLOUD_PROJECT must be configured for staging/
   );
 });
 
