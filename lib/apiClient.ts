@@ -1,9 +1,140 @@
 import { auth } from '../firebase';
 
 /**
- * Returns the base API URL configured in the environment, or empty string for same-origin requests.
- * Safely trims and strips trailing slashes to prevent double slashes.
+ * Validates an explicit API URL string, strictly checking:
+ * 1. Valid absolute URL format (parsed via standard URL constructor).
+ * 2. Supported protocols (strictly https: for remote backends; http: only permitted for localhost/127.0.0.1).
+ * 3. Disallows embedded credentials (username/password).
+ * 4. Disallows query parameters or URL fragments/hashes.
+ * 5. Disallows unapproved custom ports (only default 443/empty for remote https; dev ports for localhost).
+ * 6. Validates the parsed hostname using exact allowlists (no substring or query/path matching).
+ * 7. Enforces strict environment boundaries (staging frontend cannot target prod backend; prod frontend cannot target staging backend).
+ * 8. Prevents untrusted frontend hosts from routing to Cloud Run backends.
+ * 9. Returns clean base URL without trailing slashes, or empty string for Cloud Run same-origin.
  */
+export function validateAndResolveApiUrl(
+  trimmed: string,
+  frontendHost: string,
+  frontendOrigin: string
+): string {
+  // Check for malformed absolute URL before parsing
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    throw new Error(`EchoNote API Configuration Error: Malformed API URL "${trimmed}".`);
+  }
+
+  // 1. Validate credentials: reject URLs containing username or password
+  if (parsed.username || parsed.password) {
+    throw new Error('EchoNote API Configuration Error: API URL cannot contain credentials.');
+  }
+
+  // 2. Disallow query parameters or URL hash fragments
+  if (parsed.search || parsed.hash) {
+    throw new Error('EchoNote API Configuration Error: API URL cannot contain query parameters or fragments.');
+  }
+
+  const apiHost = normalizeHostname(parsed.hostname);
+  const isApiDevHost = apiHost === 'localhost' || apiHost === '127.0.0.1';
+
+  // 3. Protocol validation: must be https: for remote hosts; http: only allowed for localhost development
+  if (isApiDevHost) {
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      throw new Error(`EchoNote API Configuration Error: Unsupported protocol "${parsed.protocol}".`);
+    }
+  } else {
+    if (parsed.protocol !== 'https:') {
+      throw new Error(`EchoNote API Configuration Error: Insecure or unsupported protocol "${parsed.protocol}". Only HTTPS is allowed for remote backends.`);
+    }
+  }
+
+  // 4. Port validation: remote HTTPS backends must use default port 443 (or empty)
+  if (!isApiDevHost && parsed.port && parsed.port !== '443') {
+    throw new Error(`EchoNote API Configuration Error: Unapproved port "${parsed.port}" in API URL.`);
+  }
+
+  // 5. Same-origin detection:
+  // If API destination matches frontend origin, handle rerouting or relative routing
+  const cleanBase = trimmed.replace(/\/+$/, '');
+  if (frontendOrigin) {
+    const cleanOrigin = parsed.origin.toLowerCase();
+    const windowOrigin = frontendOrigin.trim().toLowerCase().replace(/\/+$/, '');
+    if (cleanOrigin === windowOrigin) {
+      if (isApprovedStagingCloudRunHost(frontendHost) || isApprovedProductionCloudRunHost(frontendHost)) {
+        return '';
+      }
+      if (APPROVED_PRODUCTION_HOSTS.includes(frontendHost)) {
+        console.warn(
+          "⚠️ [EchoNote Config] VITE_API_URL points to the frontend origin. " +
+          "Automatically rerouting API requests to the approved production Cloud Run backend."
+        );
+        return CLOUD_RUN_PRODUCTION_BACKEND;
+      }
+      if (APPROVED_STAGING_HOSTS.includes(frontendHost)) {
+        console.warn(
+          "⚠️ [EchoNote Config] VITE_API_URL points to the frontend origin. " +
+          "Automatically rerouting API requests to the approved staging Cloud Run backend."
+        );
+        return CLOUD_RUN_STAGING_BACKEND;
+      }
+      // Untrusted frontend host pointing at frontend origin: FAIL CLOSED!
+      throw new Error(
+        `EchoNote API Configuration Error: Untrusted frontend host "${frontendHost}". Cannot safely resolve Cloud Run backend.`
+      );
+    }
+  }
+
+  // 6. Hostname allowlist & environment boundary checks
+  const isFrontendProd = isApprovedProductionHost(frontendHost);
+  const isFrontendStaging = isApprovedStagingHost(frontendHost);
+  const isFrontendDev = frontendHost === 'localhost' || frontendHost === '127.0.0.1';
+
+  const isApiTargetProd = isApprovedProductionHost(apiHost);
+  const isApiTargetStaging = isApprovedStagingHost(apiHost);
+
+  // Untrusted frontend hosts cannot route to Cloud Run backends
+  if (!isFrontendProd && !isFrontendStaging && !isFrontendDev && (isApiTargetProd || isApiTargetStaging)) {
+    throw new Error(`EchoNote API Configuration Error: Untrusted host "${frontendHost}" cannot route to Cloud Run backend.`);
+  }
+
+  // Remote API destination must be an approved host (staging, production, or localhost)
+  if (!isApiTargetProd && !isApiTargetStaging && !isApiDevHost) {
+    throw new Error(`EchoNote API Configuration Error: Untrusted API destination host "${apiHost}".`);
+  }
+
+  // Untrusted frontend hosts cannot route to any approved backend
+  if (!isFrontendProd && !isFrontendStaging && !isFrontendDev) {
+    throw new Error(`EchoNote API Configuration Error: Untrusted host "${frontendHost}" cannot route to Cloud Run backend.`);
+  }
+
+  // Cross-environment boundary checks
+  if (isFrontendProd && isApiTargetStaging) {
+    throw new Error('EchoNote API Configuration Error: Production frontend host cannot target staging backend.');
+  }
+  if (isFrontendStaging && isApiTargetProd) {
+    throw new Error('EchoNote API Configuration Error: Staging frontend host cannot target production backend.');
+  }
+
+  // 7. Path validation: permit only the root path ('/' or empty) for remote API base URLs
+  const cleanPathname = parsed.pathname.replace(/\/+$/, '');
+  if (!isApiDevHost && cleanPathname !== '') {
+    throw new Error(`EchoNote API Configuration Error: Non-root path "${parsed.pathname}" is not permitted in API base URL.`);
+  }
+
+  // 8. If approved Cloud Run host targets its own service hostname, return "" for same-origin relative paths
+  if (
+    (isApprovedStagingCloudRunHost(frontendHost) && isApprovedStagingCloudRunHost(apiHost)) ||
+    (isApprovedProductionCloudRunHost(frontendHost) && isApprovedProductionCloudRunHost(apiHost))
+  ) {
+    if (apiHost === frontendHost) {
+      return '';
+    }
+  }
+
+  return cleanBase;
+}
+
 export const APPROVED_PRODUCTION_HOSTS: readonly string[] = [
   'echonote-25.vercel.app',
   'echonote.vercel.app'
@@ -14,8 +145,75 @@ export const APPROVED_STAGING_HOSTS: readonly string[] = [
   'echonote-stage.vercel.app'
 ];
 
+export const APPROVED_STAGING_CLOUD_RUN_SERVICES: readonly string[] = [
+  'echonote-staging-3fgo4kkjgq-uw.a.run.app',
+  'echonote-staging-113524085497.us-west1.run.app'
+];
+
+export const APPROVED_PRODUCTION_CLOUD_RUN_SERVICES: readonly string[] = [
+  'echonote-zfo2izdqla-uw.a.run.app'
+];
+
 export const CLOUD_RUN_PRODUCTION_BACKEND = 'https://echonote-zfo2izdqla-uw.a.run.app';
 export const CLOUD_RUN_STAGING_BACKEND = 'https://echonote-staging-3fgo4kkjgq-uw.a.run.app';
+
+/**
+ * Validates whether a revision tag conforms to Cloud Run DNS label requirements:
+ * 1-63 chars, lowercase alphanumeric and hyphens, cannot start or end with a hyphen.
+ */
+export function isValidCloudRunRevisionTag(tag: string): boolean {
+  if (!tag || tag.length > 63) return false;
+  return /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(tag);
+}
+
+/**
+ * Checks whether a hostname matches an approved Cloud Run service hostname,
+ * either exactly or with a valid optional revision tag prefix (<tag>---<service-host>).
+ */
+export function isApprovedCloudRunHost(hostname: string, approvedServices: readonly string[]): boolean {
+  if (!hostname || typeof hostname !== 'string') return false;
+  const rawClean = hostname.trim().replace(/:d+$/, '').replace(/\.+$/, '');
+  const clean = normalizeHostname(hostname);
+  if (!clean) return false;
+
+  // 1. Direct match with exact service hostname
+  if (approvedServices.includes(clean)) {
+    return true;
+  }
+
+  // 2. Tagged revision match: <tag>---<service-host>
+  const tripleDashIndex = rawClean.indexOf('---');
+  if (tripleDashIndex === -1) {
+    return false;
+  }
+
+  const tag = rawClean.substring(0, tripleDashIndex);
+  const serviceHost = clean.substring(clean.indexOf('---') + 3);
+
+  if (!isValidCloudRunRevisionTag(tag)) {
+    return false;
+  }
+
+  return approvedServices.includes(serviceHost);
+}
+
+export function isApprovedStagingCloudRunHost(hostname: string): boolean {
+  return isApprovedCloudRunHost(hostname, APPROVED_STAGING_CLOUD_RUN_SERVICES);
+}
+
+export function isApprovedProductionCloudRunHost(hostname: string): boolean {
+  return isApprovedCloudRunHost(hostname, APPROVED_PRODUCTION_CLOUD_RUN_SERVICES);
+}
+
+export function isApprovedStagingHost(hostname: string): boolean {
+  const clean = normalizeHostname(hostname);
+  return APPROVED_STAGING_HOSTS.includes(clean) || isApprovedStagingCloudRunHost(clean);
+}
+
+export function isApprovedProductionHost(hostname: string): boolean {
+  const clean = normalizeHostname(hostname);
+  return APPROVED_PRODUCTION_HOSTS.includes(clean) || isApprovedProductionCloudRunHost(clean);
+}
 
 /**
  * Normalizes a hostname by trimming, lowercasing, stripping any port suffix,
@@ -48,68 +246,15 @@ export function getApiBaseUrl(): string {
       trimmed.toLowerCase() !== 'undefined' &&
       trimmed.toLowerCase() !== 'null'
     ) {
-      const cleanBase = trimmed.replace(/\/+$/, '');
-
-      // In browser environment, perform origin and environment integrity checks
+      // In browser environment, strictly validate explicit API URL against active frontend host
       if (typeof window !== 'undefined' && window.location && window.location.hostname) {
-        const hostname = normalizeHostname(window.location.hostname);
-        const isProdHost = APPROVED_PRODUCTION_HOSTS.includes(hostname);
-        const isStagingHost = APPROVED_STAGING_HOSTS.includes(hostname);
-        const isDevHost = hostname === 'localhost' || hostname === '127.0.0.1';
-
-        // 1. Detect if VITE_API_URL accidentally targets the frontend origin itself
-        if (window.location.origin) {
-          try {
-            const parsed = new URL(cleanBase, window.location.origin);
-            const cleanOrigin = parsed.origin.toLowerCase();
-            const windowOrigin = (window.location.origin || '').trim().toLowerCase().replace(/\/+$/, '');
-
-            if (cleanOrigin === windowOrigin) {
-              if (isProdHost) {
-                console.warn(
-                  "⚠️ [EchoNote Config] VITE_API_URL points to the frontend origin. " +
-                  "Automatically rerouting API requests to the approved production Cloud Run backend."
-                );
-                return CLOUD_RUN_PRODUCTION_BACKEND;
-              } else if (isStagingHost) {
-                console.warn(
-                  "⚠️ [EchoNote Config] VITE_API_URL points to the frontend origin. " +
-                  "Automatically rerouting API requests to the approved staging Cloud Run backend."
-                );
-                return CLOUD_RUN_STAGING_BACKEND;
-              } else {
-                // Untrusted or unknown host pointing at frontend origin: FAIL CLOSED!
-                throw new Error(
-                  `EchoNote API Configuration Error: Untrusted frontend host "${hostname}". Cannot safely resolve Cloud Run backend.`
-                );
-              }
-            }
-          } catch (e: any) {
-            if (e?.message?.includes('EchoNote API Configuration Error')) {
-              throw e;
-            }
-          }
-        }
-
-        // 2. Prevent explicit API URLs from crossing environment boundaries or routing from untrusted hosts
-        if (cleanBase.startsWith('http://') || cleanBase.startsWith('https://')) {
-          const cleanBaseLower = cleanBase.toLowerCase();
-          const targetsStaging = cleanBaseLower === CLOUD_RUN_STAGING_BACKEND.toLowerCase() || cleanBaseLower.includes('echonote-staging');
-          const targetsProd = cleanBaseLower === CLOUD_RUN_PRODUCTION_BACKEND.toLowerCase() || cleanBaseLower.includes('echonote-zfo2izdqla');
-
-          if (isProdHost && targetsStaging) {
-            throw new Error('EchoNote API Configuration Error: Production frontend host cannot target staging backend.');
-          }
-          if (isStagingHost && targetsProd) {
-            throw new Error('EchoNote API Configuration Error: Staging frontend host cannot target production backend.');
-          }
-          if (!isProdHost && !isStagingHost && !isDevHost && (targetsProd || targetsStaging)) {
-            throw new Error(`EchoNote API Configuration Error: Untrusted host "${hostname}" cannot route to Cloud Run backend.`);
-          }
-        }
+        const frontendHost = normalizeHostname(window.location.hostname);
+        const frontendOrigin = window.location.origin || '';
+        return validateAndResolveApiUrl(trimmed, frontendHost, frontendOrigin);
       }
 
-      return cleanBase;
+      // In Node.js / test environments without window.location, strip trailing slashes
+      return trimmed.replace(/\/+$/, '');
     }
   }
 
@@ -117,22 +262,28 @@ export function getApiBaseUrl(): string {
   if (typeof window !== 'undefined' && window.location && window.location.hostname) {
     const hostname = normalizeHostname(window.location.hostname);
 
-    // 1. Approved Production Hosts -> Production Cloud Run
+    // 1. Approved Cloud Run Hosts (Staging or Production) -> Same-origin relative URLs ("")
+    // Ensures candidate revisions call their own backend directly rather than baseline.
+    if (isApprovedStagingCloudRunHost(hostname) || isApprovedProductionCloudRunHost(hostname)) {
+      return '';
+    }
+
+    // 2. Approved Production Vercel Hosts -> Production Cloud Run
     if (APPROVED_PRODUCTION_HOSTS.includes(hostname)) {
       return CLOUD_RUN_PRODUCTION_BACKEND;
     }
 
-    // 2. Approved Staging Hosts -> Staging Cloud Run
+    // 3. Approved Staging Vercel Hosts -> Staging Cloud Run
     if (APPROVED_STAGING_HOSTS.includes(hostname)) {
       return CLOUD_RUN_STAGING_BACKEND;
     }
 
-    // 3. Local Development Hosts -> Same-origin relative URLs forwarded by Vite dev proxy
+    // 4. Local Development Hosts -> Same-origin relative URLs forwarded by Vite dev proxy
     if (hostname === 'localhost' || hostname === '127.0.0.1') {
       return '';
     }
 
-    // 4. Unknown Vercel preview hosts, forks, arbitrary domains -> FAIL CLOSED!
+    // 5. Unknown Vercel preview hosts, forks, arbitrary domains -> FAIL CLOSED!
     throw new Error(
       `EchoNote API Configuration Error: Untrusted host "${hostname}". Unknown frontend host cannot resolve API backend.`
     );

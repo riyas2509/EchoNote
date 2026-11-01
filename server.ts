@@ -326,6 +326,55 @@ function getRazorpayClient(): Razorpay {
   return _razorpayInstance;
 }
 
+/**
+ * Validates whether an origin is an approved EchoNote Cloud Run origin
+ * (with optional valid revision tag) enforcing strict environment isolation.
+ */
+export function isApprovedEchoNoteCloudRunOrigin(origin: string, env: string = process.env.NODE_ENV || ''): boolean {
+  if (!origin || typeof origin !== 'string') return false;
+  let parsed: URL;
+  try {
+    parsed = new URL(origin);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== 'https:') return false;
+  // Extract raw host before WHATWG URL lowercase normalization to enforce strict DNS label casing
+  const rawHost = origin.replace(/^https?:\/\//i, '').split(/[:/?#]/)[0];
+  const host = parsed.hostname.toLowerCase();
+
+  // Parse optional Cloud Run revision tag: <tag>---<service-host>
+  let tag: string | null = null;
+  let serviceHost = host;
+  const tripleDashIdx = rawHost.indexOf('---');
+  if (tripleDashIdx !== -1) {
+    tag = rawHost.substring(0, tripleDashIdx);
+    serviceHost = host.substring(host.indexOf('---') + 3);
+    // DNS label: lowercase alphanumeric, internal hyphens, 1-63 chars
+    if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(tag)) {
+      return false;
+    }
+  }
+
+  const isStagingService =
+    serviceHost === 'echonote-staging-3fgo4kkjgq-uw.a.run.app' ||
+    serviceHost === 'echonote-staging-113524085497.us-west1.run.app';
+  const isProdService =
+    serviceHost === 'echonote-zfo2izdqla-uw.a.run.app';
+
+  // Environment isolation:
+  // In staging, reject production Cloud Run origins.
+  // In production, reject staging Cloud Run origins.
+  if (env === 'staging') {
+    return isStagingService;
+  }
+  if (env === 'production') {
+    return isProdService;
+  }
+
+  // Test, development, or unconfigured: accept either approved service
+  return isStagingService || isProdService;
+}
 async function startServer() {
   console.log("🚀 SERVER RESTARTED AT:", new Date().toISOString());
   const app = express();
@@ -407,11 +456,14 @@ async function startServer() {
         return callback(null, true);
       }
 
-      // Allow EchoNote Cloud Run and Firebase hosting previews
+      // Allow approved EchoNote Cloud Run service origins (with optional valid revision tags)
+      if (isApprovedEchoNoteCloudRunOrigin(cleanOrigin)) {
+        return callback(null, true);
+      }
+
+      // Allow Google AI Studio previews and Firebase hosting previews
       if (
         /^https:\/\/ais-(dev|pre)-[a-zA-Z0-9_-]+-[0-9]+\.[a-z0-9-]+\.run\.app$/.test(cleanOrigin) ||
-        /^https:\/\/echonote(-backend)?-[a-zA-Z0-9_-]+\.(a\.)?run\.app$/.test(cleanOrigin) ||
-        /^https:\/\/echonote(-backend)?-[0-9]+\.[a-z0-9-]+\.run\.app$/.test(cleanOrigin) ||
         cleanOrigin === "https://echonote-2509.web.app" ||
         cleanOrigin === "https://echonote-2509.firebaseapp.com"
       ) {

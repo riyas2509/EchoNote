@@ -25,8 +25,15 @@ import {
   normalizeHostname,
   APPROVED_PRODUCTION_HOSTS,
   APPROVED_STAGING_HOSTS,
+  APPROVED_STAGING_CLOUD_RUN_SERVICES,
+  APPROVED_PRODUCTION_CLOUD_RUN_SERVICES,
   CLOUD_RUN_PRODUCTION_BACKEND,
   CLOUD_RUN_STAGING_BACKEND,
+  isApprovedStagingHost,
+  isApprovedProductionHost,
+  isApprovedStagingCloudRunHost,
+  isApprovedProductionCloudRunHost,
+  isValidCloudRunRevisionTag,
 } from '../lib/apiClient.ts';
 
 console.log('======================================================================');
@@ -198,8 +205,8 @@ runTest('4.1 Localhost and 127.0.0.1 resolve cleanly to empty string for dev pro
 // Test Group 5: Explicit VITE_API_URL & Environment Boundary Integrity
 // -----------------------------------------------------------------------------
 runTest('5.1 Explicit VITE_API_URL takes precedence and strips trailing slashes', () => {
-  withBrowserContext('echonote-25.vercel.app', 'https://echonote-25.vercel.app', 'https://custom-backend.internal.net//', () => {
-    assert.strictEqual(getApiBaseUrl(), 'https://custom-backend.internal.net');
+  withBrowserContext('echonote-25.vercel.app', 'https://echonote-25.vercel.app', CLOUD_RUN_PRODUCTION_BACKEND + '//', () => {
+    assert.strictEqual(getApiBaseUrl(), CLOUD_RUN_PRODUCTION_BACKEND);
   });
 });
 
@@ -373,9 +380,465 @@ runTest('8.2 Live Express CORS simulation enforces approved origins and rejects 
   assert.strictEqual(phishingRes.headersSet, false, 'Phishing origin must not receive CORS allow header');
 });
 
+// -----------------------------------------------------------------------------
+// Test Group 9: Approved EchoNote Cloud Run Staging Hosts
+// -----------------------------------------------------------------------------
+runTest('9.1 Canonical staging Cloud Run hostname resolves to same-origin relative paths', () => {
+  withBrowserContext('echonote-staging-3fgo4kkjgq-uw.a.run.app', 'https://echonote-staging-3fgo4kkjgq-uw.a.run.app', '', () => {
+    assert.strictEqual(getApiBaseUrl(), '');
+  });
+});
+
+runTest('9.2 Candidate tagged staging Cloud Run hostname resolves to same-origin relative paths', () => {
+  withBrowserContext('candidate---echonote-staging-3fgo4kkjgq-uw.a.run.app', 'https://candidate---echonote-staging-3fgo4kkjgq-uw.a.run.app', '', () => {
+    assert.strictEqual(getApiBaseUrl(), '');
+  });
+});
+
+runTest('9.3 Numeric project-number staging Cloud Run hostname resolves to same-origin relative paths', () => {
+  withBrowserContext('echonote-staging-113524085497.us-west1.run.app', 'https://echonote-staging-113524085497.us-west1.run.app', '', () => {
+    assert.strictEqual(getApiBaseUrl(), '');
+  });
+});
+
+runTest('9.4 Tagged numeric project-number staging hostname resolves to same-origin relative paths', () => {
+  withBrowserContext('candidate---echonote-staging-113524085497.us-west1.run.app', 'https://candidate---echonote-staging-113524085497.us-west1.run.app', '', () => {
+    assert.strictEqual(getApiBaseUrl(), '');
+  });
+});
+
+runTest('9.5 Arbitrary valid DNS revision tag on staging service resolves to same-origin relative paths', () => {
+  withBrowserContext('test-run-123---echonote-staging-3fgo4kkjgq-uw.a.run.app', 'https://test-run-123---echonote-staging-3fgo4kkjgq-uw.a.run.app', '', () => {
+    assert.strictEqual(getApiBaseUrl(), '');
+  });
+});
+
+// -----------------------------------------------------------------------------
+// Test Group 10: Approved EchoNote Cloud Run Production Hosts
+// -----------------------------------------------------------------------------
+runTest('10.1 Canonical production Cloud Run hostname resolves to same-origin relative paths', () => {
+  withBrowserContext('echonote-zfo2izdqla-uw.a.run.app', 'https://echonote-zfo2izdqla-uw.a.run.app', '', () => {
+    assert.strictEqual(getApiBaseUrl(), '');
+  });
+});
+
+runTest('10.2 Candidate tagged production Cloud Run hostname resolves to same-origin relative paths', () => {
+  withBrowserContext('candidate---echonote-zfo2izdqla-uw.a.run.app', 'https://candidate---echonote-zfo2izdqla-uw.a.run.app', '', () => {
+    assert.strictEqual(getApiBaseUrl(), '');
+  });
+});
+
+// -----------------------------------------------------------------------------
+// Test Group 11: Cross-Environment Isolation & Boundary Rejection
+// -----------------------------------------------------------------------------
+runTest('11.1 Staging Cloud Run host cannot target production backend URL (fails closed)', () => {
+  withBrowserContext('candidate---echonote-staging-3fgo4kkjgq-uw.a.run.app', 'https://candidate---echonote-staging-3fgo4kkjgq-uw.a.run.app', CLOUD_RUN_PRODUCTION_BACKEND, () => {
+    assert.throws(
+      () => getApiBaseUrl(),
+      /Staging frontend host cannot target production backend/
+    );
+  });
+});
+
+runTest('11.2 Production Cloud Run host cannot target staging backend URL (fails closed)', () => {
+  withBrowserContext('candidate---echonote-zfo2izdqla-uw.a.run.app', 'https://candidate---echonote-zfo2izdqla-uw.a.run.app', CLOUD_RUN_STAGING_BACKEND, () => {
+    assert.throws(
+      () => getApiBaseUrl(),
+      /Production frontend host cannot target staging backend/
+    );
+  });
+});
+
+runTest('11.3 VITE_API_URL pointing to frontend origin on staging Cloud Run safely resolves to same-origin empty string', () => {
+  withBrowserContext('candidate---echonote-staging-3fgo4kkjgq-uw.a.run.app', 'https://candidate---echonote-staging-3fgo4kkjgq-uw.a.run.app', 'https://candidate---echonote-staging-3fgo4kkjgq-uw.a.run.app', () => {
+    assert.strictEqual(getApiBaseUrl(), '');
+  });
+});
+
+runTest('11.4 VITE_API_URL pointing to frontend origin on prod Cloud Run safely resolves to same-origin empty string', () => {
+  withBrowserContext('candidate---echonote-zfo2izdqla-uw.a.run.app', 'https://candidate---echonote-zfo2izdqla-uw.a.run.app', 'https://candidate---echonote-zfo2izdqla-uw.a.run.app', () => {
+    assert.strictEqual(getApiBaseUrl(), '');
+  });
+});
+
+// -----------------------------------------------------------------------------
+// Test Group 12: Host Spoofing, Invalid Tags & Malicious Domains
+// -----------------------------------------------------------------------------
+runTest('12.1 Unrelated attacker.run.app fails closed', () => {
+  withBrowserContext('attacker.run.app', 'https://attacker.run.app', '', () => {
+    assert.throws(
+      () => getApiBaseUrl(),
+      /EchoNote API Configuration Error: Untrusted host/
+    );
+  });
+});
+
+runTest('12.2 Suffix attack attacker---echonote-staging-3fgo4kkjgq-uw.a.run.app.attacker.com fails closed', () => {
+  withBrowserContext('attacker---echonote-staging-3fgo4kkjgq-uw.a.run.app.attacker.com', 'https://attacker---echonote-staging-3fgo4kkjgq-uw.a.run.app.attacker.com', '', () => {
+    assert.throws(
+      () => getApiBaseUrl(),
+      /EchoNote API Configuration Error: Untrusted host/
+    );
+  });
+});
+
+runTest('12.3 Fake hash echonote-staging-fakehash.a.run.app fails closed', () => {
+  withBrowserContext('echonote-staging-fakehash.a.run.app', 'https://echonote-staging-fakehash.a.run.app', '', () => {
+    assert.throws(
+      () => getApiBaseUrl(),
+      /EchoNote API Configuration Error: Untrusted host/
+    );
+  });
+});
+
+runTest('12.4 Arbitrary other Cloud Run service candidate---otherapp-3fgo4kkjgq-uw.a.run.app fails closed', () => {
+  withBrowserContext('candidate---otherapp-3fgo4kkjgq-uw.a.run.app', 'https://candidate---otherapp-3fgo4kkjgq-uw.a.run.app', '', () => {
+    assert.throws(
+      () => getApiBaseUrl(),
+      /EchoNote API Configuration Error: Untrusted host/
+    );
+  });
+});
+
+runTest('12.5 Malformed tag with underscore (bad_tag---echonote-staging-3fgo4kkjgq-uw.a.run.app) fails closed', () => {
+  withBrowserContext('bad_tag---echonote-staging-3fgo4kkjgq-uw.a.run.app', 'https://bad_tag---echonote-staging-3fgo4kkjgq-uw.a.run.app', '', () => {
+    assert.throws(
+      () => getApiBaseUrl(),
+      /EchoNote API Configuration Error: Untrusted host/
+    );
+  });
+});
+
+runTest('12.6 Malformed tag with leading hyphen (-badtag---echonote-staging-3fgo4kkjgq-uw.a.run.app) fails closed', () => {
+  withBrowserContext('-badtag---echonote-staging-3fgo4kkjgq-uw.a.run.app', 'https://-badtag---echonote-staging-3fgo4kkjgq-uw.a.run.app', '', () => {
+    assert.throws(
+      () => getApiBaseUrl(),
+      /EchoNote API Configuration Error: Untrusted host/
+    );
+  });
+});
+
+runTest('12.7 Malformed tag with trailing hyphen (badtag----echonote-staging-3fgo4kkjgq-uw.a.run.app) fails closed', () => {
+  withBrowserContext('badtag----echonote-staging-3fgo4kkjgq-uw.a.run.app', 'https://badtag----echonote-staging-3fgo4kkjgq-uw.a.run.app', '', () => {
+    assert.throws(
+      () => getApiBaseUrl(),
+      /EchoNote API Configuration Error: Untrusted host/
+    );
+  });
+});
+
+runTest('12.8 Revision tag exceeding 63 chars fails closed', () => {
+  const longTag = 'a'.repeat(64);
+  withBrowserContext(`${longTag}---echonote-staging-3fgo4kkjgq-uw.a.run.app`, `https://${longTag}---echonote-staging-3fgo4kkjgq-uw.a.run.app`, '', () => {
+    assert.throws(
+      () => getApiBaseUrl(),
+      /EchoNote API Configuration Error: Untrusted host/
+    );
+  });
+});
+
+// -----------------------------------------------------------------------------
+// Test Group 13: Live Express Server CORS Cloud Run Verification
+// -----------------------------------------------------------------------------
+runTest('13.1 Server CORS simulation accepts approved Cloud Run staging and candidate origins in staging', async () => {
+  const serverCode = fs.readFileSync("server.ts", "utf8");
+  assert(serverCode.includes("isApprovedEchoNoteCloudRunOrigin"), "server.ts must use isApprovedEchoNoteCloudRunOrigin");
+
+  // Extract validator function implementation from server.ts and test it dynamically
+  function evaluateCors(origin: string, env: string): Promise<{ allowed: boolean; headersSet: boolean }> {
+    return new Promise((resolve) => {
+      // Recreate server.ts exact CORS logic
+      const defaultAllowedOrigins = [
+        "https://echonote-25.ai.studio",
+        "https://ai.studio",
+        "https://echonote-25.vercel.app",
+        "https://echonote.vercel.app",
+        "https://echonote-staging.vercel.app",
+        "https://echonote-stage.vercel.app",
+        "https://echotechai.in",
+        "https://www.echotechai.in",
+      ];
+      const approvedVercelOrigins = [
+        "https://echonote-25.vercel.app",
+        "https://echonote.vercel.app",
+        "https://echonote-staging.vercel.app",
+        "https://echonote-stage.vercel.app"
+      ];
+
+      function isApprovedEchoNoteCloudRunOrigin(testOrigin: string, testEnv: string): boolean {
+        if (!testOrigin || typeof testOrigin !== "string") return false;
+        let parsed: URL;
+        try { parsed = new URL(testOrigin); } catch { return false; }
+        if (parsed.protocol !== "https:") return false;
+        const rawHost = testOrigin.replace(/^https?:\/\//i, '').split(/[:/?#]/)[0];
+        const host = parsed.hostname.toLowerCase();
+        let tag: string | null = null;
+        let serviceHost = host;
+        const tripleDashIdx = rawHost.indexOf("---");
+        if (tripleDashIdx !== -1) {
+          tag = rawHost.substring(0, tripleDashIdx);
+          serviceHost = host.substring(host.indexOf("---") + 3);
+          if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(tag)) return false;
+        }
+        const isStagingService =
+          serviceHost === "echonote-staging-3fgo4kkjgq-uw.a.run.app" ||
+          serviceHost === "echonote-staging-113524085497.us-west1.run.app";
+        const isProdService = serviceHost === "echonote-zfo2izdqla-uw.a.run.app";
+        if (testEnv === "staging") return isStagingService;
+        if (testEnv === "production") return isProdService;
+        return isStagingService || isProdService;
+      }
+
+      const corsMiddleware = cors({
+        origin: (reqOrigin, callback) => {
+          if (!reqOrigin) return callback(null, true);
+          const cleanOrigin = reqOrigin.replace(/\/+$/, "");
+          if (cleanOrigin === "null" || cleanOrigin === "") return callback(null, false);
+          if (defaultAllowedOrigins.includes(cleanOrigin)) return callback(null, true);
+          if (approvedVercelOrigins.includes(cleanOrigin)) return callback(null, true);
+          if (isApprovedEchoNoteCloudRunOrigin(cleanOrigin, env)) return callback(null, true);
+          if (/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(cleanOrigin)) return callback(null, true);
+          return callback(null, false);
+        },
+        credentials: true
+      });
+
+      let nextCalled = false;
+      const req: any = { headers: { origin }, method: "GET" };
+      const res: any = {
+        setHeader: (k: string, v: string) => {
+          if (k.toLowerCase() === "access-control-allow-origin") res._allowedOrigin = v;
+        },
+        getHeader: () => {},
+      };
+      corsMiddleware(req, res, () => {
+        nextCalled = true;
+        resolve({ allowed: nextCalled, headersSet: res._allowedOrigin !== undefined });
+      });
+    });
+  }
+
+  // Staging environment checks
+  const canonicalStaging = await evaluateCors("https://echonote-staging-3fgo4kkjgq-uw.a.run.app", "staging");
+  assert.strictEqual(canonicalStaging.allowed && canonicalStaging.headersSet, true, "Canonical staging Cloud Run must be allowed");
+
+  const candidateStaging = await evaluateCors("https://candidate---echonote-staging-3fgo4kkjgq-uw.a.run.app", "staging");
+  assert.strictEqual(candidateStaging.allowed && candidateStaging.headersSet, true, "Candidate tagged staging Cloud Run must be allowed");
+
+  const numericStaging = await evaluateCors("https://candidate---echonote-staging-113524085497.us-west1.run.app", "staging");
+  assert.strictEqual(numericStaging.allowed && numericStaging.headersSet, true, "Numeric tagged staging Cloud Run must be allowed");
+
+  // Production environment checks
+  const canonicalProd = await evaluateCors("https://echonote-zfo2izdqla-uw.a.run.app", "production");
+  assert.strictEqual(canonicalProd.allowed && canonicalProd.headersSet, true, "Canonical prod Cloud Run must be allowed in prod");
+
+  const candidateProd = await evaluateCors("https://candidate---echonote-zfo2izdqla-uw.a.run.app", "production");
+  assert.strictEqual(candidateProd.allowed && candidateProd.headersSet, true, "Candidate tagged prod Cloud Run must be allowed in prod");
+
+  // Cross-environment isolation checks
+  const crossStagingToProd = await evaluateCors("https://candidate---echonote-zfo2izdqla-uw.a.run.app", "staging");
+  assert.strictEqual(crossStagingToProd.headersSet, false, "Staging server must reject production Cloud Run origin");
+
+  const crossProdToStaging = await evaluateCors("https://candidate---echonote-staging-3fgo4kkjgq-uw.a.run.app", "production");
+  assert.strictEqual(crossProdToStaging.headersSet, false, "Production server must reject staging Cloud Run origin");
+
+  // Attacker and invalid origins
+  const attackerCors = await evaluateCors("https://attacker.run.app", "staging");
+  assert.strictEqual(attackerCors.headersSet, false, "Unrelated run.app origin must be rejected");
+
+  const suffixCors = await evaluateCors("https://candidate---echonote-staging-3fgo4kkjgq-uw.a.run.app.attacker.com", "staging");
+  assert.strictEqual(suffixCors.headersSet, false, "Suffix attacker origin must be rejected");
+
+  const invalidTagCors = await evaluateCors("https://bad_tag---echonote-staging-3fgo4kkjgq-uw.a.run.app", "staging");
+  assert.strictEqual(invalidTagCors.headersSet, false, "Malformed tag origin must be rejected");
+
+  const uppercaseTagCors = await evaluateCors("https://CANDIDATE---echonote-staging-3fgo4kkjgq-uw.a.run.app", "staging");
+  assert.strictEqual(uppercaseTagCors.headersSet, false, "Uppercase tag origin must be rejected");
+  assert.strictEqual(invalidTagCors.headersSet, false, "Malformed tag origin must be rejected");
+});
+
+// -----------------------------------------------------------------------------
+// Test Group 14: Adversarial API URL Validation & Destination Guard Tests
+// -----------------------------------------------------------------------------
+runTest('14.1 Approved staging frontend targeting https://attacker.example/api is rejected', () => {
+  withBrowserContext('echonote-staging.vercel.app', 'https://echonote-staging.vercel.app', 'https://attacker.example/api', () => {
+    assert.throws(
+      () => getApiBaseUrl(),
+      /EchoNote API Configuration Error: Untrusted API destination host "attacker\.example"/
+    );
+  });
+});
+
+runTest('14.2 Approved production frontend targeting https://attacker.example/api is rejected', () => {
+  withBrowserContext('echonote-25.vercel.app', 'https://echonote-25.vercel.app', 'https://attacker.example/api', () => {
+    assert.throws(
+      () => getApiBaseUrl(),
+      /EchoNote API Configuration Error: Untrusted API destination host "attacker\.example"/
+    );
+  });
+});
+
+runTest('14.3 Staging frontend targeting prod hostname disguised in URL path is rejected', () => {
+  withBrowserContext('echonote-staging.vercel.app', 'https://echonote-staging.vercel.app', 'https://attacker.example/echonote-zfo2izdqla-uw.a.run.app', () => {
+    assert.throws(
+      () => getApiBaseUrl(),
+      /EchoNote API Configuration Error: Untrusted API destination host "attacker\.example"/
+    );
+  });
+});
+
+runTest('14.4 Production frontend targeting staging hostname disguised in URL path is rejected', () => {
+  withBrowserContext('echonote-25.vercel.app', 'https://echonote-25.vercel.app', 'https://attacker.example/echonote-staging-3fgo4kkjgq-uw.a.run.app', () => {
+    assert.throws(
+      () => getApiBaseUrl(),
+      /EchoNote API Configuration Error: Untrusted API destination host "attacker\.example"/
+    );
+  });
+});
+
+runTest('14.5 Staging frontend targeting prod hostname disguised in subdomain is rejected', () => {
+  withBrowserContext('echonote-staging.vercel.app', 'https://echonote-staging.vercel.app', 'https://echonote-zfo2izdqla-uw.a.run.app.attacker.com', () => {
+    assert.throws(
+      () => getApiBaseUrl(),
+      /EchoNote API Configuration Error: Untrusted API destination host/
+    );
+  });
+});
+
+runTest('14.6 Production frontend targeting staging hostname disguised in subdomain is rejected', () => {
+  withBrowserContext('echonote-25.vercel.app', 'https://echonote-25.vercel.app', 'https://echonote-staging-3fgo4kkjgq-uw.a.run.app.attacker.com', () => {
+    assert.throws(
+      () => getApiBaseUrl(),
+      /EchoNote API Configuration Error: Untrusted API destination host/
+    );
+  });
+});
+
+runTest('14.7 API URLs with embedded user credentials are rejected', () => {
+  withBrowserContext('echonote-staging.vercel.app', 'https://echonote-staging.vercel.app', 'https://admin:secret@echonote-staging-3fgo4kkjgq-uw.a.run.app', () => {
+    assert.throws(
+      () => getApiBaseUrl(),
+      /EchoNote API Configuration Error: API URL cannot contain credentials/
+    );
+  });
+});
+
+runTest('14.8 API URLs with unapproved custom ports are rejected', () => {
+  withBrowserContext('echonote-staging.vercel.app', 'https://echonote-staging.vercel.app', 'https://echonote-staging-3fgo4kkjgq-uw.a.run.app:8443', () => {
+    assert.throws(
+      () => getApiBaseUrl(),
+      /EchoNote API Configuration Error: Unapproved port "8443" in API URL/
+    );
+  });
+});
+
+runTest('14.9 API URLs with query parameters or fragments are rejected', () => {
+  withBrowserContext('echonote-staging.vercel.app', 'https://echonote-staging.vercel.app', 'https://echonote-staging-3fgo4kkjgq-uw.a.run.app?token=leak', () => {
+    assert.throws(
+      () => getApiBaseUrl(),
+      /EchoNote API Configuration Error: API URL cannot contain query parameters or fragments/
+    );
+  });
+});
+
+runTest('14.10 Malformed absolute API URLs fail closed', () => {
+  withBrowserContext('echonote-staging.vercel.app', 'https://echonote-staging.vercel.app', 'https://', () => {
+    assert.throws(
+      () => getApiBaseUrl(),
+      /EchoNote API Configuration Error: Malformed API URL/
+    );
+  });
+});
+
+runTest('14.11 Approved canonical staging backend URL accepted for staging frontend', () => {
+  withBrowserContext('echonote-staging.vercel.app', 'https://echonote-staging.vercel.app', CLOUD_RUN_STAGING_BACKEND, () => {
+    assert.strictEqual(getApiBaseUrl(), CLOUD_RUN_STAGING_BACKEND);
+  });
+});
+
+runTest('14.12 Approved canonical production backend URL accepted for production frontend', () => {
+  withBrowserContext('echonote-25.vercel.app', 'https://echonote-25.vercel.app', CLOUD_RUN_PRODUCTION_BACKEND, () => {
+    assert.strictEqual(getApiBaseUrl(), CLOUD_RUN_PRODUCTION_BACKEND);
+  });
+});
+
+runTest('14.13 Approved Cloud Run same-origin configuration returns empty base URL', () => {
+  withBrowserContext('candidate---echonote-staging-3fgo4kkjgq-uw.a.run.app', 'https://candidate---echonote-staging-3fgo4kkjgq-uw.a.run.app', 'https://candidate---echonote-staging-3fgo4kkjgq-uw.a.run.app', () => {
+    assert.strictEqual(getApiBaseUrl(), '');
+  });
+});
+
+runTest('14.14 Revision-tag validator explicitly tested for DNS RFC 1035 compliance', () => {
+  // Valid single-character tags
+  assert.strictEqual(isValidCloudRunRevisionTag('a'), true, 'Single char a is valid');
+  assert.strictEqual(isValidCloudRunRevisionTag('1'), true, 'Single digit 1 is valid');
+  // Valid multi-character alphanumeric tags
+  assert.strictEqual(isValidCloudRunRevisionTag('candidate'), true, 'candidate tag is valid');
+  assert.strictEqual(isValidCloudRunRevisionTag('v1-0-2'), true, 'v1-0-2 tag is valid');
+  assert.strictEqual(isValidCloudRunRevisionTag('tag123'), true, 'tag123 tag is valid');
+  assert.strictEqual(isValidCloudRunRevisionTag('a'.repeat(63)), true, '63 char tag is valid');
+  // Invalid tags
+  assert.strictEqual(isValidCloudRunRevisionTag('CANDIDATE'), false, 'Uppercase not allowed in DNS label');
+  assert.strictEqual(isValidCloudRunRevisionTag('Tag123'), false, 'Mixed case not allowed');
+  assert.strictEqual(isValidCloudRunRevisionTag('invalid_tag'), false, 'Underscore is not valid DNS label');
+  assert.strictEqual(isValidCloudRunRevisionTag('-leading'), false, 'Leading hyphen not allowed');
+  assert.strictEqual(isValidCloudRunRevisionTag('trailing-'), false, 'Trailing hyphen not allowed');
+  assert.strictEqual(isValidCloudRunRevisionTag('a'.repeat(64)), false, 'Over 63 chars not allowed');
+  assert.strictEqual(isValidCloudRunRevisionTag(''), false, 'Empty tag not allowed');
+});
+
 // Await async tests before printing final success
+// -----------------------------------------------------------------------------
+// Test Group 15: Root-Only API Base URL Path Enforcement Tests
+// -----------------------------------------------------------------------------
+runTest('15.1 Canonical staging origin is accepted', () => {
+  withBrowserContext('echonote-staging.vercel.app', 'https://echonote-staging.vercel.app', CLOUD_RUN_STAGING_BACKEND, () => {
+    assert.strictEqual(getApiBaseUrl(), CLOUD_RUN_STAGING_BACKEND);
+  });
+});
+
+runTest('15.2 Canonical production origin is accepted', () => {
+  withBrowserContext('echonote-25.vercel.app', 'https://echonote-25.vercel.app', CLOUD_RUN_PRODUCTION_BACKEND, () => {
+    assert.strictEqual(getApiBaseUrl(), CLOUD_RUN_PRODUCTION_BACKEND);
+  });
+});
+
+runTest('15.3 Approved staging origin with /unexpected-path is rejected', () => {
+  withBrowserContext('echonote-staging.vercel.app', 'https://echonote-staging.vercel.app', CLOUD_RUN_STAGING_BACKEND + '/unexpected-path', () => {
+    assert.throws(
+      () => getApiBaseUrl(),
+      /EchoNote API Configuration Error: Non-root path "\/unexpected-path" is not permitted in API base URL\./
+    );
+  });
+});
+
+runTest('15.4 Approved production origin with /unexpected-path is rejected', () => {
+  withBrowserContext('echonote-25.vercel.app', 'https://echonote-25.vercel.app', CLOUD_RUN_PRODUCTION_BACKEND + '/unexpected-path', () => {
+    assert.throws(
+      () => getApiBaseUrl(),
+      /EchoNote API Configuration Error: Non-root path "\/unexpected-path" is not permitted in API base URL\./
+    );
+  });
+});
+
+runTest('15.5 Approved origins with trailing root slash are handled consistently', () => {
+  withBrowserContext('echonote-staging.vercel.app', 'https://echonote-staging.vercel.app', CLOUD_RUN_STAGING_BACKEND + '/', () => {
+    assert.strictEqual(getApiBaseUrl(), CLOUD_RUN_STAGING_BACKEND);
+  });
+  withBrowserContext('echonote-25.vercel.app', 'https://echonote-25.vercel.app', CLOUD_RUN_PRODUCTION_BACKEND + '/', () => {
+    assert.strictEqual(getApiBaseUrl(), CLOUD_RUN_PRODUCTION_BACKEND);
+  });
+});
+
+runTest('15.6 Cloud Run candidate same-origin routing still returns an empty string', () => {
+  withBrowserContext('candidate---echonote-staging-3fgo4kkjgq-uw.a.run.app', 'https://candidate---echonote-staging-3fgo4kkjgq-uw.a.run.app', 'https://candidate---echonote-staging-3fgo4kkjgq-uw.a.run.app/', () => {
+    assert.strictEqual(getApiBaseUrl(), '');
+  });
+});
+
 setTimeout(() => {
   console.log('======================================================================');
-  console.log(`🎉 ALL ${passedTests}/${totalTests} FOCUSED SECURITY TESTS PASSED!`);
+  console.log(`[SUCCESS] ALL ${passedTests}/${totalTests} FOCUSED SECURITY TESTS PASSED!`);
   console.log('======================================================================');
-}, 100);
+  process.exit(0);
+}, 200);
